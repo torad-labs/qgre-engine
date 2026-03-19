@@ -122,23 +122,65 @@ for epoch in range(10):
 
 ## Bring Your Own Domain
 
-The engine is domain-agnostic. You provide:
+The engine is domain-agnostic. You provide three things:
 
 1. **A reward function** returning `RewardResult` with per-quality `scores` dict
-2. **A quality→step mapping** (`STEP_QUALITIES` in `segments.py`)
-3. **Training data** as a parquet or list of prompt dicts
+2. **A step_qualities mapping** — which qualities belong to which step (any number of steps)
+3. **A segmenter** (optional) — how to split completions into step regions
 
 The engine handles everything else: generation, advantage computation, loss, optimization, checkpointing, logging.
 
 ```python
-# Your quality → step mapping
-STEP_QUALITIES = {
-    1: ["q_format_tags", "q_tag_content"],      # Step 1: format
-    2: ["q_grounding"],                          # Step 2: grounding
-    3: ["q_chain_coherence", "q_consistency"],   # Step 3: reasoning
-    4: ["q_accuracy", "q_node_f1"],              # Step 4: output
+from qgre.trainer import QGRETrainer
+from qgre.segments import qwen3_xml_segmenter, uniform_segmenter
+
+# Example 1: HIF hypergraph scanning (5 steps, XML tags)
+hif_qualities = {
+    1: ["q_valid_json", "q_hif_schema"],
+    2: ["q_node_grounding", "q_node_verbatim"],
+    3: ["q_incidence_refs_nodes", "q_internal_consistency"],
+    4: ["q_existence_correct", "q_archetype_correct"],
+    5: ["q_node_f1", "q_edge_f1"],
 }
+
+trainer = QGRETrainer(
+    model=model, tokenizer=tokenizer, reward_fn=hif_reward_fn,
+    config=cfg, step_qualities=hif_qualities, segmenter=qwen3_xml_segmenter,
+)
+
+# Example 2: Math (1 step, uniform advantages — equivalent to standard GRPO)
+math_qualities = {1: ["q_correct_answer"]}
+
+trainer = QGRETrainer(
+    model=model, tokenizer=tokenizer, reward_fn=math_reward_fn,
+    config=cfg, step_qualities=math_qualities, segmenter=uniform_segmenter,
+)
+
+# Example 3: Custom segmenter for JSON-structured outputs
+def my_json_segmenter(token_ids: list[int]) -> list[str]:
+    """Your custom logic to split token IDs into STEP_1, STEP_2, etc."""
+    # Return list of region labels, same length as token_ids
+    ...
+
+trainer = QGRETrainer(
+    model=model, tokenizer=tokenizer, reward_fn=my_reward_fn,
+    config=cfg, step_qualities=my_qualities, segmenter=my_json_segmenter,
+)
 ```
+
+Step qualities can also be set in the YAML config:
+
+```yaml
+algorithm:
+  step_qualities:
+    1: [q_valid_json, q_schema]
+    2: [q_grounding]
+    3: [q_consistency]
+    4: [q_accuracy]
+    5: [q_f1_score]
+```
+
+**Phase gating is automatic.** Phase N includes all qualities from steps 1 through N. Phase 1 = only step 1 qualities. Phase 5 = all qualities. The reward function controls which phase is active via `RewardResult.phase`.
 
 ## Critical: Unsloth Mode Switching
 
