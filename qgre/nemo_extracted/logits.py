@@ -18,23 +18,42 @@
 import torch
 
 
-def logprobs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-    """Compute log probabilities of labels given logits.
+def logprobs_from_logits(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    chunk_size: int = 256,
+) -> torch.Tensor:
+    """Compute log probabilities of labels given logits — memory efficient.
 
-    Memory-efficient: log_softmax in native dtype (bf16), gather first (tiny),
-    then cast gathered values to float32. Avoids allocating a full float32 copy
-    of the vocab-sized logits tensor (2.3GB per seq × 4096 × 151K vocab).
+    Chunks along the sequence dimension to avoid materializing a full
+    [batch, seq, vocab] tensor. Each chunk: log_softmax → gather → discard.
+    Peak memory: batch × chunk_size × vocab (not batch × full_seq × vocab).
+
+    For 1 × 256 × 151936 in bf16 = 74MB per chunk (vs 1.2GB for full 4096 seq).
+    Inspired by Liger Kernel's chunked cross entropy approach (linkedin/Liger-Kernel).
 
     Args:
-        logits: [batch, seq, vocab] raw model output
+        logits: [batch, seq, vocab] raw model output (any dtype)
         labels: [batch, seq] token IDs to gather log probs for
+        chunk_size: tokens per chunk (lower = less memory, slightly slower)
 
     Returns:
         [batch, seq] log probabilities for each token (float32)
     """
-    log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-    gathered = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
-    return gathered.to(torch.float32)
+    batch, seq_len, vocab = logits.shape
+    result = torch.zeros(batch, seq_len, dtype=torch.float32, device=logits.device)
+
+    for start in range(0, seq_len, chunk_size):
+        end = min(start + chunk_size, seq_len)
+        chunk_logits = logits[:, start:end, :]
+        chunk_labels = labels[:, start:end]
+
+        chunk_lp = torch.nn.functional.log_softmax(chunk_logits, dim=-1)
+        result[:, start:end] = chunk_lp.gather(
+            dim=-1, index=chunk_labels.unsqueeze(-1)
+        ).squeeze(-1).to(torch.float32)
+
+    return result
 
 
 def compute_response_logprobs(

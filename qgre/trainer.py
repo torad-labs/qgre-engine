@@ -109,11 +109,31 @@ class QGRETrainer:
         self.scheduler: Any = None
 
     def setup_optimizer(self):
-        """Create optimizer and LR scheduler from config."""
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=self.config.training.lr,
-        )
+        """Create optimizer and LR scheduler from config.
+
+        Uses AdamW8bit from bitsandbytes for ~4x memory savings on optimizer states.
+        Falls back to regular AdamW if bitsandbytes not available.
+        """
+        # AdamW8bit saves ~4x memory on optimizer states (PLAN.md line 323)
+        # Requires GPU tensors — falls back to regular AdamW on CPU
+        use_8bit = False
+        try:
+            device = next(self.model.parameters()).device
+            if device.type == "cuda":
+                from bitsandbytes.optim import AdamW8bit
+                self.optimizer = AdamW8bit(
+                    self.model.parameters(),
+                    lr=self.config.training.lr,
+                )
+                use_8bit = True
+        except (ImportError, StopIteration):
+            pass
+
+        if not use_8bit:
+            self.optimizer = torch.optim.AdamW(
+                self.model.parameters(),
+                lr=self.config.training.lr,
+            )
 
         cfg = self.config.training
         if cfg.lr_scheduler == "cosine":
