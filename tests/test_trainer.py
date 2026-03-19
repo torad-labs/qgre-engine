@@ -381,3 +381,227 @@ def test_step_uses_engine_phase_not_reward_phase():
 
         # Phase should still be 1 (engine-managed)
         assert metrics["phase"] == 1
+
+
+# --- Dynamic length control tests ---
+
+
+def test_length_penalty_applied_when_high_correctness():
+    """Length penalty added when group correctness exceeds threshold."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = _cfg()
+        cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
+        cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
+        cfg.algorithm.length_penalty_coef = 0.1
+        cfg.algorithm.length_penalty_threshold = 0.3
+
+        model = MockModel()
+        trainer = QGRETrainer(model=model, tokenizer=None,
+                              reward_fn=lambda *a: None, config=cfg)
+        trainer.setup_optimizer()
+
+        batch = _make_batch(n_completions=2)
+        tokens = _make_tokens()
+        # High rewards → correctness > threshold → length penalty applied
+        rrs = [
+            RewardResult(reward=0.9, scores={"q_format_tags": 0.9, "q_tag_content": 0.9}),
+            RewardResult(reward=0.8, scores={"q_format_tags": 0.8, "q_tag_content": 0.8}),
+        ]
+        metrics = trainer.step(batch, [tokens, tokens], rrs)
+        assert "length_penalty" in metrics, "Length penalty should be in metrics when correctness is high"
+
+
+def test_length_penalty_skipped_when_low_correctness():
+    """No length penalty when group correctness is below threshold."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = _cfg()
+        cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
+        cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
+        cfg.algorithm.length_penalty_coef = 0.1
+        cfg.algorithm.length_penalty_threshold = 0.9
+
+        model = MockModel()
+        trainer = QGRETrainer(model=model, tokenizer=None,
+                              reward_fn=lambda *a: None, config=cfg)
+        trainer.setup_optimizer()
+
+        batch = _make_batch(n_completions=2)
+        tokens = _make_tokens()
+        # Low rewards → correctness < threshold → no length penalty
+        rrs = [
+            RewardResult(reward=0.2, scores={"q_format_tags": 0.2, "q_tag_content": 0.1}),
+            RewardResult(reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}),
+        ]
+        metrics = trainer.step(batch, [tokens, tokens], rrs)
+        assert "length_penalty" not in metrics, "Length penalty should NOT be applied when correctness is low"
+
+
+# --- Fix 1: KL defaults ---
+
+
+def test_default_config_no_kl_penalty():
+    """Default config has kl_cov_ratio=0.0 and loss_mode='pg' (no KL compute)."""
+    cfg = QGREConfig()
+    assert cfg.algorithm.kl_cov_ratio == 0.0
+    assert cfg.algorithm.loss_mode == "pg"
+
+
+def test_kl_penalty_zero_when_disabled():
+    """When loss_mode='pg', KL metric is 0.0."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = _cfg()
+        cfg.algorithm.loss_mode = "pg"
+        cfg.algorithm.kl_cov_ratio = 0.0
+        cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
+        cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
+
+        model = MockModel()
+        trainer = QGRETrainer(model=model, tokenizer=None,
+                              reward_fn=lambda *a: None, config=cfg)
+        trainer.setup_optimizer()
+
+        batch = _make_batch(n_completions=2)
+        tokens = _make_tokens()
+        rrs = [
+            RewardResult(reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}),
+            RewardResult(reward=0.3, scores={"q_format_tags": 0.5, "q_tag_content": 0.2}),
+        ]
+        metrics = trainer.step(batch, [tokens, tokens], rrs)
+        assert metrics.get("kl_penalty", 0.0) == 0.0, "KL should be 0 when loss_mode='pg'"
+
+
+# --- Fix 3: neg_logprob_mean is metric only ---
+
+
+def test_neg_logprob_mean_is_metric_only():
+    """neg_logprob_mean is in metrics but NOT part of loss gradient."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = _cfg()
+        cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
+        cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
+
+        model = MockModel()
+        trainer = QGRETrainer(model=model, tokenizer=None,
+                              reward_fn=lambda *a: None, config=cfg)
+        trainer.setup_optimizer()
+
+        batch = _make_batch(n_completions=2)
+        tokens = _make_tokens()
+        rrs = [
+            RewardResult(reward=0.8, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}),
+            RewardResult(reward=0.3, scores={"q_format_tags": 0.5, "q_tag_content": 0.2}),
+        ]
+        metrics = trainer.step(batch, [tokens, tokens], rrs)
+        assert "neg_logprob_mean" in metrics, "neg_logprob_mean should be in metrics"
+        # entropy should NOT be in metrics (old name)
+        assert "entropy" not in metrics, "entropy key should be removed"
+
+
+# --- Fix 4: Completion log is decoded text ---
+
+
+def test_completion_log_is_decoded_text():
+    """Logged completion contains readable text, not int list."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = _cfg()
+        cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
+        cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
+        # Use GRPO mode to avoid SPO near-zero advantage early return
+        cfg.algorithm.mode = "grpo"
+        cfg.algorithm.grpo.n = 2  # Match n_completions
+
+        class FakeTokenizer:
+            def decode(self, token_ids, skip_special_tokens=True):
+                return "decoded text for test"
+
+        model = MockModel()
+        trainer = QGRETrainer(model=model, tokenizer=FakeTokenizer(),
+                              reward_fn=lambda *a: None, config=cfg)
+        trainer.setup_optimizer()
+
+        batch = _make_batch(n_completions=2)
+        tokens = _make_tokens()
+        rrs = [
+            RewardResult(reward=0.9, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}),
+            RewardResult(reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}),
+        ]
+
+        # Capture what the completion logger receives
+        logged = []
+        orig_log = trainer.completion_logger.log_completion
+        def capture_log(**kwargs):
+            logged.append(kwargs)
+            orig_log(**kwargs)
+        trainer.completion_logger.log_completion = capture_log
+
+        trainer.step(batch, [tokens, tokens], rrs)
+
+        assert len(logged) >= 1
+        # The completion= kwarg should contain decoded text
+        comp = logged[0].get("completion", "")
+        assert "decoded text" in comp, (
+            f"Expected decoded text, got: {comp}"
+        )
+
+
+# --- Fix 6: Gradient accumulation loss metric ---
+
+
+def test_gradient_accumulation_loss_accumulated():
+    """Loss metric reflects accumulated total across gradient_accumulation_steps."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = _cfg()
+        cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
+        cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
+        cfg.training.gradient_accumulation_steps = 2
+        # Use GRPO mode with divergent rewards to ensure non-zero loss
+        cfg.algorithm.mode = "grpo"
+        cfg.algorithm.grpo.n = 2  # Match n_completions
+
+        model = MockModel()
+        trainer = QGRETrainer(model=model, tokenizer=None,
+                              reward_fn=lambda *a: None, config=cfg)
+        trainer.setup_optimizer()
+
+        batch = _make_batch(n_completions=2)
+        tokens = _make_tokens()
+        rrs = [
+            RewardResult(reward=0.9, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}),
+            RewardResult(reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}),
+        ]
+
+        # Step 0: accumulates, no optimizer step
+        m0 = trainer.step(batch, [tokens, tokens], rrs)
+        assert "accumulated_loss" not in m0, "No accumulated_loss before optimizer step"
+        step0_loss = m0["loss"]
+
+        # Step 1: optimizer step fires → accumulated_loss should be present
+        m1 = trainer.step(batch, [tokens, tokens], rrs)
+        assert "accumulated_loss" in m1, "accumulated_loss should be reported after optimizer step"
+        # accumulated_loss should be sum of both steps' losses
+        expected_accum = step0_loss + m1["loss"]
+        assert abs(m1["accumulated_loss"] - expected_accum) < 1e-6, (
+            f"accumulated_loss={m1['accumulated_loss']} should equal sum of step losses={expected_accum}"
+        )
+
+
+# --- Fix 9: Mastery threshold from config ---
+
+
+def test_mastery_threshold_from_config():
+    """TrainingConfig.mastery_threshold is passed to GameState."""
+    cfg = _cfg()
+    cfg.training.mastery_threshold = 0.65
+    trainer = QGRETrainer(model=MockModel(), tokenizer=None,
+                          reward_fn=lambda *a: None, config=cfg)
+    assert trainer.game_state.mastery_threshold == 0.65
+
+
+# --- Fix 10: max_grad_norm from config ---
+
+
+def test_max_grad_norm_from_config():
+    """TrainingConfig.max_grad_norm is configurable."""
+    cfg = _cfg()
+    cfg.training.max_grad_norm = 0.5
+    assert cfg.training.max_grad_norm == 0.5

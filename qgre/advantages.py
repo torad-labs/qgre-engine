@@ -67,10 +67,13 @@ class QGREStepAdvantageEstimator:
         step_qualities: dict[int, list[str]] | None = None,
         segmenter: Segmenter | None = None,
         normalize_advantages: bool = True,
+        filter_groups: bool = True,
     ):
         self.lr = lr
         self.mode = mode
         self.normalize_advantages = normalize_advantages
+        self.filter_groups = filter_groups
+        self._reward_key_checked = False
         if step_qualities is None:
             raise ValueError(
                 "step_qualities is required. Pass a dict mapping step numbers to quality names, e.g.:\n"
@@ -97,6 +100,24 @@ class QGREStepAdvantageEstimator:
             (batch_advantages, batch_regions) — per-token advantages and region labels
         """
         batch_size = len(batch_token_ids)
+
+        # First-batch invariant: check reward keys overlap with step_qualities
+        if not self._reward_key_checked and batch_reward_results:
+            import warnings
+            all_quality_keys = set()
+            for qs in self.step_qualities.values():
+                all_quality_keys.update(qs)
+            all_reward_keys = set()
+            for rr in batch_reward_results:
+                all_reward_keys.update(rr.scores.keys())
+            overlap = all_quality_keys & all_reward_keys
+            if not overlap:
+                warnings.warn(
+                    f"Reward key mismatch: reward_fn returns {sorted(all_reward_keys)} "
+                    f"but step_qualities expects {sorted(all_quality_keys)}. "
+                    f"All step rewards will be 0.0 — training has no signal."
+                )
+            self._reward_key_checked = True
 
         # Phase 1: Segment tokens + compute per-step rewards
         all_regions: list[list[str]] = []
@@ -203,13 +224,49 @@ class QGREStepAdvantageEstimator:
                 group_rewards = [all_step_rewards[i].get(step_num, 0.0) for i in range(start, end)]
                 mean = float(np.mean(group_rewards))
                 std = float(np.std(group_rewards))
-                if std < 1e-8:
+                if std < 1e-8 and self.filter_groups:
                     # DAPO Dynamic Sampling: all-identical rewards → zero advantage (no signal)
                     for i in range(start, end):
                         step_advs[step_num][i] = 0.0
                 else:
+                    # Mean-only subtraction: outer GDPO loop handles normalization per-step.
+                    # No std division here — GDPO replaces group-level std normalization.
                     for i in range(start, end):
-                        step_advs[step_num][i] = (all_step_rewards[i].get(step_num, 0.0) - mean) / (std + 1e-8)
+                        step_advs[step_num][i] = all_step_rewards[i].get(step_num, 0.0) - mean
+
+    def adapt_lr(
+        self,
+        kl: float,
+        kl_threshold: float = 0.1,
+        kl_factor: float = 2.0,
+        lr_factor: float = 1.5,
+        min_lr: float = 0.01,
+        max_lr: float = 0.5,
+    ):
+        """KL-adaptive SPO learning rate (SPO paper Algorithm 1).
+
+        Decrease lr when KL high (model drifting), increase when KL low (stagnating).
+        """
+        if kl > kl_factor * kl_threshold:
+            self.lr = max(self.lr / lr_factor, min_lr)
+        elif kl < kl_threshold / kl_factor:
+            self.lr = min(self.lr * lr_factor, max_lr)
+
+    def get_prompt_priorities(self) -> dict[int, float]:
+        """Return |mean advantage| per prompt for prioritized sampling (SPO paper Section 3.2).
+
+        Prompts with large |advantage| are sampled more often — adaptive curriculum.
+        Returns dict mapping prompt_id → priority weight (higher = sample more).
+        """
+        priorities: dict[int, float] = {}
+        for pid, steps in self.V.items():
+            if not steps:
+                continue
+            # Use mean |V| across steps as priority proxy — prompts where the model
+            # is far from baseline have high learning signal
+            mean_abs_v = float(np.mean([abs(v) for v in steps.values()])) if steps else 0.0
+            priorities[pid] = mean_abs_v
+        return priorities
 
     def on_tier_advance(self, new_tier: int, prompt_tier_map: dict[int, int]):
         """Reset SPO baseline for the NEW step only — preserve learned baselines for mastered steps."""

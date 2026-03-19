@@ -532,3 +532,172 @@ def test_gdpo_batch_size_1_no_nan():
     )
 
     assert advs[0].isfinite().all(), "batch_size=1 produced NaN advantages"
+
+
+# --- KL-adaptive SPO learning rate tests ---
+
+
+def test_kl_adaptive_lr_decrease_on_high_kl():
+    """High KL → lr decreases."""
+    estimator = QGREStepAdvantageEstimator(lr=0.1, mode="spo", step_qualities=STEP_QUALITIES, segmenter=XML_SEG)
+    initial_lr = estimator.lr
+    estimator.adapt_lr(kl=0.5, kl_threshold=0.1, kl_factor=2.0, lr_factor=1.5)
+    assert estimator.lr < initial_lr, f"lr should decrease: {estimator.lr} >= {initial_lr}"
+    assert estimator.lr == pytest.approx(initial_lr / 1.5)
+
+
+def test_kl_adaptive_lr_increase_on_low_kl():
+    """Low KL → lr increases."""
+    estimator = QGREStepAdvantageEstimator(lr=0.1, mode="spo", step_qualities=STEP_QUALITIES, segmenter=XML_SEG)
+    initial_lr = estimator.lr
+    estimator.adapt_lr(kl=0.01, kl_threshold=0.1, kl_factor=2.0, lr_factor=1.5)
+    assert estimator.lr > initial_lr, f"lr should increase: {estimator.lr} <= {initial_lr}"
+    assert estimator.lr == pytest.approx(initial_lr * 1.5)
+
+
+# --- Prioritized prompt sampling tests ---
+
+
+def test_get_prompt_priorities_returns_abs_v():
+    """get_prompt_priorities returns mean |V| per prompt."""
+    estimator = QGREStepAdvantageEstimator(lr=0.1, mode="spo", step_qualities=STEP_QUALITIES, segmenter=XML_SEG)
+    tokens = _make_completion_tokens()
+
+    rr_high = _make_reward_result(step1_score=1.0, step4_score=1.0)
+    rr_low = _make_reward_result(step1_score=0.0, step4_score=0.0)
+
+    # Build up V values
+    for _ in range(10):
+        estimator.compute_advantages(
+            batch_prompt_ids=[1, 2],
+            batch_token_ids=[tokens, tokens],
+            batch_reward_results=[rr_high, rr_low],
+            batch_active_qualities=[ALL_QUALITIES, ALL_QUALITIES],
+        )
+
+    priorities = estimator.get_prompt_priorities()
+    assert 1 in priorities and 2 in priorities
+    assert priorities[1] > 0 or priorities[2] > 0, "At least one prompt should have nonzero priority"
+
+
+# --- Fix 2: GRPO no double normalization ---
+
+
+def test_grpo_no_double_normalization():
+    """GRPO inner loop does mean-only subtraction, outer GDPO handles full normalization."""
+    estimator = QGREStepAdvantageEstimator(
+        lr=0.1, mode="grpo", step_qualities=STEP_QUALITIES, segmenter=XML_SEG,
+        normalize_advantages=True,
+    )
+    tokens = _make_completion_tokens()
+
+    # Two completions with different step1 scores
+    rr_high = _make_reward_result(step1_score=1.0, step4_score=0.5)
+    rr_low = _make_reward_result(step1_score=0.0, step4_score=0.5)
+
+    advs, _ = estimator.compute_advantages(
+        batch_prompt_ids=[1, 2],
+        batch_token_ids=[tokens, tokens],
+        batch_reward_results=[rr_high, rr_low],
+        batch_active_qualities=[ALL_QUALITIES, ALL_QUALITIES],
+        group_size=2,
+    )
+
+    # After GDPO normalization, step1 advantages should be non-zero (different rewards)
+    regions = segment_completion(tokens)
+    step1_idx = next(t for t, r in enumerate(regions) if r == "STEP_1")
+    adv_high = advs[0][step1_idx].item()
+    adv_low = advs[1][step1_idx].item()
+    assert adv_high > adv_low, f"High-reward should have higher advantage: {adv_high} vs {adv_low}"
+
+    # Step4 should have ~0 advantages (both have same score)
+    step4_idx = next(t for t, r in enumerate(regions) if r == "STEP_4")
+    step4_vals = [advs[i][step4_idx].item() for i in range(2)]
+    assert all(abs(v) < 0.01 for v in step4_vals), f"Step 4 same-score should be ~0: {step4_vals}"
+
+
+def test_dr_grpo_no_std_division():
+    """Dr.GRPO mode: no std division anywhere — only mean subtraction."""
+    estimator = QGREStepAdvantageEstimator(
+        lr=0.1, mode="grpo", step_qualities=STEP_QUALITIES, segmenter=XML_SEG,
+        normalize_advantages=False,  # Dr.GRPO
+    )
+    tokens = _make_completion_tokens()
+
+    results = [
+        _make_reward_result(step1_score=1.0, step4_score=0.9),
+        _make_reward_result(step1_score=0.0, step4_score=0.1),
+    ]
+
+    advs, _ = estimator.compute_advantages(
+        batch_prompt_ids=[1, 2],
+        batch_token_ids=[tokens, tokens],
+        batch_reward_results=results,
+        batch_active_qualities=[ALL_QUALITIES, ALL_QUALITIES],
+        group_size=2,
+    )
+
+    regions = segment_completion(tokens)
+    step1_idx = next(t for t, r in enumerate(regions) if r == "STEP_1")
+
+    # With dr_grpo and mean-only subtraction, advantages should reflect raw difference
+    # High step1 (1.0) minus mean (0.5) = 0.5 before outer normalization
+    # Outer also does mean-only (no std) → result should be non-zero
+    assert advs[0][step1_idx].item() > 0, "High-reward should have positive advantage"
+    assert advs[1][step1_idx].item() < 0, "Low-reward should have negative advantage"
+    assert advs[0].isfinite().all()
+    assert advs[1].isfinite().all()
+
+
+# --- Fix 5: Reward key mismatch warning ---
+
+
+def test_reward_key_mismatch_warns():
+    """Warning emitted when reward keys don't overlap with step_qualities."""
+    import warnings
+
+    estimator = QGREStepAdvantageEstimator(
+        lr=0.1, mode="spo",
+        step_qualities={1: ["q_format"], 2: ["q_accuracy"]},
+        segmenter=XML_SEG,
+    )
+    tokens = _make_completion_tokens()
+
+    # Reward fn returns completely different keys than step_qualities expects
+    rr = RewardResult(reward=0.5, scores={"format_score": 0.9, "acc_score": 0.8})
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        estimator.compute_advantages(
+            batch_prompt_ids=[1],
+            batch_token_ids=[tokens],
+            batch_reward_results=[rr],
+            batch_active_qualities=[["q_format", "q_accuracy"]],
+        )
+        mismatch_warns = [x for x in w if "Reward key mismatch" in str(x.message)]
+        assert len(mismatch_warns) >= 1, "Should warn about reward key mismatch"
+
+
+def test_reward_key_match_no_warning():
+    """No warning when reward keys overlap with step_qualities."""
+    import warnings
+
+    estimator = QGREStepAdvantageEstimator(
+        lr=0.1, mode="spo",
+        step_qualities={1: ["q_format"]},
+        segmenter=XML_SEG,
+    )
+    tokens = _make_completion_tokens()
+
+    rr = RewardResult(reward=0.5, scores={"q_format": 0.9})
+
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        estimator.compute_advantages(
+            batch_prompt_ids=[1],
+            batch_token_ids=[tokens],
+            batch_reward_results=[rr],
+            batch_active_qualities=[["q_format"]],
+        )
+        mismatch_warns = [x for x in w if "Reward key mismatch" in str(x.message)]
+        assert len(mismatch_warns) == 0, "Should NOT warn when keys match"

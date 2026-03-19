@@ -24,9 +24,10 @@ class UnslothBackend:
     Single-GPU, single-process. No Ray.
     """
 
-    def __init__(self, model_config: ModelConfig, generation_config: GenerationConfig):
+    def __init__(self, model_config: ModelConfig, generation_config: GenerationConfig, max_prompt_length: int = 3200):
         self.model_config = model_config
         self.generation_config = generation_config
+        self.max_prompt_length = max_prompt_length
         self.model = None
         self.tokenizer = None
         self._lora_path: str | None = None
@@ -37,7 +38,7 @@ class UnslothBackend:
 
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=self.model_config.path,
-            max_seq_length=self.generation_config.max_tokens + 3200,  # prompt + response
+            max_seq_length=self.generation_config.max_tokens + self.max_prompt_length,  # prompt + response
             load_in_4bit=self.model_config.load_in_4bit,
             fast_inference=self.model_config.fast_inference,
             gpu_memory_utilization=self.model_config.gpu_memory_utilization,

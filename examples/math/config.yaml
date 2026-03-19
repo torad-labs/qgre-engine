@@ -10,8 +10,8 @@ data:
   train_files:
     - data/math_train.parquet
   max_prompt_length: 512
-  max_response_length: 1024
   train_batch_size: 8
+  metadata_columns: [answer]
 
 generation:
   temperature: 1.0

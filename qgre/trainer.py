@@ -16,8 +16,6 @@ from qgre.config import QGREConfig
 from qgre.data import PromptBatch, QGREDataLoader
 from qgre.logging import CompletionLogger, log_step_metrics, log_training_params
 from qgre.nemo_extracted.kl import masked_mean
-from qgre.fused_logprobs import chunked_logprobs_from_hidden, get_hidden_states_and_lm_head
-from qgre.triton_logprobs import triton_logprobs_from_hidden, HAS_TRITON
 from qgre.nemo_extracted.llds import compute_llds_loss
 from qgre.nemo_extracted.logits import logprobs_from_logits
 from qgre.nemo_extracted.loss_functions import ClippedPGLossFn
@@ -61,7 +59,7 @@ class QGRETrainer:
         self.reward_fn = reward_fn
         self.config = config
         self.generation_backend = generation_backend
-        self.game_state = game_state or GameState()
+        self.game_state = game_state or GameState(mastery_threshold=config.training.mastery_threshold)
 
         # Step qualities and phase mapping — configurable per domain
         # step_qualities: from constructor arg, config YAML, or error
@@ -81,11 +79,23 @@ class QGRETrainer:
         alg = config.algorithm
         mode = alg.mode
         spo_lr = alg.spo.lr if mode == "spo" else 0.1
+
+        # Resolve segmenter: explicit arg > config > uniform default
+        if segmenter is None and alg.segmenter != "uniform":
+            if alg.segmenter == "qwen3_xml":
+                from qgre.segments import qwen3_xml_segmenter
+                segmenter = qwen3_xml_segmenter
+            elif ":" in alg.segmenter:
+                import importlib
+                mod_path, fn_name = alg.segmenter.rsplit(":", 1)
+                segmenter = getattr(importlib.import_module(mod_path), fn_name)
+
         self.advantage_estimator = QGREStepAdvantageEstimator(
             lr=spo_lr, mode=mode,
             step_qualities=sq,
             segmenter=segmenter or uniform_segmenter,
             normalize_advantages=alg.loss_type != "dr_grpo",
+            filter_groups=alg.grpo.filter_groups,
         )
 
         # Loss function (NeMo RL extracted)
@@ -103,6 +113,7 @@ class QGRETrainer:
             "token_level_loss": True,
             "force_on_policy_ratio": True,
             "remove_length_normalization": alg.loss_type == "dr_grpo",
+            "lambda_return": alg.lambda_return,
         })
 
         # Completion logger
@@ -112,6 +123,7 @@ class QGRETrainer:
         self.global_step = 0
         self.optimizer: torch.optim.Optimizer | None = None
         self.scheduler: Any = None
+        self._accumulated_loss = 0.0
 
     def setup_optimizer(self):
         """Create optimizer and LR scheduler from config.
@@ -362,6 +374,27 @@ class QGRETrainer:
                 kl_region_weights=mb_kl_weights,
             )
 
+            # neg_logprob_mean: monitor for policy collapse (metric only, not a loss term).
+            # -mean(log p(token)) is NOT a valid entropy loss — its gradient pushes the wrong
+            # direction (increases prob of sampled tokens instead of spreading mass).
+            # See NeMo RL docs: "not recommended for direct backpropagation."
+            with torch.no_grad():
+                neg_logprob_mean = -masked_mean(mb_lp[:, :min_len], mb_mask[:, :min_len].float())
+                mb_metrics["neg_logprob_mean"] = neg_logprob_mean.item()
+
+            # Dynamic length control (Huawei): penalize length when group accuracy is high
+            lp_coef = self.config.algorithm.length_penalty_coef
+            if lp_coef > 0:
+                lp_thresh = self.config.algorithm.length_penalty_threshold
+                group_correctness = sum(rr.reward for rr in reward_results) / len(reward_results)
+                if group_correctness > lp_thresh:
+                    # High correctness → add length penalty to encourage efficiency
+                    seq_lengths = mb_mask[:, :min_len].sum(dim=-1)
+                    mean_len = seq_lengths.mean()
+                    length_penalty = lp_coef * (seq_lengths / max(mean_len, 1.0)).mean()
+                    mb_loss = mb_loss + length_penalty
+                    mb_metrics["length_penalty"] = length_penalty.item()
+
             # LLDS auxiliary loss — prevents Lazy Likelihood Displacement death spiral
             # (arXiv:2512.04220, PLAN.md line 504)
             llds_coef = self.config.algorithm.llds_coef
@@ -396,13 +429,32 @@ class QGRETrainer:
                 f"Step {self.global_step}: loss is {loss_val} — aborting to prevent weight corruption."
             )
 
+        # Track accumulated loss across gradient accumulation steps
+        self._accumulated_loss += total_loss
+
         # Optimizer step (backward already done in micro-batches above)
         if (self.global_step + 1) % self.config.training.gradient_accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config.training.max_grad_norm)
             self.optimizer.step()
             self.optimizer.zero_grad()
             if self.scheduler is not None:
                 self.scheduler.step()
+            # Report accumulated loss across gradient accumulation steps
+            metrics["accumulated_loss"] = self._accumulated_loss
+            self._accumulated_loss = 0.0
+
+        # KL-adaptive SPO learning rate (SPO paper Algorithm 1)
+        spo_cfg = self.config.algorithm.spo
+        if spo_cfg.kl_adaptive and self.config.algorithm.mode == "spo":
+            kl_val = metrics.get("kl_penalty", 0.0)
+            self.advantage_estimator.adapt_lr(
+                kl=kl_val,
+                kl_threshold=spo_cfg.kl_threshold,
+                kl_factor=spo_cfg.kl_factor,
+                lr_factor=spo_cfg.lr_factor,
+                min_lr=spo_cfg.min_lr,
+                max_lr=spo_cfg.max_lr,
+            )
 
         # Log metrics
         reward_mean = sum(rr.reward for rr in reward_results) / len(reward_results)
@@ -438,10 +490,16 @@ class QGRETrainer:
 
         # Log completions
         for i, rr in enumerate(reward_results):
+            # Decode token IDs to text for readable logs
+            comp_tokens = completions[i][:50]
+            if self.tokenizer is not None:
+                comp_text = self.tokenizer.decode(comp_tokens, skip_special_tokens=True)[:200]
+            else:
+                comp_text = str(comp_tokens)
             self.completion_logger.log_completion(
                 step=self.global_step,
                 prompt=batch.raw_prompts[i] if i < len(batch.raw_prompts) else "",
-                completion=str(completions[i][:50]),
+                completion=comp_text,
                 reward=rr.reward,
                 reward_components=rr.scores,
                 phase=self.game_state.phase,
@@ -569,6 +627,12 @@ class QGRETrainer:
                 if hasattr(backend, "set_training_mode"):
                     backend.set_training_mode()
                 metrics = self.step(batch, output.token_ids, reward_results)
+
+                # 3b. Update prioritized sampling weights (SPO paper Section 3.2)
+                if hasattr(dataloader, "set_priorities"):
+                    priorities = self.advantage_estimator.get_prompt_priorities()
+                    if priorities:
+                        dataloader.set_priorities(priorities)
 
                 # 4. Log to MLflow (PLAN.md lines 517-518: per-step reward + advantage metrics)
                 try:

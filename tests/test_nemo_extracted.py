@@ -227,3 +227,29 @@ def test_logprobs_from_logits_selective_vs_old():
     assert torch.allclose(result, expected, atol=1e-5), (
         f"max diff: {(result - expected).abs().max().item()}"
     )
+
+
+# --- GRPO-λ eligibility trace tests ---
+
+
+def test_eligibility_traces_lambda_zero_is_identity():
+    """λ=0 → traces equal original advantages (no blending)."""
+    from qgre.nemo_extracted.loss_functions import apply_eligibility_traces
+
+    advantages = torch.tensor([[1.0, 2.0, 3.0, 4.0]])
+    result = apply_eligibility_traces(advantages, lambda_val=0.0)
+    assert torch.allclose(result, advantages), f"λ=0 should be identity, got {result}"
+
+
+def test_eligibility_traces_lambda_nonzero_blends():
+    """λ>0 → traces are λ-weighted sum from future tokens."""
+    from qgre.nemo_extracted.loss_functions import apply_eligibility_traces
+
+    advantages = torch.tensor([[0.0, 0.0, 0.0, 1.0]])
+    result = apply_eligibility_traces(advantages, lambda_val=0.9)
+    # Last token advantage=1.0, so trace at t=2 = 0 + 0.9*1.0 = 0.9
+    # trace at t=1 = 0 + 0.9*0.9 = 0.81, trace at t=0 = 0 + 0.9*0.81 = 0.729
+    assert result[0, 3].item() == pytest.approx(1.0)
+    assert result[0, 2].item() == pytest.approx(0.9)
+    assert result[0, 1].item() == pytest.approx(0.81)
+    assert result[0, 0].item() == pytest.approx(0.729)

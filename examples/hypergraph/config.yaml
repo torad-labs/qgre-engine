@@ -13,7 +13,6 @@ data:
   train_files:
     - data/tier_1_2.parquet
   max_prompt_length: 3200
-  max_response_length: 2048
   train_batch_size: 16
 
 generation:
@@ -28,16 +27,25 @@ algorithm:
   spo:
     lr: 0.1                # EMA learning rate for value tracker
     n: 1                   # completions per prompt
+    # kl_adaptive: true    # KL-adaptive lr (SPO paper Algorithm 1)
+    # kl_threshold: 0.1
+    # kl_factor: 2.0
+    # lr_factor: 1.5
   grpo:
     n: 8
     filter_groups: true
 
+  segmenter: qwen3_xml     # Uses Qwen3 XML step tags for per-step credit assignment
   clip_ratio_low: 0.2
   clip_ratio_high: 0.28
-  loss_mode: kl_cov
-  kl_cov_ratio: 0.0002
+  # loss_mode and kl_cov_ratio default to "pg" / 0.0 — KL is a no-op with on-policy (1 epoch).
+  # Enable with loss_mode: kl_cov + kl_cov_ratio: 0.0002 when multi-epoch is added.
   llds_coef: 0.05
-  entropy_coeff: 0.001    # 0.0 on 16GB consumer GPU
+
+  # Opt-in features (all off by default):
+  # lambda_return: 0.95   # GRPO-λ eligibility traces for per-token credit
+  # length_penalty_coef: 0.01  # Dynamic length control (Huawei)
+  # length_penalty_threshold: 0.5  # Correctness ratio above which penalty applies
 
   # Domain-specific: which qualities belong to which step
   # The engine uses this to compute per-step advantages

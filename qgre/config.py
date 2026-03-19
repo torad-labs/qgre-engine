@@ -10,7 +10,6 @@ import yaml
 @dataclass
 class ModelConfig:
     path: str = ""  # Required — set in YAML or constructor
-    tokenizer_path: str | None = None
     lora_rank: int = 8
     lora_alpha: int = 16
     load_in_4bit: bool = True
@@ -22,7 +21,6 @@ class ModelConfig:
 class DataConfig:
     train_files: list[str] = field(default_factory=list)
     max_prompt_length: int = 3200
-    max_response_length: int = 2048
     train_batch_size: int = 16
     prompt_column: str = "prompt"
     metadata_columns: list[str] = field(default_factory=lambda: ["ground_truth", "extra_info"])
@@ -41,6 +39,13 @@ class GenerationConfig:
 class SPOConfig:
     lr: float = 0.1
     n: int = 1
+    # KL-adaptive lr (SPO paper Algorithm 1): adjust EMA lr based on KL divergence
+    kl_adaptive: bool = False
+    kl_threshold: float = 0.1
+    kl_factor: float = 2.0
+    lr_factor: float = 1.5
+    min_lr: float = 0.01
+    max_lr: float = 0.5
 
 
 @dataclass
@@ -56,11 +61,16 @@ class AlgorithmConfig:
     grpo: GRPOConfig = field(default_factory=GRPOConfig)
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.28
-    loss_mode: str = "kl_cov"
-    kl_cov_ratio: float = 0.0002
+    # KL regularization requires multi-epoch training (ppo_epochs > 1) to be meaningful.
+    # With on-policy (generate then immediately train, 1 epoch), KL between current and
+    # generation is zero by definition — no optimizer step occurs between them.
+    loss_mode: str = "pg"  # "pg" (no KL) or "kl_cov" (requires multi-epoch)
+    kl_cov_ratio: float = 0.0
     llds_coef: float = 0.05
-    entropy_coeff: float = 0.001
+    # entropy_coeff removed: -mean(logprob) has wrong gradient direction for entropy bonus.
+    # neg_logprob_mean is logged as a metric only (no backprop). See Fix 3 notes.
     step_qualities: dict | None = None  # {step_num: [quality_names]} — domain-specific
+    segmenter: str = "uniform"  # "uniform", "qwen3_xml", or "module.path:function_name"
     # Region-specific KL multipliers (THR-style, PLAN.md lines 798-802)
     # THINK=explore freely, FORMAT=lock structure, STEP=focus on quality
     kl_think_multiplier: float = 0.1   # Low KL for think tokens (explore)
@@ -70,6 +80,11 @@ class AlgorithmConfig:
     # "grpo": standard GRPO (divides by horizon length + normalizes by std)
     # "dr_grpo": removes both normalizations (unbiased gradients)
     loss_type: str = "grpo"  # "grpo" or "dr_grpo"
+    # GRPO-λ eligibility traces (ICLR 2026): per-token credit via λ-return approximation
+    lambda_return: float = 0.0  # 0=off, 0.95=typical. Composes with VPRM step-level rewards.
+    # Dynamic length control (Huawei): penalize length only when group accuracy is high
+    length_penalty_coef: float = 0.0  # 0=off
+    length_penalty_threshold: float = 0.5  # correctness ratio above which length penalty applies
 
 
 @dataclass
@@ -80,6 +95,8 @@ class TrainingConfig:
     lr_scheduler: str = "cosine"
     save_freq: int = 50
     gradient_accumulation_steps: int = 1
+    max_grad_norm: float = 1.0
+    mastery_threshold: float = 0.8
 
 
 @dataclass

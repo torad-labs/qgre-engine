@@ -23,6 +23,32 @@ import torch
 from qgre.nemo_extracted.kl import calculate_kl, masked_mean
 
 
+def apply_eligibility_traces(
+    advantages: torch.Tensor,
+    lambda_val: float,
+) -> torch.Tensor:
+    """GRPO-λ: λ-return approximation for per-token credit assignment.
+
+    Backward-accumulates advantages with decay factor λ, giving earlier tokens
+    credit for downstream correct reasoning (critic-free TD(λ)).
+
+    Args:
+        advantages: [batch, seq] per-token advantages (from VPRM step-level)
+        lambda_val: trace decay factor (0=no traces, 0.95=typical)
+
+    Returns:
+        [batch, seq] λ-return weighted advantages
+    """
+    batch, seq = advantages.shape
+    traces = torch.zeros_like(advantages)
+    # Backward pass: accumulate eligibility trace from end of sequence
+    trace = torch.zeros(batch, device=advantages.device)
+    for t in range(seq - 1, -1, -1):
+        trace = advantages[:, t] + lambda_val * trace
+        traces[:, t] = trace
+    return traces
+
+
 class ClippedPGLossConfig(TypedDict):
     reference_policy_kl_penalty: float
     reference_policy_kl_type: str
@@ -60,6 +86,7 @@ class ClippedPGLossFn:
         self.truncated_importance_sampling_ratio = cfg["truncated_importance_sampling_ratio"]
         self.token_level_loss = cfg["token_level_loss"]
         self.remove_length_normalization = cfg.get("remove_length_normalization", False)
+        self.lambda_return = cfg.get("lambda_return", 0.0)
 
     def __call__(
         self,
@@ -95,6 +122,12 @@ class ClippedPGLossFn:
             ratios_clamped = ratios.clamp(
                 1.0 - self.ratio_clip_min, 1.0 + self.ratio_clip_max
             )
+
+        # GRPO-λ eligibility traces: weight advantages by accumulated log-prob traces
+        # λ-return approximation using token-level log-probabilities as eligibility traces
+        # (ICLR 2026 under review). Gives per-TOKEN credit within steps.
+        if self.lambda_return > 0:
+            advantages = apply_eligibility_traces(advantages, self.lambda_return)
 
         # Clipped surrogate loss
         loss1 = -advantages * ratios

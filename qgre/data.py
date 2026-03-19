@@ -74,6 +74,9 @@ class QGREDataLoader:
         self.step_in_epoch = 0
         self.total_steps = 0
 
+        # Priority-weighted sampling (SPO paper Section 3.2)
+        self._priorities: dict[int, float] | None = None
+
     def _prepare(self, prompts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Tokenize, filter overlong, store results."""
         items = []
@@ -105,11 +108,34 @@ class QGREDataLoader:
 
         return items
 
+    def set_priorities(self, priorities: dict[int, float]):
+        """Set per-prompt priority weights for prioritized sampling.
+
+        Args:
+            priorities: dict mapping prompt_id → priority weight (higher = sample more)
+        """
+        self._priorities = priorities
+
     def _shuffle(self, epoch: int) -> list[dict[str, Any]]:
-        """Deterministic shuffle per epoch."""
+        """Deterministic shuffle per epoch, with optional priority-weighted sampling."""
         gen = torch.Generator()
         gen.manual_seed(self.seed + epoch)
-        indices = torch.randperm(len(self.items), generator=gen).tolist()
+
+        if self._priorities is not None:
+            # Priority-weighted sampling: sample with replacement, weighted by |advantage|
+            weights = torch.tensor(
+                [self._priorities.get(item["prompt_id"], 1.0) for item in self.items],
+                dtype=torch.float64,
+            )
+            # Add small epsilon to avoid zero weights, then normalize
+            weights = weights + 1e-8
+            weights = weights / weights.sum()
+            indices = torch.multinomial(
+                weights, len(self.items), replacement=True, generator=gen,
+            ).tolist()
+        else:
+            indices = torch.randperm(len(self.items), generator=gen).tolist()
+
         return [self.items[i] for i in indices]
 
     def _left_pad(self, token_ids_list: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:

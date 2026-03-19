@@ -217,3 +217,45 @@ def test_prompt_ids_unique_sha256(tokenizer):
     )
     ids = [item["prompt_id"] for item in loader.items]
     assert len(set(ids)) == 100, f"Hash collision: {100 - len(set(ids))} duplicates in 100 prompts"
+
+
+# --- Prioritized prompt sampling tests ---
+
+
+def test_set_priorities_changes_sampling(sample_prompts, tokenizer):
+    """Setting priorities causes high-priority prompts to appear more often."""
+    loader = QGREDataLoader(
+        prompts=sample_prompts,
+        tokenizer=tokenizer,
+        max_prompt_length=512,
+        train_batch_size=100,
+        seed=42,
+    )
+
+    # Get all prompt_ids
+    all_ids = [item["prompt_id"] for item in loader.items]
+    # Give first prompt 100x priority
+    priorities = {pid: (100.0 if i == 0 else 0.01) for i, pid in enumerate(all_ids)}
+    loader.set_priorities(priorities)
+
+    batches = list(loader)
+    sampled_ids = [pid for batch in batches for pid in batch.prompt_ids]
+    # First prompt should dominate (>50% of samples)
+    first_count = sampled_ids.count(all_ids[0])
+    assert first_count > len(sampled_ids) * 0.3, (
+        f"High-priority prompt sampled {first_count}/{len(sampled_ids)} times, expected >30%"
+    )
+
+
+def test_set_priorities_none_falls_back_to_uniform(sample_prompts, tokenizer):
+    """Without priorities, sampling is uniform permutation."""
+    loader = QGREDataLoader(
+        prompts=sample_prompts,
+        tokenizer=tokenizer,
+        max_prompt_length=512,
+        train_batch_size=5,
+        seed=42,
+    )
+    # No priorities set — should behave like uniform shuffle
+    batches = list(loader)
+    assert len(batches[0].prompt_ids) == 5
