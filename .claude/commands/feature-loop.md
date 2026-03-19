@@ -604,7 +604,51 @@ Step T5: Stress test — 8-16 prompts × 4096 tokens
   - Measure: tokens/sec, VRAM peak, step time, phase advancement
 ```
 
-**Execution: T1 first (fixes OOM), then T4 (memory management), then T2-T3 if needed.**
+=== COMPLETED items this session ===
+
+[x] M1: LLDS loss (committed 5ea71b7)
+[x] M2: AdamW8bit optimizer (committed earlier)
+[x] M3: Low-advantage filter for SPO (committed cc1c7ca)
+[~] M5: Region-specific KL — config + loss wiring done, trainer needs to build kl_region_weights from regions
+[x] T5: Stress test 8×4096 passes at gpu_memory_utilization=0.35 (committed bf29752)
+[x] T4: gpu_memory_utilization=0.35 as correct colocate partition
+
+=== REMAINING items ===
+
+[ ] M4: seq-mean-token-sum-norm loss aggregation — affects gradient scaling
+[ ] M5: Wire region weights from segmenter through trainer to loss (partially done)
+[ ] Phase 2: Triton kernels for reward computation (tag detection, node matching on GPU)
+[ ] Phase 3: torch.compile — search Exa for Unsloth 2026.3 compatibility first
+[ ] Phase 4: Fused log_softmax+gather Triton kernel — Liger Kernel installed (0.7.0)
+    Note: OOM is FIXED by gpu_memory_utilization=0.35, but fused kernel would
+    be faster AND allow higher batch sizes. This is a PERFORMANCE optimization now,
+    not a crash fix.
+
+=== CUDA/Triton OPPORTUNITIES beyond the plan ===
+
+The plan describes Triton kernels as "medium impact" optimizations. But since we own the
+engine and have Triton 3.5.1 + Liger Kernel 0.7.0 installed, we SHOULD write custom
+Triton kernels for QGRE-specific operations that don't exist anywhere else:
+
+1. Fused segment_completion Triton kernel — token ID pattern matching on GPU
+   Currently: CPU Python loop O(seq_len). Triton: parallel scan, O(1) per token.
+   Only matters at scale (batch_size > 16), but it's the kind of thing only we can build.
+
+2. Fused advantage_broadcast Triton kernel — region→advantage mapping on GPU
+   Currently: Python loop with string matching. Triton: lookup table, parallel.
+
+3. Fused LLDS gate computation — the three-level gate (traj+token+action) is a
+   perfect candidate for a single fused kernel (all element-wise ops on same tensors).
+
+4. Fused region-KL-weighted loss — instead of building a KL weight tensor and
+   multiplying, do the region lookup + KL scaling + masking in one kernel.
+
+These are NOT in the original plan. But the plan says Phase 4 is "Custom CUDA kernels
+for critical path" — these qualify. The plan also says "probably never" — but the plan
+was written before we had Triton 3.5 and Liger 0.7 installed. The tools are here.
+User should decide which to prioritize.
+
+**Execution: finish M4 and M5 wiring, then ask user about CUDA/Triton priorities.**
 
 ### Post-completion work (when user requests):
 - `/commit` — commit all changes
