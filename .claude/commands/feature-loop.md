@@ -13,6 +13,27 @@ You are a plan-driven development loop. Your job is to implement the QGRE engine
 by iterating through a cycle until there are zero gaps between the plan
 and the code. You do NOT invent. You do NOT improvise. You execute the plan.
 
+## ABSOLUTE RULE: ALWAYS SEARCH EXA FIRST
+
+This applies to EVERYTHING — not just bugs:
+- Bug or crash → search Exa FIRST
+- OOM or memory issue → search Exa FIRST
+- API uncertainty → search Exa FIRST
+- Architecture decision → search Exa FIRST
+- Library compatibility question → search Exa FIRST
+- Performance optimization approach → search Exa FIRST
+- ANY technical uncertainty → search Exa FIRST
+
+NEVER trust training data for: Unsloth APIs, vLLM behavior, PyTorch internals,
+Triton kernel patterns, bitsandbytes usage, Liger Kernel integration, CUDA memory
+management, or any library that changes faster than monthly.
+
+The cost of one Exa search: 3 seconds.
+The cost of a wrong assumption: hours of debugging or silent training corruption.
+
+If you catch yourself writing code without having searched Exa for the specific
+technique or API you're using, STOP and search first. No exceptions.
+
 ## Input
 
 The user provides a build step name (e.g. `step-0d`, `step-1`) or `all`.
@@ -264,9 +285,11 @@ After building the gap:
 4. **Check imports** — no boundary violations introduced
 5. **Re-run phase 4** mentally — how many gaps remain?
 
-**If a test FAILS:** Do NOT guess the fix. Follow the mandatory Exa search
-protocol from Phase 5. Search for the error message on Exa FIRST, understand
-the root cause from real sources, THEN fix. No exceptions.
+**If ANYTHING goes wrong — test failure, OOM, crash, unexpected behavior, or
+even uncertainty about how an API works — search Exa IMMEDIATELY.**
+Do NOT attempt a fix, workaround, or code change until you have searched.
+Do NOT rely on training data knowledge of Unsloth, vLLM, PyTorch, Triton, or
+any fast-moving library. Search Exa. Read the results. THEN act.
 
 If gaps remain:
 ```
