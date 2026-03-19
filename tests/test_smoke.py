@@ -28,7 +28,7 @@ def test_three_steps_no_crash():
     from qgre.trainer import QGRETrainer
     from qgre.data import QGREDataLoader, PromptBatch
     from qgre.types import RewardResult
-    from qgre.segments import STEP_QUALITIES
+    from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES as STEP_QUALITIES
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = QGREConfig()
@@ -154,7 +154,7 @@ def test_vram_does_not_grow():
     from qgre.trainer import QGRETrainer
     from qgre.data import QGREDataLoader
     from qgre.types import RewardResult
-    from qgre.segments import STEP_QUALITIES
+    from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES as STEP_QUALITIES
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = QGREConfig()

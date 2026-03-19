@@ -33,7 +33,7 @@ class GenerationConfig:
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = -1
-    max_tokens: int = 2048
+    max_tokens: int = 4096
     stop_token_ids: list[int] = field(default_factory=lambda: [151643, 151645])
 
 
@@ -60,6 +60,7 @@ class AlgorithmConfig:
     kl_cov_ratio: float = 0.0002
     llds_coef: float = 0.05
     entropy_coeff: float = 0.001
+    step_qualities: dict | None = None  # {step_num: [quality_names]} — domain-specific
 
 
 @dataclass
@@ -122,6 +123,11 @@ class QGREConfig:
             grpo = GRPOConfig(**_pick(GRPOConfig, alg.get("grpo", {}), "algorithm.grpo")) if "grpo" in alg else GRPOConfig()
             algo_top = {k: v for k, v in alg.items() if k not in ("spo", "grpo")}
             algo_fields = _pick(AlgorithmConfig, algo_top, "algorithm")
+            # Ensure step_qualities keys are ints (YAML may parse them as ints or strings)
+            if "step_qualities" in algo_fields and algo_fields["step_qualities"] is not None:
+                algo_fields["step_qualities"] = {
+                    int(k): list(v) for k, v in algo_fields["step_qualities"].items()
+                }
             cfg.algorithm = AlgorithmConfig(spo=spo, grpo=grpo, **algo_fields)
         if "training" in d:
             cfg.training = TrainingConfig(**_pick(TrainingConfig, d["training"], "training"))

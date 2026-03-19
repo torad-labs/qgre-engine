@@ -10,7 +10,9 @@ import pytest
 
 from qgre.config import QGREConfig
 from qgre.data import PromptBatch
-from qgre.trainer import QGRETrainer, PHASE_QUALITIES
+from qgre.advantages import build_phase_qualities
+from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES
+from qgre.trainer import QGRETrainer
 from qgre.types import RewardResult
 from qgre.segments import OPEN_ANGLE, STEP_TOKEN, CLOSE_ANGLE, CLOSE_SLASH
 
@@ -141,11 +143,53 @@ def test_mode_switch_spo_vs_grpo():
 
 
 def test_phase_qualities_mapping():
-    """PHASE_QUALITIES contains correct progressive gating."""
-    assert len(PHASE_QUALITIES[1]) == 5  # Step 1 only
-    assert len(PHASE_QUALITIES[2]) == 6  # Step 1 + 2
-    assert len(PHASE_QUALITIES[3]) == 8  # Step 1 + 2 + 3
-    assert len(PHASE_QUALITIES[4]) == 13  # All steps
+    """build_phase_qualities produces correct progressive gating."""
+    pq = build_phase_qualities(HYPERGRAPH_V1_STEP_QUALITIES)
+    assert len(pq[1]) == 5   # Step 1 only
+    assert len(pq[2]) == 6   # Step 1 + 2
+    assert len(pq[3]) == 8   # Step 1 + 2 + 3
+    assert len(pq[4]) == 13  # All steps
+
+
+def test_phase_qualities_5_steps():
+    """5-step config produces 5 phases."""
+    sq = {1: ["a"], 2: ["b"], 3: ["c"], 4: ["d"], 5: ["e"]}
+    pq = build_phase_qualities(sq)
+    assert len(pq) == 5
+    assert pq[5] == ["a", "b", "c", "d", "e"]
+
+
+def test_phase_qualities_non_cumulative():
+    """Non-cumulative mode: each phase has only its own qualities."""
+    sq = {1: ["a", "b"], 2: ["c"], 3: ["d"]}
+    pq = build_phase_qualities(sq, cumulative=False)
+    assert pq[1] == ["a", "b"]
+    assert pq[2] == ["c"]
+    assert pq[3] == ["d"]
+
+
+def test_trainer_accepts_custom_step_qualities():
+    """QGRETrainer accepts step_qualities parameter."""
+    custom_sq = {1: ["q_json_valid"], 2: ["q_grounding"], 3: ["q_accuracy"]}
+    cfg = QGREConfig()
+    trainer = QGRETrainer(
+        model=MockModel(), tokenizer=None, reward_fn=lambda *a: None,
+        config=cfg, step_qualities=custom_sq,
+    )
+    assert trainer.step_qualities == custom_sq
+    assert len(trainer.phase_qualities) == 3
+
+
+def test_trainer_accepts_custom_segmenter():
+    """QGRETrainer accepts segmenter parameter."""
+    from qgre.segments import uniform_segmenter
+
+    cfg = QGREConfig()
+    trainer = QGRETrainer(
+        model=MockModel(), tokenizer=None, reward_fn=lambda *a: None,
+        config=cfg, segmenter=uniform_segmenter,
+    )
+    assert trainer.advantage_estimator.segmenter is uniform_segmenter
 
 
 # --- Regression tests for bug fixes ---

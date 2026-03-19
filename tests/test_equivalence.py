@@ -13,7 +13,7 @@ from qgre.advantages import QGREStepAdvantageEstimator
 from qgre.nemo_extracted.loss_functions import ClippedPGLossFn
 from qgre.nemo_extracted.kl import masked_mean
 from qgre.nemo_extracted.logits import logprobs_from_logits
-from qgre.segments import STEP_QUALITIES, OPEN_ANGLE, STEP_TOKEN, CLOSE_ANGLE, CLOSE_SLASH
+from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES as STEP_QUALITIES, OPEN_ANGLE, STEP_TOKEN, CLOSE_ANGLE, CLOSE_SLASH
 from qgre.types import RewardResult
 
 

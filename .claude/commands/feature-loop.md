@@ -358,14 +358,56 @@ Known deferred items (not bugs, design decisions for v2):
   - CompletionLogger file handle leak on crash (flush() mitigates, __del__ would be cleaner)
 ```
 
-### If invoked again, the loop should:
+### ACTIVE WORK: Generalize engine (remove v1 hardcoding)
 
-1. Run `python -m pytest tests/ -q --no-header` — verify 85 CPU tests pass
-2. Check for pending agent results — read output files if agents completed
-3. Apply any findings from pending agents (silent-failure-hunter, simplifier round 2)
-4. If GPU free (`nvidia-smi`), run `pytest tests/test_smoke.py::test_three_steps_no_crash --gpu -v`
-5. If any test fails → MANDATORY Exa search → fix → re-run
-6. If all pass → report FEATURE LOOP COMPLETE
+The engine is currently hardcoded to 4 XML steps with v1-specific quality names.
+This must be generalized so any domain can use the engine.
+
+**Changes needed (in order):**
+
+```
+Step G1: Make STEP_QUALITIES configurable (segments.py + advantages.py)
+  - Remove hardcoded STEP_QUALITIES dict from segments.py
+  - Accept step_qualities as a parameter to QGREStepAdvantageEstimator.__init__()
+  - Accept step_qualities in QGREConfig (algorithm section of YAML)
+  - Replace all range(1, 5) with range based on len(step_qualities)
+  - PHASE_QUALITIES in trainer.py derived from config, not hardcoded
+  - Update examples/hypergraph/config.yaml with step_qualities mapping
+  - Test: existing tests pass with step_qualities passed explicitly
+
+Step G2: Make segment_completion() pluggable (segments.py + trainer.py)
+  - Define a Segmenter protocol: Callable[[list[int]], list[str]]
+  - Move current segment_completion to qwen3_xml_segmenter() as one implementation
+  - QGREStepAdvantageEstimator accepts segmenter as __init__ parameter
+  - QGRETrainer accepts segmenter in config or constructor
+  - Default: qwen3_xml_segmenter (backward compatible)
+  - Add a simple json_key_segmenter() as a second implementation for JSON-based outputs
+  - Test: both segmenters produce valid region labels
+
+Step G3: Make phase count configurable (advantages.py + trainer.py)
+  - Phase count = max phase in step_qualities config, not hardcoded 4
+  - PHASE_QUALITIES built dynamically: phase N includes all qualities from steps 1..N
+  - Allow custom phase→qualities mapping in config for non-cumulative phase structures
+  - Test: 5-phase config works, 3-phase config works
+
+Step G4: Bump max_tokens default to 4096 (config.py + examples)
+  - GenerationConfig.max_tokens default: 2048 → 4096
+  - Update example configs
+  - Test: config loads with 4096
+
+Step G5: Update README and tests
+  - Update README "Bring Your Own Domain" section with new config examples
+  - Update test fixtures to pass step_qualities explicitly
+  - Verify all 85+ CPU tests pass
+  - Run GPU smoke test
+```
+
+**Execution rules:**
+- Build ONE step per iteration
+- After each step: run `python -m pytest tests/ -q` — must pass
+- If test fails → MANDATORY Exa search before fix
+- After all G steps: run GPU smoke test if GPU free
+- When all pass → commit and push → report FEATURE LOOP COMPLETE
 
 ### Post-completion work (when user requests):
 - `/commit` — commit all changes

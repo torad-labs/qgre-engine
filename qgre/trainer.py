@@ -6,7 +6,7 @@ from typing import Any, Callable, Protocol
 import torch
 import torch.nn as nn
 
-from qgre.advantages import QGREStepAdvantageEstimator
+from qgre.advantages import QGREStepAdvantageEstimator, build_phase_qualities
 from qgre.checkpoint import (
     discover_latest_checkpoint,
     load_checkpoint,
@@ -18,7 +18,7 @@ from qgre.logging import CompletionLogger, log_step_metrics
 from qgre.nemo_extracted.kl import masked_mean
 from qgre.nemo_extracted.logits import logprobs_from_logits
 from qgre.nemo_extracted.loss_functions import ClippedPGLossFn
-from qgre.segments import STEP_QUALITIES
+from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES, Segmenter, qwen3_xml_segmenter
 from qgre.types import GameState, RewardResult
 
 
@@ -33,13 +33,6 @@ class GenerationBackend(Protocol):
 
     def load_weights(self, path: str | Path) -> None:
         ...
-
-
-# Phase → active qualities (progressive gating)
-PHASE_QUALITIES: dict[int, list[str]] = {
-    phase: [q for s in range(1, phase + 1) for q in STEP_QUALITIES[s]]
-    for phase in range(1, 5)
-}
 
 
 class QGRETrainer:
@@ -57,6 +50,8 @@ class QGRETrainer:
         config: QGREConfig,
         generation_backend: GenerationBackend | None = None,
         game_state: GameState | None = None,
+        step_qualities: dict[int, list[str]] | None = None,
+        segmenter: Segmenter | None = None,
     ):
         self.model = model
         self.tokenizer = tokenizer
@@ -65,11 +60,20 @@ class QGRETrainer:
         self.generation_backend = generation_backend
         self.game_state = game_state or GameState()
 
+        # Step qualities and phase mapping — configurable per domain
+        sq = step_qualities or HYPERGRAPH_V1_STEP_QUALITIES
+        self.step_qualities = sq
+        self.phase_qualities = build_phase_qualities(sq)
+
         # Algorithm setup
         alg = config.algorithm
         mode = alg.mode
         spo_lr = alg.spo.lr if mode == "spo" else 0.1
-        self.advantage_estimator = QGREStepAdvantageEstimator(lr=spo_lr, mode=mode)
+        self.advantage_estimator = QGREStepAdvantageEstimator(
+            lr=spo_lr, mode=mode,
+            step_qualities=sq,
+            segmenter=segmenter or qwen3_xml_segmenter,
+        )
 
         # Loss function (NeMo RL extracted)
         self.loss_fn = ClippedPGLossFn({
@@ -182,7 +186,7 @@ class QGRETrainer:
 
         # Determine active qualities per completion
         active_qualities = [
-            PHASE_QUALITIES.get(rr.phase, PHASE_QUALITIES[1])
+            self.phase_qualities.get(rr.phase, self.phase_qualities[min(self.phase_qualities)])
             for rr in reward_results
         ]
 

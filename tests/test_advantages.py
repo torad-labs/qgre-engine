@@ -6,9 +6,11 @@ import pytest
 
 from qgre.advantages import QGREStepAdvantageEstimator, build_batch_reward_tensors
 from qgre.segments import (
-    CLOSE_ANGLE, CLOSE_SLASH, OPEN_ANGLE, STEP_QUALITIES, STEP_TOKEN,
-    THINK_END, THINK_START, segment_completion,
+    CLOSE_ANGLE, CLOSE_SLASH, HYPERGRAPH_V1_STEP_QUALITIES, OPEN_ANGLE,
+    STEP_TOKEN, THINK_END, THINK_START, segment_completion,
 )
+
+STEP_QUALITIES = HYPERGRAPH_V1_STEP_QUALITIES
 from qgre.types import RewardResult
 
 

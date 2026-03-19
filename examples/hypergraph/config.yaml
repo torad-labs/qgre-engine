@@ -20,7 +20,7 @@ generation:
   temperature: 1.0          # GRPO/SPO: 1.0 for diversity (DeepSeek-R1 default)
   top_p: 1.0               # no nucleus filtering (let temperature control diversity)
   top_k: -1                # disabled
-  max_tokens: 2048         # matches max_response_length
+  max_tokens: 4096
   stop_token_ids: [151643, 151645]  # <|endoftext|>, <|im_end|>
 
 algorithm:
@@ -38,6 +38,14 @@ algorithm:
   kl_cov_ratio: 0.0002
   llds_coef: 0.05
   entropy_coeff: 0.001    # 0.0 on 16GB consumer GPU
+
+  # Domain-specific: which qualities belong to which step
+  # The engine uses this to compute per-step advantages
+  step_qualities:
+    1: [q_format_tags, q_tag_content, q_node_in_prompt, q_node_format, q_node_length]
+    2: [q_chain_s2_refs_s1]
+    3: [q_chain_s3_refs_s2, q_self_consistency]
+    4: [q_step4_valid_json, q_step4_has_keys, q_existence_correct, q_archetype_correct, q_node_f1]
 
 training:
   total_steps: 800
