@@ -898,14 +898,34 @@ Replace the remaining Python/PyTorch operations with hand-written CUDA/Triton ke
 
 ---
 
-## Priority Order
+## Priority Order (UPDATED 2026-03-18 — Phase 4 is NOT "probably never")
 
-| Phase | Impact | Effort | When |
-|-------|--------|--------|------|
-| 1. Eliminate Ray + SPO algorithm | 30% faster + better convergence | 2 weeks | Now |
-| 2. Triton reward | 10x reward speed | 1 week | After Phase 1 |
-| 3. torch.compile | 30% faster training | 3 days | After Phase 1 |
-| 4. Custom CUDA | 10% faster | 2+ months | Probably never |
+| Phase | Impact | Effort | When | Status |
+|-------|--------|--------|------|--------|
+| 1. Eliminate Ray + SPO algorithm | 30% faster + better convergence | 2 weeks | Now | **DONE** |
+| 1.5 VPRM step-level rewards | Credit assignment fix | 4 hours | Phase 1 | **DONE** (in advantage estimator) |
+| 2. Triton reward | 10x reward speed | 1 week | After Phase 1 | NEXT |
+| 3. torch.compile | 30% faster training | 3 days | After Phase 1 | BLOCKED (Unsloth compat TBD) |
+| 4. Custom CUDA/Triton | Enables 16+ batch × 4096 tokens | 1 week | After Phase 2 | **REQUIRED** (not optional) |
+
+### Phase 4 reassessment (2026-03-18)
+
+The original plan said Phase 4 is "probably never worth it." This was wrong.
+
+Evidence: 8×4096 stress test OOM'd at gpu_memory_utilization=0.6 because
+lm_head output = [4096, 151936] = 1.17GB per sequence in bf16. Fixed by
+lowering to 0.35, but this trades KV cache capacity for training headroom.
+
+With Triton 3.5.1 and Liger Kernel 0.7.0 now available, Phase 4 is achievable
+and would eliminate the VRAM tradeoff entirely. Four QGRE-specific Triton kernels
+identified (none exist anywhere else):
+
+1. **Fused segment_completion** — parallel token ID pattern matching on GPU
+2. **Fused advantage_broadcast** — region→advantage lookup, parallel
+3. **Fused LLDS gate** — three-level gate (traj+token+action) in one kernel
+4. **Fused region-KL-weighted loss** — region lookup + KL scaling + masking
+
+These are custom to QGRE — no library provides them.
 
 ## Target performance
 
