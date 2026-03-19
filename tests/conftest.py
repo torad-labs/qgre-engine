@@ -30,23 +30,16 @@ def pytest_collection_modifyitems(config, items):
 @pytest.fixture
 def mock_game_state() -> GameState:
     """GameState with non-trivial state for serialization tests."""
-    gs = GameState(phase=3, max_active_tier=2, step_count=150)
-    gs.tier_history = [0, 50, 100]
+    gs = GameState(phase=3, step_count=150, mastery_threshold=0.8)
+    gs.phase_history = [50, 100]
 
-    # Add quality windows with scores
-    gs.add_quality_score("shared_mutable_state", "q_format_tags", 1.0)
-    gs.add_quality_score("shared_mutable_state", "q_format_tags", 0.9)
-    gs.add_quality_score("shared_mutable_state", "q_format_tags", 0.95)
-    gs.add_quality_score("shared_mutable_state", "q_node_f1", 0.7)
-    gs.add_quality_score("shared_consensus", "q_format_tags", 0.8)
-
-    # Set elo ratings
-    gs.elo_ratings["shared_mutable_state"] = 1620.5
-    gs.elo_ratings["shared_consensus"] = 1480.3
-
-    # Set mastery counts
-    gs.mastery_counts["shared_mutable_state"] = 12
-    gs.mastery_counts["shared_consensus"] = 5
+    # Per-step mastery scores
+    gs.record_step_score(1, 0.95)
+    gs.record_step_score(1, 0.90)
+    gs.record_step_score(1, 0.92)
+    gs.record_step_score(2, 0.85)
+    gs.record_step_score(2, 0.80)
+    gs.record_step_score(3, 0.60)
 
     return gs
 

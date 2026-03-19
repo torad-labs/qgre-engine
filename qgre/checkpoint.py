@@ -10,56 +10,38 @@ from qgre.types import QUALITY_WINDOW_SIZE, GameState
 def gamestate_to_dict(gs: GameState) -> dict:
     """Serialize GameState to a plain dict safe for json.dumps and torch.save.
 
-    Converts: deque → list, defaultdict → dict, preserves maxlen metadata.
+    Converts: deque → {values, maxlen} for safe round-trip.
     """
-    # quality_windows: {archetype: {quality: deque}} → {archetype: {quality: list}}
-    qw = {}
-    for arch, qualities in gs.quality_windows.items():
-        qw[arch] = {}
-        for q_name, dq in qualities.items():
-            qw[arch][q_name] = {
-                "values": list(dq),
-                "maxlen": dq.maxlen,
-            }
+    sm = {}
+    for step_num, dq in gs.step_mastery.items():
+        sm[step_num] = {"values": list(dq), "maxlen": dq.maxlen}
 
     return {
         "phase": gs.phase,
-        "max_active_tier": gs.max_active_tier,
         "step_count": gs.step_count,
-        "quality_windows": qw,
-        "elo_ratings": dict(gs.elo_ratings),
-        "mastery_counts": dict(gs.mastery_counts),
-        "tier_history": list(gs.tier_history),
+        "mastery_threshold": gs.mastery_threshold,
+        "step_mastery": sm,
+        "phase_history": list(gs.phase_history),
     }
 
 
 def gamestate_from_dict(d: dict) -> GameState:
     """Reconstruct GameState from a plain dict.
 
-    Restores: list → deque (with maxlen), dict → defaultdict.
+    Restores: list → deque (with maxlen).
     """
     gs = GameState()
     gs.phase = d.get("phase", 1)
-    gs.max_active_tier = d.get("max_active_tier", 1)
     gs.step_count = d.get("step_count", 0)
-    gs.tier_history = list(d.get("tier_history", []))
+    gs.mastery_threshold = d.get("mastery_threshold", 0.8)
+    gs.phase_history = list(d.get("phase_history", []))
 
-    # Restore quality_windows with deque maxlen
-    qw = d.get("quality_windows", {})
-    gs.quality_windows = {}
-    for arch, qualities in qw.items():
-        gs.quality_windows[arch] = {}
-        for q_name, window_data in qualities.items():
-            maxlen = window_data.get("maxlen", QUALITY_WINDOW_SIZE)
-            values = window_data.get("values", [])
-            gs.quality_windows[arch][q_name] = deque(values, maxlen=maxlen)
-
-    # Restore defaultdicts with correct factories
-    elo = d.get("elo_ratings", {})
-    gs.elo_ratings = defaultdict(lambda: 1500.0, {k: float(v) for k, v in elo.items()})
-
-    mastery = d.get("mastery_counts", {})
-    gs.mastery_counts = defaultdict(int, {k: int(v) for k, v in mastery.items()})
+    sm = d.get("step_mastery", {})
+    gs.step_mastery = {}
+    for step_num, window_data in sm.items():
+        maxlen = window_data.get("maxlen", QUALITY_WINDOW_SIZE)
+        values = window_data.get("values", [])
+        gs.step_mastery[int(step_num)] = deque(values, maxlen=maxlen)
 
     return gs
 

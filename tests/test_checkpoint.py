@@ -26,24 +26,14 @@ def test_gamestate_roundtrip(mock_game_state):
     restored = gamestate_from_dict(d)
 
     assert restored.phase == mock_game_state.phase
-    assert restored.max_active_tier == mock_game_state.max_active_tier
     assert restored.step_count == mock_game_state.step_count
-    assert restored.tier_history == mock_game_state.tier_history
+    assert restored.mastery_threshold == mock_game_state.mastery_threshold
+    assert restored.phase_history == mock_game_state.phase_history
 
-    # Elo ratings
-    assert dict(restored.elo_ratings) == dict(mock_game_state.elo_ratings)
-
-    # Mastery counts
-    assert dict(restored.mastery_counts) == dict(mock_game_state.mastery_counts)
-
-    # Quality windows — check values match
-    for arch in mock_game_state.quality_windows:
-        assert arch in restored.quality_windows
-        for q_name in mock_game_state.quality_windows[arch]:
-            assert q_name in restored.quality_windows[arch]
-            orig = list(mock_game_state.quality_windows[arch][q_name])
-            rest = list(restored.quality_windows[arch][q_name])
-            assert orig == rest
+    # Step mastery values match
+    for step_num in mock_game_state.step_mastery:
+        assert step_num in restored.step_mastery
+        assert list(restored.step_mastery[step_num]) == list(mock_game_state.step_mastery[step_num])
 
 
 def test_gamestate_json_serializable(mock_game_state):
@@ -53,36 +43,19 @@ def test_gamestate_json_serializable(mock_game_state):
     assert isinstance(result, str)
     assert len(result) > 10
 
-    # Verify round-trip through JSON
     parsed = json.loads(result)
     restored = gamestate_from_dict(parsed)
     assert restored.phase == mock_game_state.phase
 
 
 def test_gamestate_preserves_deque_maxlen(mock_game_state):
-    """After round-trip, deque.maxlen matches original."""
+    """After round-trip, step_mastery deques preserve maxlen."""
     d = gamestate_to_dict(mock_game_state)
     restored = gamestate_from_dict(d)
 
-    for arch in restored.quality_windows:
-        for q_name, dq in restored.quality_windows[arch].items():
-            assert isinstance(dq, deque)
-            assert dq.maxlen == QUALITY_WINDOW_SIZE
-
-
-def test_gamestate_preserves_defaultdict_behavior():
-    """After from_dict(), accessing missing key returns default, not KeyError."""
-    gs = GameState()
-    gs.elo_ratings["existing"] = 1600.0
-    d = gamestate_to_dict(gs)
-    restored = gamestate_from_dict(d)
-
-    # Existing key preserved
-    assert restored.elo_ratings["existing"] == 1600.0
-
-    # Missing key returns default (1500.0 for elo, 0 for mastery)
-    assert restored.elo_ratings["never_seen"] == 1500.0
-    assert restored.mastery_counts["never_seen"] == 0
+    for step_num, dq in restored.step_mastery.items():
+        assert isinstance(dq, deque)
+        assert dq.maxlen == QUALITY_WINDOW_SIZE
 
 
 def test_gamestate_empty_roundtrip():
@@ -92,10 +65,41 @@ def test_gamestate_empty_roundtrip():
     restored = gamestate_from_dict(d)
 
     assert restored.phase == 1
-    assert restored.max_active_tier == 1
     assert restored.step_count == 0
-    assert restored.quality_windows == {}
-    assert restored.tier_history == []
+    assert restored.step_mastery == {}
+    assert restored.phase_history == []
+    assert restored.mastery_threshold == 0.8
+
+
+def test_gamestate_phase_advance():
+    """Phase advances when step mastery exceeds threshold."""
+    gs = GameState(mastery_threshold=0.8)
+
+    # Step 1 not mastered yet
+    for _ in range(20):
+        gs.record_step_score(1, 0.7)
+    assert not gs.check_phase_advance(max_phase=4)
+    assert gs.phase == 1
+
+    # Step 1 mastered
+    for _ in range(20):
+        gs.record_step_score(1, 0.9)
+    assert gs.check_phase_advance(max_phase=4)
+    assert gs.phase == 2
+
+    # Step 2 mastered
+    for _ in range(20):
+        gs.record_step_score(2, 0.85)
+    assert gs.check_phase_advance(max_phase=4)
+    assert gs.phase == 3
+
+
+def test_gamestate_no_advance_past_max():
+    """Phase cannot advance past max_phase."""
+    gs = GameState(phase=4, mastery_threshold=0.5)
+    gs.record_step_score(4, 1.0)
+    assert not gs.check_phase_advance(max_phase=4)
+    assert gs.phase == 4
 
 
 # --- Step 0f: Checkpoint Resume ---

@@ -358,7 +358,95 @@ Known deferred items (not bugs, design decisions for v2):
   - CompletionLogger file handle leak on crash (flush() mitigates, __del__ would be cleaner)
 ```
 
-### COMPLETED: Generalize engine (remove v1 hardcoding) — committed de2a74c + 5471ee0
+### COMPLETED: Generalize engine — committed de2a74c through 548005a
+
+### ACTIVE WORK: Wire GameState into engine for phase advancement
+
+The QGRE superpower (from SPECIAL-TOKENS-SUPERPOWER.md): the engine has direct access to
+token-level structure via the segmenter. It can assign per-step rewards at the token level.
+This is what makes QGRE different from generic GRPO.
+
+Currently broken: GameState is created and checkpointed but NEVER READ by the engine.
+Phase advancement is entirely the reward_fn's responsibility. But the PLAN says
+"phase-gated by GameState" — the engine should manage phase transitions.
+
+The architecture should be:
+- reward_fn: scores per-quality (text-level verification: parse XML, check JSON, verify grounding)
+- engine: uses quality scores + GameState to determine phase, track mastery, advance phases
+- engine: uses segmenter + step_qualities + phase to compute per-token advantages
+
+**Changes needed:**
+
+```
+Step P1: Engine-managed phase advancement
+  - QGRETrainer.step() updates GameState after scoring:
+    * Records quality scores per archetype via add_quality_score()
+    * Checks mastery windows via get_quality_mean()
+    * Advances game_state.phase when thresholds are met
+  - Phase threshold config in AlgorithmConfig (e.g., mastery_threshold: 0.8)
+  - RewardResult.phase is SET BY THE ENGINE (from game_state.phase), not by reward_fn
+  - reward_fn returns scores only — engine determines phase
+  - Test: quality scores accumulate, phase advances when threshold met
+
+Step P2: GameState → advantage estimator wiring
+  - QGRETrainer passes game_state.phase to compute_advantages (not rr.phase)
+  - on_tier_advance() called when phase advances
+  - SPO V-tracker resets for newly-active qualities
+  - Test: phase advance → V-tracker reset → no spike
+
+Step P3: Mastery tracking per step (not per archetype)
+  - GameState tracks quality means PER STEP, not just per archetype
+  - Phase N advances when step N's quality mean exceeds threshold
+  - This is the QGRE curriculum: step 1 mastery unlocks step 2 qualities
+  - Test: step 1 mastery → phase 2 → step 2 qualities activate
+
+Step P4: Remove phase from RewardResult
+  - RewardResult becomes: reward + scores only
+  - Phase lives in GameState (engine-managed)
+  - Update all tests, examples, conftest
+  - Backward compat: if RewardResult.phase is set, warn and ignore
+
+Step P5: Update README + docs
+  - Document the engine-managed phase model
+  - Show how mastery thresholds work
+  - Update "Bring Your Own Domain" section
+```
+
+Step P6: Full train() loop in trainer.py
+  - Add train() method that loops: for batch in dataloader → generate → score → step()
+  - Calls generation_backend.generate() for completions
+  - Calls reward_fn for scoring
+  - Calls step() for algorithm + backward
+  - Integrates phase advancement after step()
+  - Records per-step scores to GameState
+  - Checks phase advance, calls on_tier_advance if advanced
+  - Saves checkpoints every save_freq steps
+  - Logs to MLflow via log_step_metrics
+  - Test: mock trainer runs full loop for 3 steps
+
+Step P7: Fix checkpoint serialization
+  - gamestate_to_dict / gamestate_from_dict must match new GameState fields
+  - step_mastery: dict of deque → dict of list (with maxlen preserved)
+  - phase_history: list of ints
+  - mastery_threshold: float
+  - Remove references to old fields (quality_windows, elo_ratings, mastery_counts, max_active_tier)
+  - Test: round-trip new GameState through checkpoint
+
+Step P8: Wire MLflow + LR scheduler
+  - trainer.train() calls log_step_metrics after each step
+  - setup_optimizer creates scheduler from config
+  - Scheduler steps after each optimizer step
+  - Test: mock mlflow receives expected metrics
+
+Step P9: SPO warm-start fix — use batch mean not current sample
+  - Change v = r to v = batch_mean for first observation (matches PLAN.md spec)
+  - Test: first observation advantage ≈ 0 regardless of individual reward value
+
+**Execution rules:**
+- Build ONE step per iteration
+- After each step: run pytest — must pass
+- Exa search before any bug fix
+- Commit and push after each step passes
 
 The engine is currently hardcoded to 4 XML steps with v1-specific quality names.
 This must be generalized so any domain can use the engine.
@@ -436,13 +524,22 @@ Step G5: Update README and tests
 
 ## Completion Promise
 
-When ALL gaps are closed and tests pass for the requested step, output exactly:
+**NEVER report FEATURE LOOP COMPLETE without running this checklist:**
 
 ```
-STEP COMPLETE — zero gaps remaining
+COMPLETION CHECKLIST (run every time before reporting done):
+1. Read docs/PLAN.md — list every algorithm/feature described. Check each is implemented.
+2. Read docs/SPECIAL-TOKENS-SUPERPOWER.md — list every technique. Check each is implemented or explicitly deferred.
+3. Read docs/PILLARS.md — list every component per pillar. Check each exists.
+4. grep for TODO/FIXME/STUB/placeholder in qgre/*.py — must be zero.
+5. Run pytest — all tests must pass.
+6. Check GameState is USED (not just stored) — engine must manage phase advancement.
+7. Check reward scores flow into per-step advantages (not just sequence-level).
+8. Check segmenter is called and regions affect advantage computation.
+9. If ANY item fails → there are gaps. Do NOT report complete.
 ```
 
-When ALL steps in the build sequence are done:
+When ALL gaps are closed and the checklist passes:
 
 ```
 FEATURE LOOP COMPLETE — zero gaps remaining
