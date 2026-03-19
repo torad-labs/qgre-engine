@@ -331,6 +331,7 @@ qgre/
 examples/
   hypergraph/          — Multi-step XML structured output (SPO mode)
   math/                — Single-step math (GRPO mode)
+  hamiltonian/         — Physics derivation (SPO mode, verifiable via sympy)
 tests/                 — 132 tests (123 CPU + 9 GPU)
 ```
 
