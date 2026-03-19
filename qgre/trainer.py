@@ -234,13 +234,7 @@ class QGRETrainer:
         for i, c in enumerate(completions):
             comp_tensor[i, :len(c)] = torch.tensor(c, dtype=torch.long, device=device)
 
-        # Forward pass — single call, extract logits
-        output = self.model(comp_tensor)
-        logits = output.logits if hasattr(output, "logits") else output
-
-        # Response mask: completions from vLLM are response-only (no prompt tokens).
-        # prompt_lengths=0 because comp_tensor contains ONLY completion tokens.
-        # (ref: silent-failure-hunter round 2, finding #1)
+        # Response mask
         prompt_lengths = [0] * len(completions)
         response_mask = self.compute_response_mask(comp_tensor, prompt_lengths)[:, 1:]
 
@@ -249,25 +243,57 @@ class QGRETrainer:
                 f"Step {self.global_step}: no response tokens in any completion — cannot compute loss."
             )
 
-        # Compute loss — advantages truncated to seq_len-1 (NOT shifted by 1)
-        # logprobs_from_logits already does the next-token shift internally
-        # (ref: silent-failure-hunter round 2, finding #2)
-        loss, metrics = self.compute_loss(
-            logits=logits,
-            input_ids=comp_tensor,
-            advantages=padded_advs[:, :-1],
-            response_mask=response_mask,
-        )
+        # Micro-batched forward + backward — avoids OOM on logits tensor
+        # Full logits = batch × seq × vocab ≈ 8 × 4096 × 151K × 4B = 18.6GB (impossible on 16GB)
+        # Micro-batch: 1-2 seqs at a time, each does forward → loss → backward
+        # Gradients accumulate across micro-batches. (ref: TRL PR #2669)
+        micro_batch_size = max(1, min(2, len(completions)))
+        n_micro = (len(completions) + micro_batch_size - 1) // micro_batch_size
+        total_loss = 0.0
+        all_metrics = {}
 
-        if not torch.isfinite(loss):
-            raise RuntimeError(
-                f"Step {self.global_step}: loss is {loss.item()} — aborting to prevent weight corruption."
+        for mb_start in range(0, len(completions), micro_batch_size):
+            mb_end = min(mb_start + micro_batch_size, len(completions))
+            mb_ids = comp_tensor[mb_start:mb_end]
+            mb_advs = padded_advs[mb_start:mb_end]
+            mb_mask = response_mask[mb_start:mb_end]
+
+            mb_output = self.model(mb_ids)
+            mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
+
+            mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
+            mb_old_lp = mb_lp.detach()  # On-policy
+
+            min_len = min(mb_lp.shape[1], mb_advs.shape[1] - 1, mb_mask.shape[1])
+            mb_loss, mb_metrics = self.loss_fn(
+                curr_logprobs=mb_lp[:, :min_len],
+                prev_logprobs=mb_old_lp[:, :min_len],
+                advantages=mb_advs[:, :min_len],
+                mask=mb_mask[:, :min_len].float(),
             )
 
-        # Backward + update
-        loss = loss / self.config.training.gradient_accumulation_steps
-        loss.backward()
+            # Scale loss by micro-batch fraction
+            (mb_loss / n_micro).backward()
+            total_loss += mb_loss.item() / n_micro
 
+            del mb_logits, mb_output, mb_lp  # Free VRAM immediately
+
+            if not all_metrics:
+                all_metrics = mb_metrics
+            else:
+                for k, v in mb_metrics.items():
+                    all_metrics[k] = (all_metrics.get(k, 0) + v) / 2
+
+        metrics = all_metrics
+        metrics["loss"] = total_loss
+        loss_val = total_loss  # For NaN check
+
+        if not (torch.isfinite(torch.tensor(loss_val))):
+            raise RuntimeError(
+                f"Step {self.global_step}: loss is {loss_val} — aborting to prevent weight corruption."
+            )
+
+        # Optimizer step (backward already done in micro-batches above)
         if (self.global_step + 1) % self.config.training.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()

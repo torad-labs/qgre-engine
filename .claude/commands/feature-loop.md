@@ -497,6 +497,48 @@ Step G5: Update README and tests
 - After all G steps: run GPU smoke test if GPU free
 - When all pass → commit and push → report FEATURE LOOP COMPLETE
 
+### ACTIVE WORK: Implement ALL plan phases (not just Phase 1)
+
+Phase 1 (Eliminate Ray) is done. Phases 2-4 from PLAN.md are NOT optional.
+The OOM on 8×4096 proves Phase 4 is required NOW, not "probably never."
+
+```
+Phase 2-4 Implementation:
+
+Step T1: Fused log_softmax+gather (Triton or Liger) — FIXES OOM
+  - The OOM: logits.to(float32) allocates 2.3GB per sequence (4096 × 151936 × 4B)
+  - Fix: Triton kernel that does log_softmax+gather in one pass, never materializing full tensor
+  - OR: Use Liger Kernel's fused_linear_cross_entropy (NeMo RL supports use_liger_kernel)
+  - Search Exa: "liger kernel fused cross entropy logprobs GRPO memory efficient"
+  - Test: 8 × 4096 tokens fits in 16GB
+
+Step T2: torch.compile the advantage computation
+  - Wrap QGREStepAdvantageEstimator.compute_advantages in torch.compile
+  - NOTE: v1 found torch.compile conflicts with Unsloth backward patches
+  - Search Exa for current status of torch.compile + Unsloth compatibility
+  - If incompatible: skip, advantage computation is already fast (pure Python, no GPU)
+
+Step T3: Triton kernel for segment_completion
+  - Token ID pattern matching on GPU (scan for STEP_TOKEN, OPEN_ANGLE, etc.)
+  - Currently CPU Python — fine for batch_size≤16, bottleneck at scale
+  - Only implement if profiling shows it's a bottleneck
+  - Search Exa: "triton kernel token pattern matching sequence labeling"
+
+Step T4: GPU memory budget management
+  - Config: memory_budget section with gpu_memory_utilization, training_headroom
+  - Engine computes: model_size + kv_cache + training_overhead
+  - Warns if config exceeds physical VRAM
+  - Auto-adjusts micro_batch_size to fit
+  - Reference: v1 verl-local-full.yaml (gpu_memory_utilization=0.35 for training headroom)
+
+Step T5: Stress test passes
+  - 8 prompts × 4096 tokens on RTX 5080 — no OOM
+  - 16 prompts × 4096 tokens — verify throughput
+  - Measure: tokens/sec, VRAM peak, step time
+```
+
+**Execution: T1 first (fixes OOM), then T4 (memory management), then T2-T3 if needed.**
+
 ### Post-completion work (when user requests):
 - `/commit` — commit all changes
 - Move to training-dojo for hypergraph-scan-v2 run planning

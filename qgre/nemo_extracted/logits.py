@@ -21,16 +21,20 @@ import torch
 def logprobs_from_logits(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Compute log probabilities of labels given logits.
 
+    Memory-efficient: log_softmax in native dtype (bf16), gather first (tiny),
+    then cast gathered values to float32. Avoids allocating a full float32 copy
+    of the vocab-sized logits tensor (2.3GB per seq × 4096 × 151K vocab).
+
     Args:
-        logits: [batch, seq, vocab] raw model output (will be cast to float32)
+        logits: [batch, seq, vocab] raw model output
         labels: [batch, seq] token IDs to gather log probs for
 
     Returns:
-        [batch, seq] log probabilities for each token
+        [batch, seq] log probabilities for each token (float32)
     """
-    logits = logits.to(torch.float32)
     log_probs = torch.nn.functional.log_softmax(logits, dim=-1)
-    return log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+    gathered = log_probs.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
+    return gathered.to(torch.float32)
 
 
 def compute_response_logprobs(
