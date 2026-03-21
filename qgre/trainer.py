@@ -493,7 +493,18 @@ class QGRETrainer:
             raise RuntimeError(
                 f"Checkpoint {latest} missing model_state_dict — cannot resume with random weights"
             )
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        # Filter out bitsandbytes quantization metadata keys that don't exist in
+        # a freshly initialized model (absmax, quant_map, quant_state, etc.)
+        # These are saved by model.state_dict() but cause errors on load_state_dict()
+        # because bnb creates them lazily during quantization, not at init time.
+        state_dict = checkpoint["model_state_dict"]
+        model_keys = set(self.model.state_dict().keys())
+        filtered = {k: v for k, v in state_dict.items() if k in model_keys}
+        skipped = len(state_dict) - len(filtered)
+        if skipped > 0:
+            import warnings
+            warnings.warn(f"Checkpoint resume: skipped {skipped} keys not in model (bnb quant metadata)")
+        self.model.load_state_dict(filtered, strict=False)
 
         if checkpoint.get("optimizer_state_dict") and self.optimizer:
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
