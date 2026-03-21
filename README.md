@@ -1,45 +1,48 @@
 # QGRE Engine
 
-**Quality-Gated Reward Escalation.** A single-GPU training engine that grounds LLM reasoning in novel domains — without supervised fine-tuning, without a critic network, without a cluster.
+**Quality-Gated Reward Escalation.** A training engine that grounds LLM reasoning in domains where the model has never seen the output format, the reasoning protocol, or the definition of "correct."
 
-The core claim: SFT teaches models to *match outputs*. QGRE teaches models to *match inputs* — to ground their reasoning in the structure of the problem. A 1.7B model trained with QGRE on Hamiltonian mechanics writes correct physics derivations in 50 steps. Not because it memorized them. Because it learned the protocol.
+One GPU. One process. No Ray, no verl, no TRL, no critic network.
 
-No Ray. No verl. No TRL. Just: generate → score → advantages → loss → backward → update.
+A 1.7B model trained with QGRE on Hamiltonian mechanics — a domain absent from its pretraining data — writes correct physics derivations in 50 steps. It identifies kinetic and potential energy terms, applies the Legendre transform, and produces Hamilton's equations of motion with `<think>` reasoning traces. Not because it memorized solutions. Because the training signal taught it the *protocol* for deriving them.
 
-## Why Not verl / TRL / OpenRLHF?
+The thesis: SFT teaches models to match outputs. Standard RL teaches models to compare completions. QGRE teaches models to ground their reasoning in the structure of the input. The difference is not optimization — it is what the gradient *points at*.
 
-Those frameworks solve a different problem. They distribute GRPO across GPU clusters. QGRE solves the problem that comes *before* distribution: how to train on a domain where the model doesn't know the output format, the reasoning protocol, or what "correct" means — and where a single scalar reward cannot teach it.
+---
 
-| | **QGRE Engine** | **verl** | **TRL** | **OpenRLHF** |
-|---|---|---|---|---|
-| **Primary target** | Novel domains, structured reasoning | Math/code (verifiable) | General alignment | General RLHF |
-| **Credit assignment** | Per-token, per-region (VPRM) | Per-completion | Per-completion | Per-completion |
-| **Curriculum** | Phase-gated, automatic advancement | None | None | None |
-| **Baseline** | SPO persistent EMA (n=1) | Group mean (n=8–16) | Group mean (n=8) | PPO critic network |
-| **Cold start** | Phase 1 teaches format first | Assumes model knows format | Assumes model knows format | Assumes model knows format |
-| **GPU requirement** | 1 × 16GB consumer GPU | 4–8 × A100 | 1–4 GPUs | 4–8 GPUs |
-| **Complexity** | ~3K lines, single process | ~50K lines, Ray actors | ~30K lines, Accelerate | ~40K lines, Ray |
-| **Setup** | `pip install -e .` + one YAML | Cluster config, Ray, FSDP | HuggingFace ecosystem | Ray cluster, Docker |
-| **Generation speed** | ~35s/step (n=1, 4096 tokens) | ~280s/step (n=8, 4096 tokens) | ~280s/step (n=8) | ~280s/step (n=8) |
+## What happens when you train on a domain the model has never seen?
 
-The difference is architectural, not just scale. verl, TRL, and OpenRLHF assign one reward to one completion. If the format is wrong, the grounding is also penalized. If grounding is right, the format also gets credit. The model has no way to separate them.
+Every existing RL framework assumes the model already knows the output format. verl's math recipes work because the base model has seen `\boxed{answer}` during pretraining. TRL's GRPO works because instruction-tuned models already follow formatting prompts.
 
-QGRE decomposes. A segmenter maps every token to its step. Each step has its own quality functions. Each quality has its own advantage. The gradient that teaches format touches only format tokens. The gradient that teaches grounding touches only grounding tokens. And the curriculum decides *when* each gradient turns on.
+Train on a novel domain — hypergraph incidence structures, symbolic physics, financial compliance schemas — and the assumption fails. The model's first completions are structurally wrong. Every completion in the batch is structurally wrong. The group mean of 8 wrong completions is still wrong. A single scalar reward on structural garbage produces noise. The gradient from that noise points nowhere.
 
-This is why a 1.7B model learns Hamiltonian mechanics in 50 steps. Not because the model is special. Because the training signal is decomposed.
+This is the cold start problem. It is not a hyperparameter issue. It is a *credit assignment* failure: the model receives one number for an output that has multiple independently-assessable components, and it cannot determine which component the number refers to.
+
+QGRE solves this with three mechanisms applied simultaneously:
+
+1. **Decompose the reward.** Your reward function returns per-quality scores, not a single scalar. `q_format: 0.9`, `q_grounding: 0.4`, `q_accuracy: 0.0` — each quality scored independently, each giving partial credit (never binary 0/1).
+
+2. **Map scores to tokens.** A segmenter assigns every token in the completion to a step region. Format tokens receive format advantages. Grounding tokens receive grounding advantages. Think tokens receive zero advantage — reasoning is free.
+
+3. **Gate the curriculum.** Phase 1 activates only format qualities. The model learns "what shape should my output be?" without distraction from grounding or accuracy signals. When format mastery exceeds the threshold, phase 2 activates grounding. Each skill becomes the foundation for the next.
+
+The result: a model that bootstraps from zero knowledge of the domain. No SFT warm-up needed. No hand-crafted easy examples. The curriculum IS the warm-up.
+
+---
 
 ## Results
 
-**Hamiltonian mechanics** (Qwen3-1.7B, 4-bit quantized, single RTX 5080 16GB):
+**Hamiltonian mechanics** — Qwen3-1.7B, 4-bit quantized, single RTX 5080 (16GB):
 
 | Step | Avg Reward | Min | Max | What the model produces |
 |------|-----------|-----|-----|------------------------|
-| 0 | 0.61 | 0.40 | 0.96 | Guessing — some correct structure by chance |
-| 3 | 0.93 | 0.85 | 0.98 | Identifies kinetic + potential energy, derives Hamilton's equations |
-| 18 | 0.98 | 0.96 | 1.00 | Near-perfect derivations with `<think>` reasoning traces |
-| 47 | 0.94 | 0.94 | 0.95 | Converged — consistent quality across all prompts |
+| 0 | 0.61 | 0.40 | 0.96 | Guessing. Some correct structure by chance. |
+| 3 | 0.93 | 0.85 | 0.98 | Identifies T and V. Derives Hamilton's equations. |
+| 18 | 0.98 | 0.96 | 1.00 | Near-perfect derivations with reasoning traces. |
+| 33 | 0.97 | 0.94 | 1.00 | Sustained accuracy across varied physical systems. |
+| 47 | 0.94 | 0.94 | 0.95 | Converged. Consistent quality across all prompts. |
 
-50 steps. ~35 seconds per step at 4096 tokens. No SFT warm-up. No hand-crafted examples. The curriculum *is* the warm-up.
+50 steps. ~35 seconds per step at 4096 tokens. 6.2 GB peak VRAM. Zero VRAM growth over the full run.
 
 ```
 SCORE: 0.98
@@ -49,28 +52,55 @@ for a block attached to a spring on a frictionless surface. The block has
 mass 3 kg, the spring constant is 6 N/m...
 ```
 
+The reward function checks symbolic correctness against sympy-computed ground truth. The model was not fine-tuned on physics. It learned the derivation protocol through QGRE's decomposed training signal.
+
+---
+
+## How this differs from existing engines
+
+The question is not "which framework is better." The question is: what does the gradient point at?
+
+| | **QGRE Engine** | **verl** | **TRL** | **OpenRLHF** |
+|---|---|---|---|---|
+| **What the gradient teaches** | Per-token, per-quality, per-step | Per-completion scalar | Per-completion scalar | Per-completion scalar + critic |
+| **Cold start on novel domains** | Phase gating bootstraps from zero | Requires SFT or pretrained format | Requires SFT or pretrained format | Requires SFT or pretrained format |
+| **Credit assignment** | Segmented: format tokens get format gradient, grounding tokens get grounding gradient | Uniform: all tokens get the same scalar | Uniform: all tokens get the same scalar | Critic-based: learned value function per token |
+| **Curriculum** | Automatic phase advancement on mastery | Manual (or none) | None | None |
+| **Baseline** | SPO: persistent EMA per prompt per step (n=1) | Group mean (n=8–16) | Group mean (n=8) | PPO critic network |
+| **Completions per prompt** | 1 (every completion teaches) | 8–16 (most discarded) | 8 (most discarded) | 1 (but requires critic) |
+| **GPU requirement** | 1 × 16GB consumer GPU | 4–8 × A100 80GB | 1–4 GPUs | 4–8 GPUs |
+| **Lines of code** | ~3,000 | ~50,000 | ~30,000 | ~40,000 |
+| **Dependencies** | Unsloth + vLLM + PyTorch | Ray + vLLM + Megatron/FSDP | Accelerate + HuggingFace | Ray + vLLM + DeepSpeed |
+| **Setup** | `pip install -e .` + one YAML | Cluster config, Ray, FSDP | HuggingFace ecosystem | Ray cluster, Docker |
+
+The 8× generation speed advantage of SPO (n=1) over GRPO (n=8) is a consequence, not the point. The point is that SPO + VPRM + phase gating produces a training signal that decomposes credit to the token level — without a learned critic, without a reward model, without multiple completions. The decomposition is programmatic: your reward function scores qualities, the segmenter maps tokens to steps, the engine does the rest.
+
+---
+
 ## Quick Start
 
 ```bash
 pip install -e .
 
-# Hamiltonian mechanics (SPO mode, verifiable via sympy)
+# Hamiltonian mechanics — physics derivations, verifiable via sympy
 python -m qgre train \
   --config examples/hamiltonian/config.yaml \
   --reward examples.hamiltonian.reward_fn:hamiltonian_reward
 
-# Multi-step XML structured output
+# Hypergraph structure — multi-step XML structured output
 python -m qgre train \
   --config examples/hypergraph/config.yaml \
   --reward examples.hypergraph.reward_fn:reward_fn
 
-# Single-step math
+# Math — single-step, minimal config
 python -m qgre train \
   --config examples/math/config.yaml \
   --reward examples.math.reward_fn:math_reward_fn
 ```
 
-That's it. The engine loads the model, data, creates the trainer, and runs the full training loop.
+The engine loads the model, tokenizes the data, creates the trainer, and runs the full loop: generate → score → segment → advantages → loss → backward → LoRA sync → checkpoint → log → repeat.
+
+---
 
 ## Architecture
 
@@ -92,7 +122,7 @@ That's it. The engine loads the model, data, creates the trainer, and runs the f
   One process. One GPU. Direct function calls.
 ```
 
-### Training Loop (Mermaid)
+### Training loop
 
 ```mermaid
 flowchart TB
@@ -103,71 +133,70 @@ flowchart TB
 
     subgraph SCORE ["2. Score"]
         C --> D[Your reward_fn]
-        D --> E["RewardResult(scores={q_format: 0.9, q_ground: 0.4, ...})"]
+        D --> E["RewardResult {q_format: 0.9, q_ground: 0.4, ...}"]
     end
 
     subgraph ADVANTAGE ["3. Compute Advantages"]
-        E --> F[Segmenter → regions per token]
+        E --> F[Segmenter → region per token]
         F --> G[Step rewards from active qualities]
-        G --> H["SPO baseline: r - V(prompt, step)"]
-        H --> I[GDPO normalize per step]
-        I --> J[Broadcast to per-token advantages]
+        G --> H["SPO: advantage = reward − V(prompt, step)"]
+        H --> I[GDPO: normalize per step across batch]
+        I --> J[Broadcast step advantage → per-token]
     end
 
     subgraph TRAIN ["4. Train (training mode)"]
         J --> K[Micro-batched forward pass]
         K --> L[selective_log_softmax → logprobs]
         L --> M["ClippedPGLossFn (NeMo RL)"]
-        M --> N[loss.backward + optimizer.step]
+        M --> N[loss.backward → optimizer.step]
     end
 
     subgraph CURRICULUM ["5. Curriculum"]
         N --> O[Record mastery per step]
         O --> P{mastery > threshold?}
-        P -->|Yes| Q[Advance phase → unlock next qualities]
-        P -->|No| R[Check stagnation]
+        P -->|Yes| Q[Advance phase, unlock next qualities]
+        P -->|No| R[Check stagnation signals]
         Q --> S[Reset SPO baseline for new step]
     end
 
-    subgraph SYNC ["6. Sync & Persist"]
+    subgraph SYNC ["6. Sync"]
         S --> T[Save LoRA → reload into vLLM]
         R --> T
         T --> U[Checkpoint every N steps]
         U --> V[Recreate vLLM every 50 steps]
         V --> A
     end
-
-    style GENERATE fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
-    style SCORE fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
-    style ADVANTAGE fill:#0f3460,stroke:#16213e,color:#e0e0e0
-    style TRAIN fill:#0f3460,stroke:#16213e,color:#e0e0e0
-    style CURRICULUM fill:#533483,stroke:#16213e,color:#e0e0e0
-    style SYNC fill:#1a1a2e,stroke:#16213e,color:#e0e0e0
 ```
 
 ### What each layer does
 
-| Layer | Module | Responsibility |
-|-------|--------|---------------|
-| **Model + LoRA** | `generation.py` (Unsloth) | Loads QLoRA model (4-bit base + full-precision adapters). Switches between `for_training()` and `for_inference()` mode. Manages vLLM engine lifecycle including periodic recreation to prevent VRAM leak. |
-| **Generation** | `generation.py` (vLLM) | `fast_generate()` produces completions via in-process vLLM. Decodes prompts, returns token IDs + text. Handles SamplingParams (temperature, top_p, stop tokens). |
-| **Reward** | Your `reward_fn` | Scores completions → `RewardResult(reward, scores)`. You provide this. The engine consumes `.scores` per quality for step-level credit. Every score must give partial credit — binary 0/1 kills gradient signal. |
-| **Segmentation** | `segments.py` | Pluggable segmenter splits token IDs into regions: THINK, STEP_1..N, FORMAT, OTHER. Built-in: `qwen3_xml` (XML step tags), `hif_json` (HIF JSON sections), `uniform` (all STEP_1), or your own. |
-| **Advantages** | `advantages.py` | `QGREStepAdvantageEstimator` computes per-token advantages. Four techniques unified: SPO baseline, GDPO normalization, VPRM segment propagation, QGRE phase gating. NaN-guarded (ms-swift #8123). |
-| **Loss** | `nemo_extracted/loss_functions.py` | `ClippedPGLossFn` from NeMo RL (Apache-2.0). Clipped PG loss with DAPO-style asymmetric clipping, configurable KL regularization (k1/k2/k3), importance sampling, region-specific KL weights. |
-| **Backward** | `trainer.py` (PyTorch) | Standard `loss.backward()` + `optimizer.step()`. NaN guard, gradient clipping, gradient accumulation. Unsloth's `for_training()` mode called before each micro-batch forward pass for autograd compatibility. |
-| **Monitoring** | `trainer.py` | Completion length tracking (mean/max/min per step), stagnation detection (timeout + plateau), neg_logprob_mean for policy collapse monitoring. All logged to MLflow. |
-| **Persistence** | `checkpoint.py`, `logging.py` | Checkpoint save/resume (model, optimizer, scheduler, GameState with stagnation counters, SPO V-tracker, RNG). MLflow metrics. JSONL completion logs. |
+Every layer in the pipeline has one job. The engine composes them. You replace the ones that are domain-specific (reward function, segmenter, step_qualities). The rest is infrastructure.
 
-## How QGRE Works — The Core Algorithm
+| Layer | Module | What it does |
+|-------|--------|-------------|
+| **Model + LoRA** | `generation.py` | Loads a QLoRA model through Unsloth (4-bit base + full-precision adapters). Switches between `for_training()` and `for_inference()` mode per Unsloth's kernel requirements. Manages the vLLM engine lifecycle, including periodic recreation every 50 steps to prevent the VRAM leak documented in Unsloth #3864. |
+| **Generation** | `generation.py` | Calls `fast_generate()` on the colocated vLLM engine. Decodes prompts from left-padded token tensors, passes `SamplingParams` (temperature, top_p, stop tokens), returns token IDs and decoded text. The generation and training share the same GPU — no network overhead, no serialization. |
+| **Reward** | Your code | You write a function that takes `(prompt, completion, metadata)` and returns `RewardResult(reward, scores)`. The engine does not know what "good" means for your domain. You define it. The only requirement: every score must give partial credit. Binary 0/1 kills gradient signal because the model cannot distinguish "almost right" from "completely wrong." |
+| **Segmentation** | `segments.py` | Maps every token in the completion to a region label: THINK, STEP_1, STEP_2, ..., FORMAT, OTHER. The XML segmenter (`qwen3_xml`) reads Qwen3 token IDs directly — no decoding. The JSON segmenter (`hif_json`) decodes to text and uses regex to find section boundaries. The uniform segmenter assigns everything to STEP_1 for single-step domains. You can write your own: any `Callable[[list[int]], list[str]]`. |
+| **Advantages** | `advantages.py` | The algorithmic core. `QGREStepAdvantageEstimator` runs four techniques in sequence: (1) extract per-step rewards from active qualities, (2) compute SPO or GRPO baseline advantages, (3) GDPO-normalize each step independently across the batch, (4) broadcast step advantages to per-token via region labels. NaN-guarded: if a reward function returns NaN, the engine warns and replaces with 0.0 instead of silently corrupting the entire batch (ms-swift #8123). |
+| **Loss** | `nemo_extracted/` | `ClippedPGLossFn` extracted from NVIDIA NeMo RL (Apache-2.0). Clipped policy gradient with DAPO-style asymmetric dual clipping, configurable KL regularization (k1 unbiased / k2 squared / k3 exponential — selectable via config, informed by "A Comedy of Estimators," Bengio et al. ICLR 2026), importance sampling correction, region-specific KL weights (THINK=0.1×, FORMAT=2.0×, validated by Archer ICLR 2026), seq-mean-token-sum-norm aggregation, and optional Dr.GRPO unbiased mode (arXiv:2503.20783). |
+| **Backward** | `trainer.py` | `loss.backward()` through PyTorch autograd. Micro-batched: 1 sequence at a time for seq ≥ 2048, 2 for shorter. NaN guard aborts the step if loss is non-finite. Gradient clipping at configurable max norm. Gradient accumulation across micro-batches. Unsloth's `for_training()` called before each micro-batch forward pass to disable inplace attention kernels that conflict with autograd. |
+| **Monitoring** | `trainer.py` | Every step logs: completion length (mean/max/min) for verbosity drift detection, stagnation status (normal/stagnating/stuck) for curriculum health, neg_logprob_mean for policy collapse monitoring, per-step mastery scores for curriculum tracking. All metrics flow to MLflow. |
+| **Persistence** | `checkpoint.py` | Full training state saved atomically: model weights (LoRA), optimizer (AdamW8bit), LR scheduler, GameState (phase, mastery windows, stagnation counters, phase history, steps_at_phase_start), SPO value tracker (V per prompt per step), and PyTorch + CUDA RNG state for exact reproducibility on resume. Backward-compatible: old checkpoints without stagnation fields load with safe defaults. |
 
-### The Problem
+---
 
-Standard RL training gives the model a single reward signal per completion. For novel domains with multi-step structured output, this creates a credit assignment problem: the model can't tell which step was good and which was bad. A completion that formats perfectly but grounds poorly gets the same gradient as one that grounds perfectly but formats poorly.
+## The Core Algorithm
 
-### The Solution: Step-Level Advantages
+### The credit assignment problem
 
-QGRE breaks the reward into per-step quality scores and computes per-token advantages:
+Consider a completion that formats its output perfectly but hallucinates every entity. Under standard GRPO, the reward is 0.45 (average of perfect format and zero accuracy). The gradient pushes *every token* by 0.45. Format tokens — already correct — receive unnecessary positive gradient. Accuracy tokens — completely wrong — receive the same positive gradient as the format tokens.
+
+The model cannot separate what it did right from what it did wrong. It received one number for a multi-dimensional outcome.
+
+### QGRE's decomposition
+
+QGRE breaks this into per-token, per-step, per-quality advantages:
 
 ```
                     Completion Token Sequence
@@ -188,65 +217,51 @@ QGRE breaks the reward into per-step quality scores and computes per-token advan
      ◀── Per-token advantages broadcast to all tokens in step ──▸
 ```
 
-### Four Techniques Unified
+Format tokens receive +0.85 (correct, reinforce). Accuracy tokens receive -0.40 (wrong, suppress). The gradient separates them. The model learns what worked and what didn't — from a single completion, with no group comparison.
 
-1. **SPO (Single-stream Policy Optimization)**: Persistent EMA baseline per prompt per step. `V = V + lr * (r - V)`. No groups needed — works with n=1. One completion per prompt, every completion teaches. The baseline remembers what this prompt usually scores.
+### The four techniques
 
-2. **GDPO (Group Decomposed)**: Per-step batch normalization. Each step's advantages are independently normalized so no step's gradient signal drowns another. When format saturates at 0.95, grounding at 0.30 still gets full gradient bandwidth.
+**SPO — Single-stream Policy Optimization.** A persistent EMA baseline tracks what each prompt usually scores, per step. `V[prompt][step] = V + lr × (r − V)`. The advantage is the deviation from history: "was this attempt better or worse than what you usually produce for this prompt on this step?" No group of 8 completions needed. Works with n=1. One completion per prompt, every completion teaches. The persistent memory is the replacement for the group comparison.
 
-3. **VPRM (Verifiable Process Rewards)**: Token-level segmentation. A segmenter maps token IDs to regions (STEP_1, STEP_2, FORMAT, THINK). Each token gets its step's advantage. THINK and FORMAT tokens get zero advantage — reasoning is free, structure is free.
+**GDPO — Group Decomposed normalization.** Each step's advantages are independently mean-centered and variance-normalized across the batch. When format saturates at 0.95, its advantages cluster near zero (already mastered — small deviations). Grounding at 0.30 has wide variance (still learning — large deviations). Without GDPO, the format gradients dominate by magnitude. With GDPO, each step occupies equal gradient bandwidth regardless of mastery level.
 
-4. **Phase Gating**: Progressive quality unlock. Phase 1 = only step 1 qualities matter. Phase N = all qualities from steps 1..N. The engine tracks mastery per step and auto-advances when mastery threshold is met.
+**VPRM — Verifiable Process Reward Mapping.** A segmenter function maps every token in the completion to a region label. The engine assigns each token the advantage of its step. Tokens labeled THINK receive zero advantage — the model can reason freely without gradient pressure on its thinking process. Tokens labeled FORMAT receive zero advantage — structural markup carries no training signal. Only content tokens in active steps receive gradient.
 
-### Phase Advancement
+**Phase Gating — The curriculum.** Phase 1 activates only step 1 qualities. When the rolling 20-batch mean mastery exceeds the threshold (default 0.8), the engine advances to phase 2, which cumulatively activates step 1 + step 2 qualities. Each phase builds on mastery from the previous phase. The model learns format before grounding, grounding before chain coherence, chain coherence before accuracy.
 
 ```
-Phase 1: Train format only        → mastery > 0.8 → advance
-Phase 2: Train format + grounding → mastery > 0.8 → advance
-Phase 3: Train all through chain  → mastery > 0.8 → advance
-Phase 4: Train everything         → full training
+Phase 1: [q_format]                          → mastery > 0.8 → advance
+Phase 2: [q_format, q_grounding]             → mastery > 0.8 → advance
+Phase 3: [q_format, q_grounding, q_chain]    → mastery > 0.8 → advance
+Phase N: all qualities active                → full training
 ```
 
-The engine manages this automatically via `GameState`. No external curriculum logic needed.
+The engine manages this via `GameState`. When a phase advances, the SPO baseline for the new step resets to the batch mean (warm start). Mastered steps retain their learned baselines.
 
-### Stagnation Detection
+### Stagnation detection
 
-Training can stall. The engine monitors two signals:
+Training can stall. A phase might never reach the mastery threshold — the model stopped improving but hasn't crossed 0.8. The engine monitors two signals:
 
-- **Plateau**: mastery improvement < 0.02 over the last 50 steps. The model stopped learning but hasn't hit the threshold.
+- **Plateau**: mastery improvement < 0.02 over the last 50 steps. The learning curve flattened.
 - **Timeout**: a phase exceeds 200 steps without advancement. The curriculum is stuck.
 
-Both are logged to MLflow as the `stagnation` metric (0=normal, 1=stagnating, 2=stuck). Detection only — the engine does not intervene. Your training run decides what to do with the signal.
+Both thresholds are configurable. Both are logged to MLflow as the `stagnation` metric (0=normal, 1=stagnating, 2=stuck). The engine detects but does not intervene — your training configuration decides the response. This follows Scaf-GRPO's "guidance exemption period" principle: let the model attempt unassisted before concluding it needs help.
 
-### The Cold Start Problem (and why QGRE exists)
+### The n=1 economics
 
-Every RL training framework assumes the model already knows the output format. verl's math recipes work because the base model has seen enough math during pretraining to produce `\boxed{answer}` some percentage of the time. TRL's GRPO works because instruction-tuned models already know how to follow formatting instructions.
-
-But what happens when you train on a domain the model has never seen? A domain where the output is a hypergraph incidence format, or a Hamiltonian derivation with specific symbolic structure, or a JSON schema the model has never encountered?
-
-The model's first completions are garbage. Every completion is garbage. A single scalar reward on garbage is noise. The group mean of 8 garbage completions is still garbage. The gradient from that noise points nowhere.
-
-QGRE solves cold start by gating:
-
-1. **Phase 1**: Only reward format. "Does the output have the right shape?" The model learns: "I should produce something that looks like `{nodes: [...], edges: [...]}`" — regardless of whether the content is correct.
-2. **Phase 2**: Reward format + grounding. "OK, you know the shape. Now: are the nodes actually from the input?" The model already has the format down. It only needs to learn one new thing.
-3. **Phase N**: Reward everything. Full training signal. But by now the model produces well-formatted, well-grounded output. The accuracy signal has clean targets to push against.
-
-This is the cold start solution. No SFT warm-up needed. No hand-crafted easy examples. The curriculum IS the warm-up. The model bootstraps from zero knowledge of the domain in 50 steps because each step only asks it to learn one thing at a time.
-
-### The n=1 Economics
-
-Standard GRPO generates 8 completions per prompt and compares them. SPO generates 1 and compares it to a persistent memory of what this prompt usually scores.
+Standard GRPO generates 8 completions per prompt and compares them. SPO generates 1 and compares it to a persistent memory.
 
 For a 4096-token completion at ~35s generation time:
-- GRPO (n=8): 8 × 35s = 280s generation per training step
-- SPO (n=1): 1 × 35s = 35s generation per training step
+- **GRPO (n=8)**: 8 × 35s = 280s generation per training step
+- **SPO (n=1)**: 1 × 35s = 35s generation per training step
 
-8× faster per step. The trade-off: no within-group comparison. SPO compensates with VPRMs (per-region credit) and persistent baselines (cross-step credit). The signal-per-step is slightly noisier but the steps-per-hour is 8× higher.
+8× faster per step. The trade-off is real: no within-group comparison means noisier per-step signal. SPO compensates with VPRMs (per-region credit), persistent baselines (cross-step credit), and GDPO (per-step normalization). The signal per step is noisier. The steps per hour are 8× higher. In practice, the Hamiltonian example converges in 50 SPO steps — equivalent wall time to ~6 GRPO steps.
+
+---
 
 ## Bring Your Own Domain
 
-The engine is domain-agnostic. You provide three things:
+The engine is domain-agnostic. You provide three things. The engine provides everything else.
 
 ### 1. A reward function
 
@@ -254,11 +269,10 @@ The engine is domain-agnostic. You provide three things:
 from qgre.types import RewardResult
 
 def my_reward_fn(prompt: str, completion: str, metadata: dict | None = None) -> RewardResult:
-    # Score each quality independently — ALWAYS partial credit, NEVER binary 0/1
     scores = {
-        "q_format": check_format(completion),      # 0.0 - 1.0
-        "q_grounding": check_grounding(completion), # 0.0 - 1.0
-        "q_accuracy": check_accuracy(completion),    # 0.0 - 1.0
+        "q_format": check_format(completion),       # 0.0 – 1.0, ALWAYS partial credit
+        "q_grounding": check_grounding(completion),  # NEVER binary 0/1
+        "q_accuracy": check_accuracy(completion),
     }
     return RewardResult(
         reward=sum(scores.values()) / len(scores),
@@ -266,78 +280,95 @@ def my_reward_fn(prompt: str, completion: str, metadata: dict | None = None) -> 
     )
 ```
 
+Every score must give partial credit. A model that produces almost-valid JSON should score 0.7, not 0.0. A model that identifies 3 of 5 entities should score 0.6, not 0.0. Without partial credit, the gradient signal dies — the model cannot distinguish "close" from "wrong" and has no direction to improve.
+
 ### 2. A step_qualities mapping
 
 ```yaml
-# In config.yaml
 algorithm:
   step_qualities:
-    1: [q_format]            # Step 1: format quality
-    2: [q_grounding]         # Step 2: grounding quality
-    3: [q_accuracy]          # Step 3: accuracy quality
+    1: [q_format]            # Phase 1: format quality only
+    2: [q_grounding]         # Phase 2: + grounding quality
+    3: [q_accuracy]          # Phase 3: + accuracy quality
 ```
 
-Or programmatically:
-```python
-step_qualities = {
-    1: ["q_format"],
-    2: ["q_grounding"],
-    3: ["q_accuracy"],
-}
-```
+The mapping defines the curriculum. Step 1 qualities activate in phase 1. Step 2 qualities activate in phase 2 (cumulatively — step 1 remains active). The engine uses this to compute per-step rewards, broadcast per-token advantages, and gate phase advancement.
 
 ### 3. A segmenter (optional)
 
-Built-in options:
+The segmenter tells the engine which tokens belong to which step. Without a segmenter, all tokens are STEP_1 (uniform) and the engine falls back to completion-level advantages.
 
-| Segmenter | Config value | Use case |
-|-----------|-------------|----------|
-| `uniform` | `segmenter: uniform` | Single-step domains (math, code, Q&A). All tokens → STEP_1. |
-| `qwen3_xml` | `segmenter: qwen3_xml` | Multi-step XML tags (`<step1>...<step2>..`). Token ID pattern matching — no decode needed. |
-| `hif_json` | `segmenter: hif_json` | HIF JSON output. Decode-and-regex on `nodes`, `edges`, `incidences`, `scan-results`. Binds tokenizer at registration. |
-| Custom | `segmenter: my_module:my_fn` | Any `Callable[[list[int]], list[str]]` that maps token IDs to region labels. |
+| Segmenter | Config | How it works | Use when |
+|-----------|--------|-------------|----------|
+| `uniform` | `segmenter: uniform` | All tokens → STEP_1 | Single-step domains: math, code, Q&A |
+| `qwen3_xml` | `segmenter: qwen3_xml` | Reads `<step1>...<step2>..` via Qwen3 token IDs. No text decoding. | Multi-step XML structured output |
+| `hif_json` | `segmenter: hif_json` | Decodes tokens to text, finds JSON section boundaries (`nodes`, `edges`, `incidences`, `scan-results`) via regex. Binds tokenizer at registration. | HIF JSON hypergraph format |
+| Custom | `segmenter: my_module:my_fn` | Any `Callable[[list[int]], list[str]]` returning region labels | Your domain's output structure |
 
 ```yaml
 algorithm:
   segmenter: qwen3_xml   # or "uniform" or "hif_json" or "my_module:my_segmenter"
 ```
 
+---
+
+## VRAM Budget
+
+Measured on RTX 5080 (16GB) with Qwen3-1.7B 4-bit quantized:
+
+| Component | VRAM | Why this number |
+|-----------|------|----------------|
+| Model body (NF4 quantized) | ~850 MB | 28 transformer layers, 4-bit with double quantization |
+| lm_head (bf16, NOT quantized) | ~446 MB | Full precision preserves logit quality for loss computation |
+| Embeddings (bf16) | ~446 MB | Full precision for input representation |
+| vLLM KV cache (`gpu_memory_utilization=0.35`) | ~3.0 GB | Supports ~6× concurrent sequences at 4608 tokens |
+| LoRA adapters (rank 8, 7 modules/layer) | ~12 MB | The trainable parameters |
+| Optimizer states (AdamW8bit) | ~24 MB | 4× savings over fp32 AdamW via bitsandbytes |
+| **Peak during training** | **6.2 GB** | Micro-batch size 1, sequence length 4096 |
+| **Steady state** | **4.7 GB** | Between forward passes |
+| **VRAM growth over 50 steps** | **0.0 GB** | Engine recreates vLLM every 50 steps to prevent leak |
+
+The engine never materializes the full `[batch, seq, vocab]` logits tensor. For Qwen3's 151,936-token vocabulary at sequence length 4096, the naive logits tensor is 2.3 GB per sequence. `selective_log_softmax` computes the log probability of only the generated token at each position — 37,000× less memory per position. The Triton kernel (when available) fuses the lm_head matmul with the log-softmax, keeping peak memory at `batch × chunk_size` instead of `batch × chunk_size × vocab`.
+
+---
+
 ## Full Config Reference
+
+Every field, every default, every constraint.
 
 ```yaml
 model:
   path: unsloth/Qwen3-1.7B-unsloth-bnb-4bit   # Any Unsloth-supported model
-  lora_rank: 8
-  lora_alpha: 16
-  load_in_4bit: true
-  fast_inference: true
-  gpu_memory_utilization: 0.35    # vLLM KV cache fraction (colocated mode)
+  lora_rank: 8                                   # LoRA rank (higher = more capacity, more VRAM)
+  lora_alpha: 16                                 # LoRA alpha (scaling factor)
+  load_in_4bit: true                             # QLoRA quantization
+  fast_inference: true                           # Enable vLLM colocated generation
+  gpu_memory_utilization: 0.35                   # Fraction of GPU for vLLM KV cache
 
 data:
   train_files:
-    - data/train.parquet
-  max_prompt_length: 3200
-  train_batch_size: 16
-  prompt_column: prompt            # Column name in parquet
-  metadata_columns: [ground_truth] # Passed to reward_fn as metadata dict
+    - data/train.parquet                         # Parquet files with prompts
+  max_prompt_length: 3200                        # Prompts longer than this are filtered
+  train_batch_size: 16                           # Prompts per batch (× n_completions)
+  prompt_column: prompt                          # Column name in parquet
+  metadata_columns: [ground_truth]               # Columns passed to reward_fn as dict
 
 generation:
-  temperature: 1.0        # 1.0 for RL diversity; 0.6 for Qwen3 recommended
-  top_p: 1.0
-  top_k: -1               # Disabled
-  max_tokens: 4096
-  stop_token_ids: [151643, 151645]  # Model-specific EOS tokens (Qwen3)
+  temperature: 1.0                               # 1.0 for RL diversity
+  top_p: 1.0                                     # Nucleus sampling threshold
+  top_k: -1                                      # Disabled (-1)
+  max_tokens: 4096                               # Maximum completion length
+  stop_token_ids: [151643, 151645]               # Qwen3: <|endoftext|> + <|im_end|>
 
 algorithm:
-  mode: spo               # "spo" (n=1, persistent tracker) or "grpo" (n=8, group baseline)
-  segmenter: uniform      # "uniform", "qwen3_xml", "hif_json", or "module:function"
-  reference_policy_kl_type: k3  # "k1" (unbiased), "k2" (squared), "k3" (exponential)
+  mode: spo                                      # "spo" (n=1) or "grpo" (n=8)
+  segmenter: uniform                             # "uniform", "qwen3_xml", "hif_json", "module:fn"
+  reference_policy_kl_type: k3                   # KL estimator: "k1" (unbiased), "k2", "k3"
 
   spo:
-    lr: 0.1               # EMA learning rate for value tracker
-    n: 1                  # Completions per prompt
-    # KL-adaptive lr (SPO paper Algorithm 1) — adjusts lr based on KL divergence
-    kl_adaptive: false    # true to enable
+    lr: 0.1                                      # EMA learning rate for V tracker
+    n: 1                                         # Completions per prompt
+    kl_adaptive: false                           # KL-adaptive lr (SPO Algorithm 1)
     kl_threshold: 0.1
     kl_factor: 2.0
     lr_factor: 1.5
@@ -345,52 +376,50 @@ algorithm:
     max_lr: 0.5
 
   grpo:
-    n: 8                  # Completions per prompt (group size)
-    filter_groups: true   # DAPO: zero out degenerate groups (all-identical rewards)
+    n: 8                                         # Group size
+    filter_groups: true                          # DAPO: zero-out all-identical reward groups
 
-  clip_ratio_low: 0.2
-  clip_ratio_high: 0.28
-  # KL regularization is off by default — meaningless with on-policy single-epoch
-  # where reference_logprobs == curr_logprobs. Enable with loss_mode: kl_cov when
-  # stored generation-time logprobs are implemented.
-  loss_mode: pg              # "pg" (no KL) or "kl_cov" (KL regularized)
-  kl_cov_ratio: 0.0          # KL penalty weight (0.0 = off)
-  llds_coef: 0.05            # LLDS collapse prevention (arXiv:2512.04220)
-  loss_type: grpo            # "grpo" or "dr_grpo" (unbiased, arXiv:2503.20783)
+  clip_ratio_low: 0.2                            # PPO clip lower bound
+  clip_ratio_high: 0.28                          # PPO clip upper bound
+  loss_mode: pg                                  # "pg" (no KL) or "kl_cov" (KL regularized)
+  kl_cov_ratio: 0.0                              # KL penalty weight
+  llds_coef: 0.05                                # LLDS collapse prevention coefficient
+  loss_type: grpo                                # "grpo" or "dr_grpo" (unbiased)
+  reference_policy_kl_type: k3                   # Configurable per Comedy of Estimators
 
-  # Region-specific KL multipliers (validated by Archer, ICLR 2026)
-  kl_think_multiplier: 0.1   # Low KL for think tokens (explore freely)
-  kl_format_multiplier: 2.0  # High KL for format tokens (lock structure)
-  kl_step_multiplier: 1.0    # Normal KL for step content
+  kl_think_multiplier: 0.1                       # Low KL on reasoning tokens (explore)
+  kl_format_multiplier: 2.0                      # High KL on structural tokens (lock)
+  kl_step_multiplier: 1.0                        # Normal KL on content tokens
 
-  # Opt-in research features (all off by default):
-  lambda_return: 0.0         # GRPO-λ eligibility traces (0=off, 0.95=typical)
-  length_penalty_coef: 0.0   # Dynamic length control (0=off)
+  lambda_return: 0.0                             # Eligibility traces (0=off)
+  length_penalty_coef: 0.0                       # Dynamic length control (0=off)
   length_penalty_threshold: 0.5
 
-  step_qualities:             # Domain-specific quality mapping
+  step_qualities:                                # Your domain's quality mapping
     1: [q_format]
     2: [q_grounding]
     3: [q_accuracy]
 
 training:
   total_steps: 800
-  lr: 5.0e-6
+  lr: 5.0e-6                                     # Optimizer learning rate
   warmup_steps: 10
-  lr_scheduler: cosine       # "cosine" or "linear"
-  save_freq: 50
+  lr_scheduler: cosine                           # "cosine" or "linear"
+  save_freq: 50                                  # Checkpoint every N steps
   gradient_accumulation_steps: 1
-  max_grad_norm: 1.0         # Gradient clipping max norm
-  mastery_threshold: 0.8     # Quality score required to advance phase
-  stagnation_timeout: 200    # Steps in a phase before STUCK signal
-  plateau_window: 50         # Steps to measure plateau slope
-  plateau_threshold: 0.02    # Minimum improvement to avoid STAGNATING signal
+  max_grad_norm: 1.0                             # Gradient clipping
+  mastery_threshold: 0.8                         # Quality required to advance phase
+  stagnation_timeout: 200                        # Steps before STUCK signal
+  plateau_window: 50                             # Steps to measure plateau slope
+  plateau_threshold: 0.02                        # Minimum improvement for NORMAL
 
 logging:
   mlflow_experiment: my-experiment
-  completion_dir: output/completions
-  checkpoint_dir: output/checkpoints
+  completion_dir: output/completions             # JSONL per-step completion logs
+  checkpoint_dir: output/checkpoints             # Full training state snapshots
 ```
+
+---
 
 ## Programmatic API
 
@@ -401,14 +430,14 @@ from qgre.generation import UnslothBackend
 from qgre.trainer import QGRETrainer
 from qgre.data import QGREDataLoader, load_prompts_from_parquet
 
-# 1. Load config
+# 1. Config
 cfg = QGREConfig.from_yaml("config.yaml")
 
-# 2. Load model
+# 2. Model
 backend = UnslothBackend(cfg.model, cfg.generation)
 model, tokenizer = backend.load()
 
-# 3. Load data
+# 3. Data
 prompts = load_prompts_from_parquet("data/train.parquet")
 loader = QGREDataLoader(
     prompts=prompts,
@@ -419,7 +448,7 @@ loader = QGREDataLoader(
     metadata_columns=cfg.data.metadata_columns,
 )
 
-# 4. Create trainer with your reward function
+# 4. Trainer
 trainer = QGRETrainer(
     model=model,
     tokenizer=tokenizer,
@@ -428,135 +457,134 @@ trainer = QGRETrainer(
     generation_backend=backend,
 )
 
-# 5. Train (handles everything: generate, score, step, checkpoint, log)
+# 5. Train — everything happens here
 trainer.train(loader, backend)
 ```
 
-## What's Built In
+The `train()` method runs the full loop: generate completions, score them, compute advantages, backward pass, optimizer step, LoRA sync, checkpoint, MLflow logging, phase advancement, stagnation detection, vLLM recreation. One call.
 
-Research-backed features. All opt-in via config. Zero breaking changes when disabled.
+---
 
-| Feature | Config | Source |
-|---------|--------|--------|
-| SPO persistent baseline | `mode: spo` | SPO (Tencent, ICLR 2026) |
-| GDPO per-step normalization | Always on | GDPO (NVIDIA, Jan 2026) |
-| VPRM segment propagation | Via segmenter | VPRMs (IBM Research, Jan 2026) |
-| Phase-gated curriculum | Via step_qualities | QGRE (this work) |
-| Stagnation detection | `stagnation_timeout`, `plateau_window` | Scaf-GRPO informed |
-| Completion length tracking | Always on | Verbosity drift detection |
-| GDPO NaN guard | Always on | ms-swift #8123 |
-| LLDS collapse prevention | `llds_coef: 0.05` | arXiv:2512.04220 |
-| AdamW 8-bit | Automatic (bitsandbytes) | — |
-| Low-advantage filter | Auto (SPO mode) | SPO paper |
-| seq-mean-token-sum-norm | Always on | verl core_algos.py |
-| KL estimator selection | `reference_policy_kl_type: k1` | Comedy of Estimators (ICLR 2026) |
-| Region-specific KL | `kl_think_multiplier: 0.1` | Archer (ICLR 2026) |
-| selective_log_softmax | Always on | TRL PR #2799 |
-| Dr.GRPO unbiased mode | `loss_type: dr_grpo` | arXiv:2503.20783 |
-| DAPO Dynamic Sampling | `filter_groups: true` | DAPO paper |
-| KL-adaptive SPO lr | `spo.kl_adaptive: true` | SPO Algorithm 1 |
-| Prioritized sampling | Auto (SPO mode) | SPO Section 3.2 |
-| GRPO-λ eligibility traces | `lambda_return: 0.95` | ICLR 2026 |
-| Dynamic length control | `length_penalty_coef: 0.01` | Huawei |
-| neg_logprob_mean metric | Always on (metric only) | Policy collapse monitor |
-| Triton fused logprobs | Auto (if Triton available) | Custom kernel |
+## Research Features
+
+Every feature traces to a published paper. Every feature is opt-in via config. Disabling any feature does not change the behavior of the others.
+
+| Feature | Config | What it does | Source |
+|---------|--------|-------------|--------|
+| **SPO persistent baseline** | `mode: spo` | Per-prompt, per-step EMA tracker replaces group comparison | SPO (Tencent, ICLR 2026) |
+| **GDPO normalization** | Always on | Per-step advantage normalization prevents gradient dominance | GDPO (NVIDIA, Jan 2026) |
+| **VPRM segmentation** | Via segmenter | Maps quality scores to token regions for per-token credit | VPRMs (IBM Research, Jan 2026) |
+| **Phase-gated curriculum** | Via step_qualities | Progressive quality unlock with automatic advancement | QGRE (this work) |
+| **Stagnation detection** | `stagnation_timeout: 200` | Monitors plateau and timeout, logs to MLflow | Informed by Scaf-GRPO |
+| **Completion length tracking** | Always on | Mean/max/min per step for verbosity drift detection | MAD GRPO analysis |
+| **GDPO NaN guard** | Always on | Replaces NaN rewards with 0.0 + warning before normalization | ms-swift #8123 |
+| **LLDS collapse prevention** | `llds_coef: 0.05` | Penalizes log-prob decay on correct completions (guarded: only active with stored logprobs) | arXiv:2512.04220 |
+| **KL estimator selection** | `reference_policy_kl_type: k1` | Choose unbiased (k1), squared (k2), or exponential (k3) estimator | Comedy of Estimators (ICLR 2026) |
+| **Region-specific KL** | `kl_think_multiplier: 0.1` | Different KL strength per token type: loose on reasoning, tight on structure | Archer (ICLR 2026) |
+| **Dr.GRPO unbiased mode** | `loss_type: dr_grpo` | Removes length normalization bias from loss aggregation | arXiv:2503.20783 |
+| **DAPO dynamic sampling** | `filter_groups: true` | Zeros out groups where all rewards are identical (no signal) | DAPO paper |
+| **KL-adaptive SPO lr** | `spo.kl_adaptive: true` | Adjusts EMA learning rate based on KL divergence | SPO Algorithm 1 |
+| **Prioritized sampling** | Auto (SPO mode) | High-|advantage| prompts sampled more often | SPO Section 3.2 |
+| **Eligibility traces** | `lambda_return: 0.95` | λ-return approximation for within-step token credit | GRPO-λ (ICLR 2026) |
+| **Dynamic length control** | `length_penalty_coef: 0.01` | Penalizes length when group accuracy is high | Huawei |
+| **AdamW 8-bit** | Automatic | 4× memory savings on optimizer states | bitsandbytes |
+| **selective_log_softmax** | Always on | 37,000× memory reduction per position (no vocab tensor) | TRL PR #2799 |
+| **Triton fused logprobs** | Auto | Fused lm_head → logprobs kernel, BLOCK_V=128 | Custom |
+| **neg_logprob_mean** | Always on (metric) | Policy collapse early warning (not a loss term) | — |
+| **Low-advantage filter** | Auto (SPO) | Skips steps where all advantages are near-zero | SPO paper |
+| **seq-mean-token-sum-norm** | Always on | Loss aggregation: sum per-token, mean per-seq, normalize by horizon | verl core_algos.py |
+
+---
 
 ## File Structure
 
 ```
 qgre/
-  __init__.py          — Package root, exports RewardResult, GameState, StagnationStatus
-  __main__.py          — CLI: python -m qgre train --config --reward --segmenter
-  types.py             — RewardResult, GameState, StagnationStatus
-  config.py            — All config dataclasses, YAML loader
-  segments.py          — Segmenters: qwen3_xml, hif_json, uniform, custom
-  advantages.py        — QGREStepAdvantageEstimator (SPO+GDPO+VPRM+phase)
-  data.py              — DataLoader: parquet → tokenize → left-pad → batch → prioritized sampling
-  checkpoint.py        — Save/resume full training state (including stagnation counters)
-  logging.py           — MLflow tracking + JSONL completion dump (context manager)
-  trainer.py           — QGRETrainer: the training loop
-  generation.py        — UnslothBackend: vLLM colocated generation
-  lora_verify.py       — LoRA weight sync verification
-  fused_logprobs.py    — Chunked logprobs (no full logits materialization)
-  triton_logprobs.py   — Triton fused lm_head→logprobs kernel
-  nemo_extracted/      — ClippedPGLossFn, KL, logits, LLDS (Apache-2.0 from NeMo RL)
+  __init__.py          — Exports RewardResult, GameState, StagnationStatus
+  __main__.py          — CLI entry point
+  types.py             — RewardResult, GameState (phase, mastery, stagnation), StagnationStatus
+  config.py            — All config dataclasses + YAML loader with unknown-key warnings
+  segments.py          — qwen3_xml_segmenter, hif_json_segmenter, uniform_segmenter
+  advantages.py        — QGREStepAdvantageEstimator: SPO + GDPO + VPRM + phase gating
+  data.py              — Parquet → tokenize → left-pad → batch → priority-weighted sampling
+  checkpoint.py        — Save/resume: model, optimizer, scheduler, GameState, V-tracker, RNG
+  logging.py           — MLflow metrics + JSONL completion logs (context manager)
+  trainer.py           — QGRETrainer: the training loop, micro-batching, monitoring
+  generation.py        — UnslothBackend: vLLM fast_generate, LoRA sync, engine recreation
+  lora_verify.py       — LoRA weight hash verification after sync
+  fused_logprobs.py    — Chunked lm_head → logprobs (no full logits materialization)
+  triton_logprobs.py   — Triton kernel: fused lm_head + selective_log_softmax (BLOCK_V=128)
+  nemo_extracted/      — ClippedPGLossFn, calculate_kl, selective_log_softmax, LLDS (Apache-2.0)
 examples/
-  hamiltonian/         — Physics derivation (SPO mode, verifiable via sympy)
-  hypergraph/          — Multi-step XML structured output (SPO mode)
-  math/                — Single-step math
-tests/                 — 130 CPU tests + 9 GPU tests
+  hamiltonian/         — Hamiltonian mechanics: physics derivations, sympy-verified rewards
+  hypergraph/          — Hypergraph structure: multi-step XML, 4-phase curriculum
+  math/                — Single-step math: minimal config, uniform segmenter
+tests/                 — 130 CPU tests + 9 GPU tests (~27 seconds)
 ```
+
+---
 
 ## Tests
 
 ```bash
-# All CPU tests (130 tests, ~27 seconds)
-python -m pytest tests/ -q
-
-# Segmentation tests (XML + HIF JSON)
-python -m pytest tests/test_segments.py -v
-
-# Advantage computation
-python -m pytest tests/test_advantages.py -v
-
-# Specific module
-python -m pytest tests/test_checkpoint.py -v
-
-# GPU smoke test (requires CUDA GPU + Qwen3-1.7B)
-python -m pytest tests/test_smoke.py::test_three_steps_no_crash --gpu -v
+python -m pytest tests/ -q                         # All CPU tests (130, ~27s)
+python -m pytest tests/test_segments.py -v          # XML + HIF JSON segmenters
+python -m pytest tests/test_advantages.py -v        # SPO, GRPO, GDPO, phase gating
+python -m pytest tests/test_checkpoint.py -v        # Save/resume + stagnation round-trip
+python -m pytest tests/test_consistency.py -v       # Internal consistency (determinism)
+python -m pytest tests/test_smoke.py --gpu -v       # GPU smoke test (Qwen3-1.7B)
 ```
+
+---
 
 ## Checkpoint & Resume
 
-Full state is saved and restored automatically:
-- Model weights (LoRA adapters)
-- Optimizer state (AdamW8bit)
-- LR scheduler state
-- GameState (phase, mastery windows, stagnation counters, phase history)
-- SPO value tracker (V per prompt per step)
-- PyTorch + CUDA RNG state (exact reproducibility)
+Full state is saved and restored:
 
-Resume is automatic — `trainer.train()` checks for the latest checkpoint and picks up where it left off. Stagnation detection state survives checkpoint/resume with backward-compatible defaults.
+| State | Saved | Restored | Why |
+|-------|-------|----------|-----|
+| Model weights (LoRA) | `model.state_dict()` | `model.load_state_dict()` | The learned adapters |
+| Optimizer (AdamW8bit) | `optimizer.state_dict()` | `optimizer.load_state_dict()` | Momentum and variance |
+| LR scheduler | `scheduler.state_dict()` | `scheduler.load_state_dict()` | Warmup + cosine/linear position |
+| GameState | `gamestate_to_dict()` | `gamestate_from_dict()` | Phase, mastery windows, stagnation counters, phase history |
+| SPO V-tracker | `advantage_estimator.state_dict()` | `.load_state_dict()` | Persistent per-prompt per-step baselines |
+| PyTorch RNG | `torch.get_rng_state()` | `torch.set_rng_state()` | Exact reproducibility |
+| CUDA RNG | `torch.cuda.get_rng_state()` | `torch.cuda.set_rng_state()` | GPU sampling reproducibility |
 
-## VRAM Budget (Real Numbers)
+Resume is automatic. `trainer.train()` scans the checkpoint directory for the latest `global_step_N` file. If found, all state is restored. If not, training starts fresh. Checkpoints from before stagnation detection was added load with safe defaults (timeout=200, window=50, threshold=0.02).
 
-Measured on RTX 5080 16GB with Qwen3-1.7B 4-bit:
-
-| Component | VRAM | Notes |
-|-----------|------|-------|
-| Model body (4-bit NF4) | ~850 MB | 28 layers quantized |
-| lm_head (bf16, NOT quantized) | ~446 MB | Full precision for logit quality |
-| Embeddings (bf16) | ~446 MB | Full precision |
-| vLLM KV cache (`gpu_memory_utilization=0.35`) | ~3.0 GB | Supports ~6× concurrent 4608-token sequences |
-| LoRA adapters (rank 8) | ~12 MB | 7 target modules per layer |
-| Optimizer states (AdamW8bit) | ~24 MB | 4× savings over fp32 AdamW |
-| **Peak during training** | **6.2 GB** | Micro-batch size 1 at seq ≥ 2048 |
-| **Steady state** | **4.7 GB** | Between forward passes |
-
-The engine never materializes the full `[batch, seq, vocab]` logits tensor. `selective_log_softmax` computes `log_softmax` for only the generated token at each position — 37,000× less memory per position for Qwen3's 151,936 vocab.
-
-Micro-batching adapts to sequence length: `micro_batch_size=1` for sequences ≥ 2048 tokens, `micro_batch_size=2` for shorter. This keeps peak VRAM under 6.5GB regardless of completion length.
+---
 
 ## Known Constraints
 
-- **16GB VRAM budget**: Qwen3-1.7B 4-bit at `gpu_memory_utilization=0.35` peaks at 6.2GB. 8B requires higher utilization and tighter micro-batching.
-- **On-policy only**: `force_on_policy_ratio=True` means ratio clipping config has no effect (ratio is always 1.0 by design). KL regularization requires stored generation-time logprobs (not yet implemented) — until then, `loss_mode: pg` is the correct default.
-- **Segmenters are model-specific**: `qwen3_xml` uses Qwen3 token IDs. `hif_json` uses decoded text with regex. Other models need a custom segmenter or `uniform`.
-- **Unsloth mode switching required**: Must call `set_training_mode()` before backward, `set_inference_mode()` before generate. The engine handles this automatically.
-- **vLLM recreation**: Engine recreates the vLLM backend every 50 steps to prevent VRAM leak (Unsloth #3864). Failures are logged with warnings, not silently swallowed.
+These are structural. They are not bugs — they are the boundary conditions of the design.
+
+- **Single GPU, single process.** The engine does not distribute. It trades scale for simplicity: one GPU, one process, direct function calls, no serialization. For larger models, use verl or OpenRLHF. For novel domains where the training signal matters more than the parameter count, use QGRE.
+
+- **On-policy only.** `force_on_policy_ratio=True` means the importance sampling ratio is always 1.0. Clipping config fields exist but have no effect. KL regularization (`loss_mode: kl_cov`) is supported in the loss function but requires stored generation-time logprobs (not yet implemented) — until then, `reference_logprobs == curr_logprobs` and KL is zero. LLDS is guarded behind a `_has_stored_logprobs` flag for the same reason.
+
+- **Segmenters are domain-specific.** `qwen3_xml` reads Qwen3 token IDs. `hif_json` decodes text and runs regex. Neither transfers to other models without adaptation. The `uniform` segmenter works universally but loses per-step credit assignment.
+
+- **16GB VRAM ceiling.** Qwen3-1.7B 4-bit fits comfortably (6.2GB peak). Qwen3-8B requires `gpu_memory_utilization=0.6` and may OOM on long sequences. The micro-batching adapts but cannot overcome the fundamental memory-bandwidth tradeoff of a single GPU.
+
+- **vLLM VRAM leak.** Unsloth's colocated vLLM engine leaks memory over time (#3864). The engine works around this by destroying and recreating the vLLM backend every 50 steps. If recreation fails, the engine logs a warning and continues — VRAM will grow until OOM. Monitor GPU memory on runs longer than 100 steps.
+
+---
 
 ## References
 
-- QGRE paper: (forthcoming)
-- [SPO](https://arxiv.org/abs/2509.13232) — Single-stream Policy Optimization (Tencent, ICLR 2026)
-- [GDPO](https://arxiv.org/abs/2601.05242) — Group Decomposed Policy Optimization (NVIDIA, Jan 2026)
-- [VPRMs](https://arxiv.org/abs/2601.17223) — Verifiable Process Rewards (IBM Research, Jan 2026)
-- [Dr.GRPO](https://arxiv.org/abs/2503.20783) — Unbiased GRPO (Mar 2025)
-- [LLDS](https://arxiv.org/abs/2512.04220) — Lazy Likelihood Displacement (Dec 2025)
-- [Comedy of Estimators](https://arxiv.org/abs/2512.21852) — KL estimator analysis (Bengio et al., Dec 2025)
-- [Archer](https://openreview.net/forum?id=ee326398473daf76d49b49cda4dea9d699fbf61b) — Dual-token KL constraints (ICLR 2026)
-- [Scaf-GRPO](https://arxiv.org/abs/2510.19807) — Scaffolded progressive training (Feb 2026)
-- [NeMo RL](https://github.com/NVIDIA-NeMo/RL) — Loss functions extracted under Apache-2.0
+- QGRE paper — forthcoming
+- [SPO](https://arxiv.org/abs/2509.13232) — Single-stream Policy Optimization. Tencent, ICLR 2026.
+- [GDPO](https://arxiv.org/abs/2601.05242) — Group Decomposed Policy Optimization. NVIDIA, Jan 2026.
+- [VPRMs](https://arxiv.org/abs/2601.17223) — Verifiable Process Rewards. IBM Research, Jan 2026.
+- [Dr.GRPO](https://arxiv.org/abs/2503.20783) — Unbiased GRPO. Mar 2025.
+- [LLDS](https://arxiv.org/abs/2512.04220) — Lazy Likelihood Displacement. UBC/Vector Institute, Dec 2025.
+- [Comedy of Estimators](https://arxiv.org/abs/2512.21852) — KL regularization in RL training. Bengio et al., Dec 2025.
+- [Archer](https://openreview.net/forum?id=ee326398473daf76d49b49cda4dea9d699fbf61b) — Dual-token KL constraints. ICLR 2026.
+- [Scaf-GRPO](https://arxiv.org/abs/2510.19807) — Scaffolded progressive training. Feb 2026.
+- [NeMo RL](https://github.com/NVIDIA-NeMo/RL) — Loss functions extracted under Apache-2.0.
+
+---
 
 ## License
 
@@ -564,4 +592,4 @@ Apache-2.0. NeMo RL extracted components retain their original Apache-2.0 header
 
 ---
 
-Built by [Torad Labs](https://torad.ai). The engine behind the QGRE paper.
+Built by [Torad Labs](https://torad.ai).
