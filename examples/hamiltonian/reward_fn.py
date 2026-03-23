@@ -472,18 +472,18 @@ def _score_V_correct(text: str, meta: dict) -> float:
         prompt = meta.get("prompt", "")
         m_match = re.search(r"mass\s*(?:m\s*)?=?\s*(\d+(?:\.\d+)?)", prompt)
         if m_match:
-            subs[sp.Symbol("m", positive=True)] = sp.Rational(m_match.group(1))
-            subs[sp.Symbol("m")] = sp.Rational(m_match.group(1))
+            subs[sp.Symbol("m", positive=True)] = sp.nsimplify(m_match.group(1))
+            subs[sp.Symbol("m")] = sp.nsimplify(m_match.group(1))
         # Extract spring constant
         k_match = re.search(r"(?:spring\s+)?constant\s*k?\s*=\s*(\d+(?:\.\d+)?)", prompt)
         if k_match:
-            subs[sp.Symbol("k", positive=True)] = sp.Rational(k_match.group(1))
-            subs[sp.Symbol("k")] = sp.Rational(k_match.group(1))
+            subs[sp.Symbol("k", positive=True)] = sp.nsimplify(k_match.group(1))
+            subs[sp.Symbol("k")] = sp.nsimplify(k_match.group(1))
         # Extract force
         f_match = re.search(r"force\s*(?:F\s*)?=?\s*(\d+(?:\.\d+)?)", prompt)
         if f_match:
-            subs[sp.Symbol("F", positive=True)] = sp.Rational(f_match.group(1))
-            subs[sp.Symbol("F")] = sp.Rational(f_match.group(1))
+            subs[sp.Symbol("F", positive=True)] = sp.nsimplify(f_match.group(1))
+            subs[sp.Symbol("F")] = sp.nsimplify(f_match.group(1))
 
         if subs:
             try:
@@ -687,6 +687,7 @@ def hamiltonian_reward(
     Phase 4: q_correct_H, q_consistency — full Hamiltonian + internal consistency
     """
     meta = metadata or {}
+    meta["prompt"] = prompt  # Make prompt available to scoring functions (e.g., V_correct constant substitution)
     text = completion
     scores: dict[str, float] = {}
 

@@ -36,12 +36,21 @@ class UnslothBackend:
         """Load model and tokenizer. Returns (model, tokenizer)."""
         from unsloth import FastLanguageModel
 
+        # With Standby active, use 0.95 gpu_memory_utilization — Standby
+        # handles the vLLM/training memory sharing automatically.
+        import os
+        gpu_util = self.model_config.gpu_memory_utilization
+        if os.environ.get("UNSLOTH_VLLM_STANDBY") == "1" and gpu_util < 0.9:
+            import warnings
+            warnings.warn(f"Standby active: overriding gpu_memory_utilization from {gpu_util} to 0.95")
+            gpu_util = 0.95
+
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=self.model_config.path,
             max_seq_length=self.generation_config.max_tokens + self.max_prompt_length,  # prompt + response
             load_in_4bit=self.model_config.load_in_4bit,
             fast_inference=self.model_config.fast_inference,
-            gpu_memory_utilization=self.model_config.gpu_memory_utilization,
+            gpu_memory_utilization=gpu_util,
         )
 
         model = FastLanguageModel.get_peft_model(

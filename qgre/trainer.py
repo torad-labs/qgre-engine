@@ -149,11 +149,12 @@ class QGRETrainer:
         # This flag is set to True when generation-time logprobs are wired (future work).
         self._has_stored_logprobs = False
 
-        # Triton fused logprobs: skip materializing [seq, vocab] logits tensor.
-        # NOTE: Triton kernel has no backward pass — only usable for detached logprobs
-        # (e.g., old_logprob / reference). Training forward pass needs autograd graph.
-        # Disabled until we split curr_logprob (pytorch) vs old_logprob (triton).
-        self._use_triton_logprobs = False
+        # Fused logprobs: chunked lm_head projection saves ~2GB by not materializing
+        # full [seq, vocab] logit tensor. Uses torch.checkpoint per chunk to prevent
+        # autograd from storing all chunks for backward.
+        self._use_fused_logprobs = config.algorithm.use_fused_logprobs
+        self._fused_chunk_size = config.algorithm.fused_logprob_chunk_size
+        self._fused_validated = False  # One-time validation on first use
 
         # Completion logger
         self.completion_logger = CompletionLogger(config.logging.completion_dir)
@@ -282,16 +283,23 @@ class QGRETrainer:
             comp_tensor[i, :len(c)] = torch.tensor(c, dtype=torch.long, device=device)
 
         # Build KL region weights from segmenter regions (THR-style, PLAN.md lines 798-802)
+        # Gate: skip entirely when KL is disabled (default config). Saves the tensor
+        # allocation + nested Python loop over every token every step.
         alg = self.config.algorithm
-        kl_region_weights = torch.ones(len(completions), max_comp_len, device=device)
-        region_map = {"THINK": alg.kl_think_multiplier, "FORMAT": alg.kl_format_multiplier}
-        for i, regions in enumerate(batch_regions):
-            for t, region in enumerate(regions):
-                if t < max_comp_len:
-                    if region in region_map:
-                        kl_region_weights[i, t] = region_map[region]
-                    elif region.startswith("STEP_"):
-                        kl_region_weights[i, t] = alg.kl_step_multiplier
+        if alg.kl_cov_ratio > 0 and alg.loss_mode == "kl_cov":
+            kl_region_weights = torch.ones(len(completions), max_comp_len, device=device)
+            region_map = {"THINK": alg.kl_think_multiplier, "FORMAT": alg.kl_format_multiplier}
+            for i, regions in enumerate(batch_regions):
+                for t, region in enumerate(regions):
+                    if t < max_comp_len:
+                        if region in region_map:
+                            kl_region_weights[i, t] = region_map[region]
+                        elif region.startswith("STEP_"):
+                            kl_region_weights[i, t] = alg.kl_step_multiplier
+        else:
+            kl_region_weights = None
+
+        del batch_regions  # No longer needed — regions already mapped to KL weights or skipped
 
         # SPO low-advantage filter: skip sequences with near-zero signal (PLAN.md lines 658-671)
         if self.config.algorithm.mode == "spo":
@@ -322,7 +330,8 @@ class QGRETrainer:
                 idx = useful.nonzero(as_tuple=True)[0]
                 padded_advs = padded_advs[idx]
                 comp_tensor = comp_tensor[idx]
-                kl_region_weights = kl_region_weights[idx]
+                if kl_region_weights is not None:
+                    kl_region_weights = kl_region_weights[idx]
 
         # Response mask
         prompt_lengths = [0] * comp_tensor.shape[0]
@@ -361,49 +370,54 @@ class QGRETrainer:
                 try:
                     from unsloth import FastLanguageModel as FLM
                     FLM.for_training(self.model)
-                except (ImportError, Exception):
+                except ImportError:
                     pass
 
-            # Forward through full model (preserves Unsloth gradient checkpointing).
-            if self._use_triton_logprobs:
-                try:
-                    mb_output = self.model(mb_ids, output_hidden_states=True)
-                except TypeError:
-                    mb_output = self.model(mb_ids)
-
-            else:
-                mb_output = self.model(mb_ids)
-
-            mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
-            hidden_states = getattr(mb_output, "hidden_states", None) if self._use_triton_logprobs else None
-
-            if hidden_states:
-                # Triton fused path: hidden → logprobs without materializing [seq, vocab]
-                from qgre.triton_logprobs import triton_logprobs_from_hidden
-                last_hidden = hidden_states[-1]
-                del mb_output, mb_logits
-                # Find lm_head — handle PeftModel wrapper
-                lm_head = getattr(self.model, "lm_head", None)
-                if lm_head is None:
-                    try:
-                        lm_head = self.model.base_model.model.lm_head
-                    except AttributeError:
-                        lm_head = None
-                if lm_head is not None:
-                    mb_lp = triton_logprobs_from_hidden(
-                        last_hidden[:, :-1, :], lm_head, mb_ids[:, 1:]
+            # Forward pass: fused (chunked lm_head + checkpoint) or standard (full logits)
+            if self._use_fused_logprobs:
+                from qgre.fused_logprobs import get_hidden_states_and_lm_head, chunked_logprobs_from_hidden
+                # Build attention mask for padded sequences
+                mb_attention_mask = (mb_ids != self.tokenizer.pad_token_id).long() if self.tokenizer and hasattr(self.tokenizer, 'pad_token_id') and self.tokenizer.pad_token_id is not None else None
+                hidden_states, lm_head = get_hidden_states_and_lm_head(self.model, mb_ids, attention_mask=mb_attention_mask)
+                if hidden_states is not None and lm_head is not None:
+                    # Fused path: body → hidden_states → chunked lm_head + checkpoint
+                    # Saves ~2GB by never materializing full [seq, vocab] logit tensor.
+                    # torch.checkpoint per chunk prevents autograd from storing all chunks.
+                    mb_lp = chunked_logprobs_from_hidden(
+                        hidden_states[:, :-1, :], lm_head, mb_ids[:, 1:],
+                        chunk_size=self._fused_chunk_size,
                     )
-                    del last_hidden
+                    # One-time validation: verify fused path produces valid output
+                    # NOTE: use if/raise, NOT assert — assert is stripped by python -O
+                    if not self._fused_validated:
+                        if mb_lp.grad_fn is None:
+                            raise RuntimeError(
+                                "Fused logprobs has no grad_fn — autograd graph is broken. "
+                                "Set algorithm.use_fused_logprobs=false to fall back to standard path."
+                            )
+                        self._fused_validated = True
+                    del hidden_states
                 else:
-                    # lm_head not found — fall back to standard path
-                    del last_hidden
+                    # Fallback: wrapper chain couldn't split body/lm_head — use full forward
+                    if not hasattr(self, '_fused_fallback_warned'):
+                        import warnings
+                        warnings.warn(
+                            f"Step {self.global_step}: fused logprobs fallback — "
+                            f"get_hidden_states_and_lm_head returned None. "
+                            f"Using full forward (no memory savings). "
+                            f"Check Unsloth wrapper chain compatibility."
+                        )
+                        self._fused_fallback_warned = True
+                        self._use_fused_logprobs = False  # Don't retry — go straight to standard path
                     mb_output = self.model(mb_ids)
                     mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
                     del mb_output
                     mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
                     del mb_logits
             else:
-                # Standard path: materialize logits → logprobs
+                # Standard path: full forward, materialize logits → logprobs
+                mb_output = self.model(mb_ids)
+                mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
                 del mb_output
                 mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
                 del mb_logits
@@ -466,6 +480,11 @@ class QGRETrainer:
             total_loss += mb_loss.item() / n_micro
 
             del mb_lp
+
+            # OPT-2: Release CUDA cached blocks between micro-batches.
+            # Prevents false OOM from allocator fragmentation on tight memory budgets.
+            if self.config.training.empty_cache_between_microbatches and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             if not all_metrics:
                 all_metrics = {k: v for k, v in mb_metrics.items()}

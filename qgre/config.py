@@ -97,6 +97,9 @@ class AlgorithmConfig:
     step_qualities: dict | None = None  # {step_num: [quality_names]} — domain-specific
     segmenter: str = "uniform"  # "uniform", "qwen3_xml", "label", or "module.path:function_name"
     label_segmenter: LabelSegmenterConfig | None = None  # Config for segmenter="label"
+    # Fused logprobs: chunked lm_head projection saves ~2GB VRAM by not materializing full logit tensor
+    use_fused_logprobs: bool = True
+    fused_logprob_chunk_size: int = 256  # Tokens per chunk (lower = less memory, more kernel launches)
     # Region-specific KL multipliers (THR-style, PLAN.md lines 798-802)
     # THINK=explore freely, FORMAT=lock structure, STEP=focus on quality
     kl_think_multiplier: float = 0.1   # Low KL for think tokens (explore)
@@ -122,6 +125,7 @@ class TrainingConfig:
     save_freq: int = 50
     gradient_accumulation_steps: int = 1
     max_grad_norm: float = 1.0
+    empty_cache_between_microbatches: bool = True  # torch.cuda.empty_cache() after each micro-batch
     mastery_threshold: float = 0.8
     stagnation_timeout: int = 200
     plateau_window: int = 50

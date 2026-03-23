@@ -2,6 +2,17 @@
 
 from __future__ import annotations
 
+# Unsloth Standby: offload vLLM weights during training, reclaim for generation.
+# MUST be set before any Unsloth import. Without this, vLLM reserves
+# gpu_memory_utilization * VRAM (e.g., 0.35 * 16GB = 5.6GB) permanently,
+# making 14B training on 16GB impossible.
+import os
+os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
+# Append expandable_segments to existing CUDA config (don't override user's settings)
+_cuda_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+if "expandable_segments" not in _cuda_conf:
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = f"{_cuda_conf},expandable_segments:True".lstrip(",")
+
 import argparse
 import importlib
 import sys
