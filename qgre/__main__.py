@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-# Unsloth Standby: offload vLLM weights during training, reclaim for generation.
-# MUST be set before any Unsloth import. Without this, vLLM reserves
-# gpu_memory_utilization * VRAM (e.g., 0.35 * 16GB = 5.6GB) permanently,
-# making 14B training on 16GB impossible.
+# NOTE: UNSLOTH_VLLM_STANDBY intentionally NOT set. Standby causes OOM with
+# load_in_4bit + fast_inference (Unsloth issues #3542, #3328, #3771). Standby
+# overrides gpu_memory_utilization to ~90%, causing vLLM LoRA warmup to OOM.
+# FP8 has weight sharing that avoids this, but 4-bit does not.
+# When QGRE migrates to FP8, re-evaluate Standby.
 import os
-os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
 # Append expandable_segments to existing CUDA config (don't override user's settings)
 _cuda_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
 if "expandable_segments" not in _cuda_conf:

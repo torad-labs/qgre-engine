@@ -24,6 +24,7 @@ def _cfg() -> QGREConfig:
     """Create a QGREConfig with step_qualities set for testing."""
     cfg = QGREConfig()
     cfg.algorithm.step_qualities = TEST_SQ
+    cfg.algorithm.use_fused_logprobs = False  # Mock models have no lm_head
     cfg.model.path = "test-model"
     return cfg
 

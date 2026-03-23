@@ -387,29 +387,40 @@ class QGRETrainer:
                         hidden_states[:, :-1, :], lm_head, mb_ids[:, 1:],
                         chunk_size=self._fused_chunk_size,
                     )
-                    # One-time validation: verify fused path produces valid output
-                    # NOTE: use if/raise, NOT assert — assert is stripped by python -O
+                    # One-time validation: verify fused path produces numerically
+                    # equivalent results to the standard path. Runs BOTH paths on step 1,
+                    # asserts allclose. One extra forward pass — then never again.
                     if not self._fused_validated:
                         if mb_lp.grad_fn is None:
                             raise RuntimeError(
                                 "Fused logprobs has no grad_fn — autograd graph is broken. "
-                                "Set algorithm.use_fused_logprobs=false to fall back to standard path."
+                                "Set algorithm.use_fused_logprobs=false to fall back."
                             )
+                        # Numeric equivalence: run standard path and compare
+                        with torch.no_grad():
+                            std_output = self.model(mb_ids)
+                            std_logits = std_output.logits if hasattr(std_output, "logits") else std_output
+                            del std_output
+                            std_lp = logprobs_from_logits(std_logits[:, :-1, :], mb_ids[:, 1:])
+                            del std_logits
+                            min_len_v = min(mb_lp.shape[1], std_lp.shape[1])
+                            if not torch.allclose(mb_lp[:, :min_len_v].detach(), std_lp[:, :min_len_v], atol=1e-3):
+                                max_diff = (mb_lp[:, :min_len_v].detach() - std_lp[:, :min_len_v]).abs().max().item()
+                                raise RuntimeError(
+                                    f"Fused logprobs diverge from standard path (max diff: {max_diff:.6f}). "
+                                    f"Set algorithm.use_fused_logprobs=false to fall back."
+                                )
+                            del std_lp
                         self._fused_validated = True
                     del hidden_states
                 else:
-                    # Fallback: wrapper chain couldn't split body/lm_head — use full forward
-                    if not hasattr(self, '_fused_fallback_warned'):
-                        import warnings
-                        warnings.warn(
-                            f"Step {self.global_step}: fused logprobs fallback — "
-                            f"get_hidden_states_and_lm_head returned None. "
-                            f"Using full forward (no memory savings). "
-                            f"Check Unsloth wrapper chain compatibility."
-                        )
-                        self._fused_fallback_warned = True
-                        self._use_fused_logprobs = False  # Don't retry — go straight to standard path
-                    mb_output = self.model(mb_ids)
+                    # Wrapper chain failed — hard error, not silent fallback.
+                    # The wrapper chain is tested and known to work on Unsloth Qwen3.
+                    raise RuntimeError(
+                        "Fused logprobs: get_hidden_states_and_lm_head returned None. "
+                        "Wrapper chain could not split body from lm_head. "
+                        "Set algorithm.use_fused_logprobs=false to fall back to standard path."
+                    )
                     mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
                     del mb_output
                     mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])

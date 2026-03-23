@@ -128,11 +128,25 @@ def get_hidden_states_and_lm_head(
     if not hasattr(inner, "lm_head"):
         return None, None
 
+    # Descend past CausalLM wrappers: if inner.model itself has both .model and
+    # .lm_head, it's a CausalLM (e.g., Qwen3ForCausalLM), not the transformer body.
+    # Keep going deeper until we find the module that OWNS lm_head — where .model
+    # is the actual body (no .lm_head of its own).
+    causal_lm = inner.model if hasattr(inner, "model") else None
+    while causal_lm is not None and hasattr(causal_lm, "lm_head") and hasattr(causal_lm, "model"):
+        inner = causal_lm
+        causal_lm = inner.model if hasattr(inner, "model") else None
+
     lm_head = inner.lm_head
 
     # Get the model body (everything except lm_head)
     body = inner.model if hasattr(inner, "model") else None
     if body is None:
+        return None, None
+
+    # Safety: body must NOT have its own lm_head — if it does, the descent
+    # didn't go deep enough and body is still a CausalLM, not the transformer body
+    if hasattr(body, "lm_head"):
         return None, None
 
     # Forward through body only — pass attention_mask to avoid padding corruption
