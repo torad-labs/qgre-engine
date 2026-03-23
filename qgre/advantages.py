@@ -181,6 +181,8 @@ class QGREStepAdvantageEstimator:
                     sn = int(region.split("_")[1])
                     if sn in step_advs:
                         token_advs[t] = step_advs[sn][i]
+                elif region == "THINK" and 0 in step_advs:
+                    token_advs[t] = step_advs[0][i]
             batch_advantages.append(token_advs)
 
         return batch_advantages, all_regions
