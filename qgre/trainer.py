@@ -105,6 +105,14 @@ class QGRETrainer:
             elif alg.segmenter == "hif_json":
                 from qgre.segments import make_hif_json_segmenter
                 segmenter = make_hif_json_segmenter(tokenizer)
+            elif alg.segmenter == "hamiltonian":
+                from qgre.segments import make_hamiltonian_segmenter
+                segmenter = make_hamiltonian_segmenter(tokenizer)
+            elif alg.segmenter == "label":
+                from qgre.segments import make_label_segmenter
+                if alg.label_segmenter is None or not alg.label_segmenter.patterns:
+                    raise ValueError("segmenter='label' requires algorithm.label_segmenter.patterns in config")
+                segmenter = make_label_segmenter(tokenizer, alg.label_segmenter)
             elif ":" in alg.segmenter:
                 import importlib
                 mod_path, fn_name = alg.segmenter.rsplit(":", 1)
@@ -140,6 +148,12 @@ class QGRETrainer:
         # Without them, old_logprob == curr_logprob and all LLDS gates return zero.
         # This flag is set to True when generation-time logprobs are wired (future work).
         self._has_stored_logprobs = False
+
+        # Triton fused logprobs: skip materializing [seq, vocab] logits tensor.
+        # NOTE: Triton kernel has no backward pass — only usable for detached logprobs
+        # (e.g., old_logprob / reference). Training forward pass needs autograd graph.
+        # Disabled until we split curr_logprob (pytorch) vs old_logprob (triton).
+        self._use_triton_logprobs = False
 
         # Completion logger
         self.completion_logger = CompletionLogger(config.logging.completion_dir)
@@ -283,11 +297,26 @@ class QGRETrainer:
         if self.config.algorithm.mode == "spo":
             useful = (padded_advs.abs() > 0.01).any(dim=-1)
             if useful.sum() == 0:
-                # All advantages near-zero — skip backward pass but still record mastery + check phase
-                self.global_step += 1
+                # All advantages near-zero — skip backward pass but still record mastery + log completions
                 metrics = {"loss": 0.0, "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
-                           "global_step": self.global_step - 1, "phase": self.game_state.phase, "skipped": True}
+                           "global_step": self.global_step, "phase": self.game_state.phase, "skipped": True}
                 self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics)
+                # Log completions even on skipped steps
+                for i, rr in enumerate(reward_results):
+                    comp_tokens = completions[i]
+                    if self.tokenizer is not None:
+                        comp_text = self.tokenizer.decode(comp_tokens, skip_special_tokens=True)
+                    else:
+                        comp_text = str(comp_tokens)
+                    self.completion_logger.log_completion(
+                        step=self.global_step,
+                        prompt=batch.raw_prompts[i] if i < len(batch.raw_prompts) else "",
+                        completion=comp_text,
+                        reward=rr.reward,
+                        reward_components=rr.scores,
+                        phase=self.game_state.phase,
+                    )
+                self.global_step += 1
                 return metrics
             if useful.sum() >= 2 and useful.sum() < len(completions):
                 idx = useful.nonzero(as_tuple=True)[0]
@@ -336,12 +365,48 @@ class QGRETrainer:
                     pass
 
             # Forward through full model (preserves Unsloth gradient checkpointing).
-            # selective_log_softmax avoids materializing [seq, vocab] log-prob tensor.
-            mb_output = self.model(mb_ids)
+            if self._use_triton_logprobs:
+                try:
+                    mb_output = self.model(mb_ids, output_hidden_states=True)
+                except TypeError:
+                    mb_output = self.model(mb_ids)
+
+            else:
+                mb_output = self.model(mb_ids)
+
             mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
-            del mb_output
-            mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
-            del mb_logits
+            hidden_states = getattr(mb_output, "hidden_states", None) if self._use_triton_logprobs else None
+
+            if hidden_states:
+                # Triton fused path: hidden → logprobs without materializing [seq, vocab]
+                from qgre.triton_logprobs import triton_logprobs_from_hidden
+                last_hidden = hidden_states[-1]
+                del mb_output, mb_logits
+                # Find lm_head — handle PeftModel wrapper
+                lm_head = getattr(self.model, "lm_head", None)
+                if lm_head is None:
+                    try:
+                        lm_head = self.model.base_model.model.lm_head
+                    except AttributeError:
+                        lm_head = None
+                if lm_head is not None:
+                    mb_lp = triton_logprobs_from_hidden(
+                        last_hidden[:, :-1, :], lm_head, mb_ids[:, 1:]
+                    )
+                    del last_hidden
+                else:
+                    # lm_head not found — fall back to standard path
+                    del last_hidden
+                    mb_output = self.model(mb_ids)
+                    mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
+                    del mb_output
+                    mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
+                    del mb_logits
+            else:
+                # Standard path: materialize logits → logprobs
+                del mb_output
+                mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
+                del mb_logits
 
             mb_old_lp = mb_lp.detach()
 
@@ -458,13 +523,15 @@ class QGRETrainer:
         self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics)
 
         # Log completions
+        completions_text = []
         for i, rr in enumerate(reward_results):
             # Decode token IDs to text for readable logs
-            comp_tokens = completions[i][:50]
+            comp_tokens = completions[i]
             if self.tokenizer is not None:
-                comp_text = self.tokenizer.decode(comp_tokens, skip_special_tokens=True)[:200]
+                comp_text = self.tokenizer.decode(comp_tokens, skip_special_tokens=True)
             else:
                 comp_text = str(comp_tokens)
+            completions_text.append(comp_text)
             self.completion_logger.log_completion(
                 step=self.global_step,
                 prompt=batch.raw_prompts[i] if i < len(batch.raw_prompts) else "",
@@ -713,14 +780,28 @@ class QGRETrainer:
                     if priorities:
                         dataloader.set_priorities(priorities)
 
-                # 4. Log to MLflow (PLAN.md lines 517-518: per-step reward + advantage metrics)
+                # 4. Log progress + MLflow
+                step_rewards = {int(k.split("_")[-1]): v for k, v in metrics.items()
+                               if k.startswith("mastery/step_")}
+                # Log mastery and phase to stdout for debugging curriculum
+                if self.global_step % 5 == 0:
+                    tiers_str = "/".join(self.game_state.active_tiers)
+                    reward_mean = metrics.get("reward/mean", 0.0)
+                    # Show ALL quality scores from last batch
+                    score_parts = []
+                    if reward_results:
+                        last_scores = reward_results[-1].scores
+                        for qk in sorted(last_scores.keys()):
+                            score_parts.append(f"{qk.replace('q_','')}={last_scores[qk]:.1f}")
+                    scores_str = " ".join(score_parts)
+                    # Show first 150 chars of last completion
+                    comp_preview = ""
+                    if output.texts:
+                        comp_preview = output.texts[-1].replace("\n", " ")
+                    print(f"[{self.global_step}/{cfg.total_steps}] phase={self.game_state.phase} tiers={tiers_str} reward={reward_mean:.2f} {scores_str}")
+                    if comp_preview:
+                        print(f"  completion: {comp_preview}...")
                 try:
-                    step_rewards = {int(k.split("_")[-1]): v for k, v in metrics.items()
-                                   if k.startswith("mastery/step_")}
-                    # Log mastery and phase to stdout for debugging curriculum
-                    if self.global_step % 10 == 0:
-                        mastery_str = " ".join(f"s{k}={v:.2f}" for k, v in sorted(step_rewards.items()))
-                        print(f"[step {self.global_step}] phase={self.game_state.phase} mastery: {mastery_str}")
                     log_step_metrics(
                         step=self.global_step - 1,
                         reward_mean=metrics.get("reward/mean", 0.0),

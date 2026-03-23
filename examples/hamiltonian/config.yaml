@@ -30,12 +30,12 @@ data:
   # 2D mastery matrix curriculum — more granular tiers with system prompt fade
   # tier1/edge: full prompt | tier1b/tier2: abbreviated | tier2b/tier3: minimal | tier3b+: none
   tier_order: [tier1, edge, tier1b, tier2, tier2b, tier3, tier3b, tier4, adversarial]
-  tier_advance_quality_phase: 3    # Must master equations before harder physics unlocks
+  tier_advance_quality_phase: 4    # Must master through potential energy before harder tiers
   tier_advance_threshold: 0.75     # Mastery threshold for tier advancement
   initial_tiers: [tier1, edge]
 
 generation:
-  temperature: 1.0
+  temperature: 0.8
   top_p: 1.0
   top_k: -1
   max_tokens: 4096
@@ -50,18 +50,20 @@ algorithm:
   clip_ratio_high: 0.28
   llds_coef: 0.0
   loss_type: grpo
-  segmenter: qwen3_xml
+  segmenter: hamiltonian
   length_penalty_coef: 0.005
   length_penalty_threshold: 0.6
 
   step_qualities:
     1: [q_format, q_has_math]
-    2: [q_momentum_defined, q_T_uses_p, q_V_correct]
-    3: [q_correct_dqdt, q_correct_dpdt]
-    4: [q_correct_H, q_consistency]
+    2: [q_momentum_defined]
+    3: [q_T_uses_p]
+    4: [q_V_correct]
+    5: [q_correct_H]
+    6: [q_correct_dqdt, q_correct_dpdt, q_consistency]
 
 training:
-  total_steps: 1200
+  total_steps: 3500
   lr: 5.0e-6
   warmup_steps: 10
   lr_scheduler: cosine

@@ -47,13 +47,58 @@ def _normalize_text(s: str) -> str:
 def _normalize_for_sympy(expr_str: str) -> str:
     """Clean up expression string for sympy parsing."""
     s = expr_str.strip()
+    # Strip markdown bold/italic at boundaries only (not multiplication *)
+    s = re.sub(r"^\*{2,3}|(?<!\w)\*{2,3}$|\*{2,3}$", "", s).strip()
+    # Strip LaTeX delimiters: $$ ... $$, $ ... $
+    s = re.sub(r"\$+", "", s).strip()
+    # Strip trailing LaTeX line breaks \\
+    s = re.sub(r"\\\\$", "", s).strip()
+    # LaTeX \cdot → * (before stripping LaTeX commands)
+    s = s.replace("\\cdot", "*")
+    # LaTeX \sqrt{x} → sqrt(x)
+    s = re.sub(r"\\sqrt\{([^}]+)\}", r"sqrt(\1)", s)
+    # LaTeX \sin, \cos etc → sin, cos
+    s = re.sub(r"\\(sin|cos|tan|exp|log|ln)\b", r"\1", s)
+    # Degree symbol: sin(30°) → sin(pi/6), sin(45°) → sin(pi/4), sin(60°) → sin(pi/3)
+    s = re.sub(r"(\d+)°", lambda m: {"30": "pi/6", "45": "pi/4", "60": "pi/3", "90": "pi/2"}.get(m.group(1), m.group(1)), s)
+    # Strip LaTeX \text{}, \left, \right etc
+    s = re.sub(r"\\text\{([^}]*)\}", r"\1", s)
+    s = re.sub(r"\\(left|right|,|;|quad|qquad|displaystyle)", "", s)
+    # LaTeX \dot{x} → _VDOT_ (velocity form marker) — BEFORE stripping LaTeX commands
+    s = re.sub(r"\\dot\{([a-zA-Z])\}", r"_VDOT_", s)
+    # LaTeX fractions: \frac{a}{b} → (a)/(b)
+    s = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", s)
+    # Strip remaining LaTeX commands
+    s = re.sub(r"\\[a-zA-Z]+", "", s)
+    # Strip leftover braces from LaTeX
+    s = s.replace("{", "").replace("}", "")
+    # Unicode superscripts
     s = s.replace("^", "**")
     s = s.replace("²", "**2").replace("³", "**3").replace("⁴", "**4")
+    # Unicode velocity symbols (precomposed) → _VDOT_
+    # NOTE: ẋ ẏ ṙ are precomposed single chars. θ̇ and q̇ are base+combining dot.
+    # Handle precomposed first, then combining dot separately.
+    for vc in ("ẋ", "ẏ", "ṙ"):
+        s = s.replace(vc, "_VDOT_")
     s = s.replace("θ", "theta").replace("ω", "omega")
     s = s.replace("p_θ", "p_theta").replace("p_r", "p_r").replace("p_s", "p_s")
-    s = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", s)
-    s = re.sub(r"\\[a-zA-Z]+", "", s)
-    s = re.sub(r"(\d)([a-zA-Z_])", r"\1*\2", s)
+    # Strip combining characters (dots above letters)
+    s = re.sub(r"\u0307", "", s)  # combining dot above
+    # digit * letter: 3x → 3*x
+    s = re.sub(r"(\d)([a-zA-Z_(])", r"\1*\2", s)
+    # letter/paren * letter: )x → )*x, ) x → )* x, x( → x*(
+    s = re.sub(r"(\))\s*([a-zA-Z_(])", r"\1*\2", s)
+    # letter/number before paren: x( → x*(
+    s = re.sub(r"([a-zA-Z0-9_])\s*(\()", r"\1*\2", s)
+    # Restore function calls broken by above: sin*( → sin(
+    for fn in ("sin", "cos", "tan", "exp", "log", "sqrt", "ln"):
+        s = s.replace(f"{fn}*(", f"{fn}(")
+    # fraction-space-variable: 1/2 x → 1/2*x
+    s = re.sub(r"(\d)\s+([a-zA-Z_(])", r"\1*\2", s)
+    # Strip leading "H =", "T =", "V =", etc. (leftover from label extraction)
+    s = re.sub(r"^[A-Za-z_]+\s*=\s*", "", s)
+    # Clean up whitespace
+    s = re.sub(r"\s+", " ", s).strip()
     return s
 
 
@@ -81,6 +126,9 @@ def _try_sympify(expr_str: str) -> sp.Basic | None:
         normed = _normalize_for_sympy(expr_str)
         result = sp.sympify(normed, locals=_SYMPY_LOCALS)
         if isinstance(result, sp.logic.boolalg.BooleanAtom):
+            return None
+        # sympify can return list/tuple for comma-separated exprs — reject those
+        if not isinstance(result, sp.Basic):
             return None
         return result
     except Exception:
@@ -190,16 +238,20 @@ def _string_similarity(a: str, b: str) -> float:
 # ─── Structured section extractors ────────────────────────────────────────────
 
 def _extract_labeled(text: str, label: str) -> str | None:
-    """Extract the value after a labeled line like 'KINETIC: T = ...'"""
-    # Try exact label match first
+    """Extract the value after a labeled line like 'KINETIC: T = ...'
+
+    Takes the LAST match — the model writes derivation headers early
+    (### 2. **Kinetic Energy**) and structured labels at the end
+    (**KINETIC:** T = p²/6). We want the final labeled answer.
+    """
     patterns = [
         rf"{label}:\s*[A-Za-z_]*\s*=\s*([^\n]+)",  # KINETIC: T = ...
         rf"{label}:\s*([^\n]+)",                      # KINETIC: p²/6
     ]
     for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            expr = m.group(1).strip()
+        matches = list(re.finditer(pat, text, re.IGNORECASE))
+        if matches:
+            expr = matches[-1].group(1).strip()  # Last match
             # Take the last = if there are multiple (e.g. "T = p²/(2m) = p²/6")
             parts = expr.rsplit("=", 1)
             return parts[-1].strip() if len(parts) > 1 else expr
@@ -207,21 +259,41 @@ def _extract_labeled(text: str, label: str) -> str | None:
 
 
 def _extract_equations_block(text: str) -> list[str]:
-    """Extract equations from EQUATIONS: block or scattered patterns."""
+    """Extract equations from EQUATIONS: block or scattered patterns.
+
+    Handles multiple model output formats:
+    - Indented: '  dq/dt = p/3'
+    - Bulleted: '- dq/dt = p/3'
+    - LaTeX: '$ \\frac{dq}{dt} = p $'
+    - Mixed: '- $ \\frac{dp}{dt} = -6x $'
+    """
     results = []
-    # Try EQUATIONS: block
-    block_m = re.search(r"EQUATIONS:\s*\n((?:\s+d[^\n]+\n?)+)", text, re.IGNORECASE)
+
+    # Try EQUATIONS: block — grab everything after the label until next section or end
+    block_m = re.search(r"EQUATIONS[:\s]*\n((?:[\s\-*$]+[^\n]+\n?)+)", text, re.IGNORECASE)
     if block_m:
-        for line in block_m.group(1).strip().split("\n"):
-            eq_m = re.search(r"=\s*([^\n;,$]+)", line)
+        block_text = block_m.group(1)
+        # Normalize LaTeX fractions first
+        block_text = re.sub(r"\\frac\{d([a-z_]+)\}\{dt\}", r"d\1/dt", block_text)
+        block_text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", block_text)
+        block_text = re.sub(r"\\[a-zA-Z]+", "", block_text)
+        block_text = re.sub(r"[$*]", "", block_text)
+        for line in block_text.strip().split("\n"):
+            line = line.strip().lstrip("-").strip()
+            eq_m = re.search(r"=\s*([^\n;]+)", line)
             if eq_m:
                 results.append(eq_m.group(1).strip())
         if results:
             return results
 
-    # Fallback: scattered equation patterns
+    # Fallback: scattered equation patterns (also handle LaTeX)
+    # Normalize LaTeX in full text for fallback
+    norm_text = re.sub(r"\\frac\{d([a-z_]+)\}\{dt\}", r"d\1/dt", text)
+    norm_text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", norm_text)
+    norm_text = re.sub(r"\\[a-zA-Z]+", "", norm_text)
+    norm_text = re.sub(r"[$*]", "", norm_text)
     for pat in [r"d[a-z_]+/dt\s*=\s*([^\n;,]+)", r"[∂d]H/[∂d][a-z_]+\s*=\s*([^\n;,]+)"]:
-        for m in re.finditer(pat, text):
+        for m in re.finditer(pat, norm_text):
             results.append(m.group(1).strip())
     return results
 
@@ -282,9 +354,9 @@ def _score_has_math(text: str) -> float:
 
 def _score_momentum_defined(text: str) -> float:
     """q_momentum_defined: MOMENTUM section defines p in terms of q̇."""
-    # Check for MOMENTUM: label with content
-    has_label = bool(re.search(r"MOMENTUM\s*:", text, re.IGNORECASE))
+    # Check for MOMENTUM: label with content (use last match via _extract_labeled)
     momentum_str = _extract_labeled(text, "MOMENTUM")
+    has_label = momentum_str is not None
 
     if has_label and momentum_str:
         has_numbers = bool(re.search(r"\d", momentum_str))
@@ -304,31 +376,51 @@ def _score_momentum_defined(text: str) -> float:
 
 
 def _score_T_uses_p(text: str, meta: dict) -> float:
-    """q_T_uses_p: KINETIC section has T in terms of momentum p, NOT velocity q̇."""
-    kinetic_str = _extract_labeled(text, "KINETIC")
-    if kinetic_str is None:
-        # Fallback: look for T = ... anywhere
+    """q_T_uses_p: KINETIC section has T in terms of momentum p, NOT velocity q̇.
+
+    Checks the FULL kinetic expression chain, not just the final simplification.
+    Model often writes T = p²/(2m) = (mẋ)²/(2m) = ẋ²/2 — the p² at the start matters.
+    """
+    # Get full kinetic line (before rsplit), not just final = part
+    # Use LAST match — model writes headers early, structured labels at end
+    kinetic_full = None
+    for pat in [r"KINETIC:\s*[A-Za-z_]*\s*=\s*([^\n]+)", r"KINETIC:\s*([^\n]+)"]:
+        matches = list(re.finditer(pat, text, re.IGNORECASE))
+        if matches:
+            kinetic_full = matches[-1].group(1).strip()
+            break
+    if kinetic_full is None:
         m = re.search(r"T\s*=\s*([^\n;]+)", text)
         if m:
-            kinetic_str = m.group(1).strip()
+            kinetic_full = m.group(1).strip()
         else:
             return 0.0
 
-    # Check for momentum variables (good)
-    has_p = bool(re.search(r"p[_²^2\s/(*]|p\*\*2|p\^2", kinetic_str))
-    # Check for velocity variables (bad — means they didn't convert)
-    has_velocity = bool(re.search(r"[θṙẋẏ]̇|dot|d[a-z]/dt|\\dot", kinetic_str, re.IGNORECASE))
+    # Also get the final form for strict checking
+    parts = kinetic_full.rsplit("=", 1)
+    kinetic_final = parts[-1].strip() if len(parts) > 1 else kinetic_full
 
-    if has_p and not has_velocity:
-        # Now check if expression matches ground truth T
+    # Check for momentum variables (good)
+    has_p = bool(re.search(r"p[_²^2\s/(*]|p\*\*2|p\^2", kinetic_full))
+    # Check for velocity in the FINAL form (bad — means final answer uses velocity)
+    has_velocity_final = bool(re.search(
+        r"[ẋẏṙ]|\\dot|d[a-z]/dt|_VDOT_|q̇|θ̇", kinetic_final, re.IGNORECASE
+    ))
+
+    if has_p and not has_velocity_final:
+        # Final answer is in p form — check correctness
         expected_T = meta.get("T_expr", "")
         if expected_T:
-            score = _score_expression(kinetic_str, expected_T, [])
+            score = _score_expression(kinetic_final, expected_T, [])
             return max(0.7, score)  # At least 0.7 for having p form
         return 0.8
-    if has_p and has_velocity:
-        return 0.5  # Mixed — partial conversion
-    if has_velocity:
+    if has_p and has_velocity_final:
+        # Started with p but simplified back to velocity in final form.
+        # Score same as pure velocity — only the FINAL form matters.
+        # No credit for "knowing p" if you undo it. This kills the
+        # local attractor where the model oscillates at 0.5.
+        return 0.2
+    if has_velocity_final:
         return 0.2  # Wrote T but in velocity form
     return 0.3  # Wrote something but unclear
 
@@ -414,13 +506,58 @@ def _score_dpdt(text: str, meta: dict) -> float:
 
 
 def _score_correct_H(text: str, meta: dict) -> float:
-    """q_correct_H: HAMILTONIAN section matches ground truth."""
+    """q_correct_H: HAMILTONIAN section matches ground truth.
+
+    Differentiated scoring so the model gets distinct signals:
+    - 1.0: correct H in momentum form
+    - 0.5-0.7: correct structure but velocity form (ẋ instead of p)
+    - 0.3-0.5: partially correct (some terms right)
+    - 0.2: attempted but unparseable
+    - 0.1: wrote a number instead of symbolic expression
+    - 0.0: nothing found
+    """
     expected_H = meta.get("H_expr", "")
     if not expected_H or expected_H == "none":
         return 0.0
 
     extracted_H = _extract_H(text)
-    return _score_expression(extracted_H, expected_H, [])
+    if extracted_H is None:
+        return 0.0
+
+    # Check if model evaluated to a number instead of keeping symbolic
+    normed = _normalize_for_sympy(extracted_H)
+    parsed = _try_sympify(extracted_H)
+    if parsed is not None and isinstance(parsed, sp.Basic) and parsed.is_number:
+        return 0.1  # Distinct signal: "you plugged in numbers, keep it symbolic"
+
+    # Try direct match first
+    direct_score = _score_expression(extracted_H, expected_H, [])
+    if direct_score >= 0.7:
+        return direct_score
+
+    # Check if it's velocity form of the correct H — substitute _VDOT_ → p/m
+    # If H has _VDOT_ terms, try replacing with p to see if structure matches
+    if "_VDOT_" in normed:
+        # The model wrote the right structure but in velocity form
+        # Give partial credit: 0.5 for correct structure, wrong variables
+        # Try to check if V term (non-velocity part) is correct
+        expected_sym = _try_sympify(expected_H)
+        if expected_sym is not None:
+            # Extract just the potential part from expected (terms without p)
+            p_sym = sp.Symbol("p")
+            expected_V_terms = expected_sym.subs(p_sym, 0)
+            # Check if the model's non-VDOT terms match expected V terms
+            vdot_sym = sp.Symbol("_VDOT_")
+            if parsed is not None:
+                student_V_terms = parsed.subs(vdot_sym, 0)
+                try:
+                    if sp.simplify(student_V_terms - expected_V_terms) == 0:
+                        return 0.6  # V correct, T in wrong form
+                except Exception:
+                    pass
+        return 0.4  # Has velocity form — recognizably an H, just wrong variables
+
+    return direct_score
 
 
 def _score_consistency(text: str, meta: dict) -> float:

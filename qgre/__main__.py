@@ -45,6 +45,8 @@ def import_segmenter(spec: str | None):
     if spec == "qwen3_xml":
         from qgre.segments import qwen3_xml_segmenter
         return qwen3_xml_segmenter
+    if spec in ("hamiltonian", "hif_json", "label"):
+        return None  # Needs tokenizer — resolved later in trainer.__init__
     return import_reward_fn(spec)  # Same module:function pattern
 
 

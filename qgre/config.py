@@ -66,6 +66,19 @@ class GRPOConfig:
 
 
 @dataclass
+class LabelPatternConfig:
+    pattern: str = ""
+    region: str = "STEP_1"
+
+
+@dataclass
+class LabelSegmenterConfig:
+    patterns: list[LabelPatternConfig] = field(default_factory=list)
+    default_region: str = "STEP_1"
+    ignore_case: bool = False
+
+
+@dataclass
 class AlgorithmConfig:
     mode: str = "spo"  # "spo" or "grpo"
     spo: SPOConfig = field(default_factory=SPOConfig)
@@ -82,7 +95,8 @@ class AlgorithmConfig:
     # entropy_coeff removed: -mean(logprob) has wrong gradient direction for entropy bonus.
     # neg_logprob_mean is logged as a metric only (no backprop). See Fix 3 notes.
     step_qualities: dict | None = None  # {step_num: [quality_names]} — domain-specific
-    segmenter: str = "uniform"  # "uniform", "qwen3_xml", or "module.path:function_name"
+    segmenter: str = "uniform"  # "uniform", "qwen3_xml", "label", or "module.path:function_name"
+    label_segmenter: LabelSegmenterConfig | None = None  # Config for segmenter="label"
     # Region-specific KL multipliers (THR-style, PLAN.md lines 798-802)
     # THINK=explore freely, FORMAT=lock structure, STEP=focus on quality
     kl_think_multiplier: float = 0.1   # Low KL for think tokens (explore)
@@ -168,8 +182,17 @@ class QGREConfig:
             alg = d["algorithm"]
             spo = SPOConfig(**_pick(SPOConfig, alg.get("spo", {}), "algorithm.spo")) if "spo" in alg else SPOConfig()
             grpo = GRPOConfig(**_pick(GRPOConfig, alg.get("grpo", {}), "algorithm.grpo")) if "grpo" in alg else GRPOConfig()
-            algo_top = {k: v for k, v in alg.items() if k not in ("spo", "grpo")}
+            algo_top = {k: v for k, v in alg.items() if k not in ("spo", "grpo", "label_segmenter")}
             algo_fields = _pick(AlgorithmConfig, algo_top, "algorithm")
+            # Parse label_segmenter config
+            if "label_segmenter" in alg and alg["label_segmenter"] is not None:
+                ls_raw = alg["label_segmenter"]
+                patterns = [LabelPatternConfig(**p) for p in ls_raw.get("patterns", [])]
+                algo_fields["label_segmenter"] = LabelSegmenterConfig(
+                    patterns=patterns,
+                    default_region=ls_raw.get("default_region", "STEP_1"),
+                    ignore_case=ls_raw.get("ignore_case", False),
+                )
             # Ensure step_qualities keys are ints (YAML may parse them as ints or strings)
             if "step_qualities" in algo_fields and algo_fields["step_qualities"] is not None:
                 algo_fields["step_qualities"] = {

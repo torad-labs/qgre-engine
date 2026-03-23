@@ -159,3 +159,191 @@ class TestScoreOrdering:
     def test_garbage_scores_low(self):
         result = hamiltonian_reward(SPRING_PROMPT, "I don't know.", SPRING_META)
         assert result.reward < 0.2
+
+
+class TestEdgeCases:
+    """Test that reward function never crashes on real model output patterns."""
+
+    def test_numeric_H_scores_low(self):
+        """Model plugs in numbers instead of keeping symbolic → distinct low score."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3v\nKINETIC: T = 4\nPOTENTIAL: V = 12\nHAMILTONIAN: H = 16\nEQUATIONS:\n  dq/dt = 0\n  dp/dt = -19.6"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_correct_H"] <= 0.2
+
+    def test_velocity_form_H_partial_credit(self):
+        """H in velocity form (ẋ) gets more than unparseable (0.2) but less than correct."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = 3/2 * ẋ²\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = 3/2 * ẋ² + 3x²\nEQUATIONS:\n  dq/dt = ẋ\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_correct_H"] > 0.2, "Velocity-form H should score above 0.2"
+        assert result.scores["q_correct_H"] < 0.8, "Velocity-form H should score below correct"
+
+    def test_latex_wrapped_H(self):
+        """Model wraps answer in $$ delimiters — should still parse."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3v\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: $$ H = p^2/6 + 3x^2 $$\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_correct_H"] >= 0.9
+
+    def test_latex_dot_notation(self):
+        """Model uses \\dot{x} LaTeX — should not crash."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3*\\dot{x}\nKINETIC: T = \\frac{p^2}{6}\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = \\frac{\\dot{x}^2}{2} + 3x²\nEQUATIONS:\n  dq/dt = \\dot{x}\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        # Should not crash, and velocity-form H should get partial credit
+        assert result.scores["q_correct_H"] > 0.1
+
+    def test_comma_separated_expressions(self):
+        """Sympy can return a list for comma-separated input — must not crash."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3v\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x², where x is displacement\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        # Must not crash — score doesn't matter as long as no exception
+        assert isinstance(result.reward, float)
+
+    def test_multiline_derivation_chain(self):
+        """Model writes T = p²/(2m) = (2ẋ)²/4 = ẋ² — final form is velocity, no credit."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/(2*3) = (3*ẋ)²/6 = 3ẋ²/2\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        # T starts with p but final form is velocity — same score as pure velocity.
+        # Only the final form matters. No credit for "knowing p" if you undo it.
+        assert result.scores["q_T_uses_p"] <= 0.2
+
+
+class TestNeverCrash:
+    """Fuzz test: reward function must NEVER crash, no matter what the model outputs.
+
+    Every test here asserts isinstance(result.reward, float) — the score doesn't matter,
+    only that the function returns without exception. These patterns come from real model
+    outputs that caused crashes during training.
+    """
+
+    GARBAGE_COMPLETIONS = [
+        # Comma-separated expressions (sympify returns list)
+        "HAMILTONIAN: H = p²/6 + 3x², where x is displacement",
+        "KINETIC: T = p²/6, V = 3x²",
+        "HAMILTONIAN: H = a, b, c",
+        # Pure numbers
+        "HAMILTONIAN: H = 16",
+        "KINETIC: T = 4\nPOTENTIAL: V = 12\nHAMILTONIAN: H = 16",
+        # LaTeX heavy
+        "$$ H = \\frac{p^2}{6} + 3x^2 $$",
+        "HAMILTONIAN: $$ H = \\frac{\\dot{x}^2}{2} + 3x^2 $$",
+        "KINETIC: $T = \\frac{p^2}{2m}$\nHAMILTONIAN: $H = \\frac{p^2}{2m} + V$",
+        # Unicode mess
+        "HAMILTONIAN: H = ẋ² + θ̇² + ṙ²",
+        "KINETIC: T = ½mv²\nHAMILTONIAN: H = ½mv² + mgh",
+        # Empty / whitespace
+        "",
+        "   ",
+        "\n\n\n",
+        # No structure at all
+        "I don't know how to solve this problem.",
+        "The answer is 42.",
+        # Malformed labels
+        "HAMILTONIAN:",
+        "HAMILTONIAN: H =",
+        "HAMILTONIAN: H = = = ",
+        "KINETIC: \nPOTENTIAL: \nHAMILTONIAN: ",
+        # Nested parentheses / brackets
+        "HAMILTONIAN: H = ((((p²/6)))) + [3x²]",
+        "KINETIC: T = {p²}/{6}",
+        # Very long expression
+        "HAMILTONIAN: H = " + " + ".join([f"{i}*x**{i}" for i in range(50)]),
+        # Model talks instead of answering
+        "Let me think about this step by step. First, we need to consider the Lagrangian...",
+        # Mixed correct and garbage
+        "COORDINATES: q = x\nMOMENTUM: p = ???\nKINETIC: T = idk\nPOTENTIAL: V = maybe 3x²\nHAMILTONIAN: H = who knows\nEQUATIONS:\n  dq/dt = ¯\\_(ツ)_/¯\n  dp/dt = lol",
+        # Repeated labels
+        "HAMILTONIAN: H = p²/6\nHAMILTONIAN: H = 3x²\nHAMILTONIAN: H = p²/6 + 3x²",
+        # Code blocks
+        "```python\nH = p**2/6 + 3*x**2\n```",
+        "```\nCOORDINATES: q = x\nHAMILTONIAN: H = p²/6 + 3x²\n```",
+    ]
+
+    @pytest.mark.parametrize("completion", GARBAGE_COMPLETIONS)
+    def test_never_crash(self, completion):
+        """Reward function must return a float for ANY input, never raise."""
+        result = hamiltonian_reward(SPRING_PROMPT, completion, SPRING_META)
+        assert isinstance(result.reward, float), f"Expected float, got {type(result.reward)}"
+        assert 0.0 <= result.reward <= 1.0, f"Reward {result.reward} out of [0, 1] range"
+
+
+class TestRealModelOutputFormats:
+    """Tests built from REAL model completions that caused extraction failures.
+
+    Every test case here is a format the model actually produced during training.
+    If the model invents a new format, add it here.
+    """
+
+    def test_bullet_latex_equations(self):
+        """Model writes equations as markdown bullets with LaTeX fractions."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n- $ \\frac{dq}{dt} = \\frac{p}{3} $\n- $ \\frac{dp}{dt} = -6x $"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_correct_dqdt"] >= 0.7, f"Bullet LaTeX dqdt should extract, got {result.scores['q_correct_dqdt']}"
+        assert result.scores["q_correct_dpdt"] >= 0.7, f"Bullet LaTeX dpdt should extract, got {result.scores['q_correct_dpdt']}"
+
+    def test_indented_latex_equations(self):
+        """Model writes equations as indented LaTeX."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  $ \\frac{dq}{dt} = \\frac{p}{3} $\n  $ \\frac{dp}{dt} = -6x $"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_correct_dqdt"] >= 0.7, f"Indented LaTeX dqdt should extract, got {result.scores['q_correct_dqdt']}"
+        assert result.scores["q_correct_dpdt"] >= 0.7, f"Indented LaTeX dpdt should extract, got {result.scores['q_correct_dpdt']}"
+
+    def test_double_dollar_latex_equations(self):
+        """Model writes equations in $$ display math blocks."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEquations:\n$$\n\\frac{dq}{dt} = \\frac{p}{3}\n$$\n$$\n\\frac{dp}{dt} = -6x\n$$"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_correct_dqdt"] >= 0.5, f"Display math dqdt should extract, got {result.scores['q_correct_dqdt']}"
+        assert result.scores["q_correct_dpdt"] >= 0.5, f"Display math dpdt should extract, got {result.scores['q_correct_dpdt']}"
+
+    def test_bold_markdown_labels(self):
+        """Model wraps labels in ** bold markers."""
+        text = "**COORDINATES:** q = x\n**MOMENTUM:** p = 3*dx/dt\n**KINETIC:** T = p²/6\n**POTENTIAL:** V = 3x²\n**HAMILTONIAN:** H = p²/6 + 3x²\n**EQUATIONS:**\n  dq/dt = p/3\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_T_uses_p"] >= 0.7, f"Bold labels T should extract, got {result.scores['q_T_uses_p']}"
+        assert result.scores["q_correct_H"] >= 0.7, f"Bold labels H should extract, got {result.scores['q_correct_H']}"
+
+    def test_hash_header_labels(self):
+        """Model uses ### headers instead of plain labels."""
+        text = "### COORDINATES: q = x\n### MOMENTUM: p = 3*dx/dt\n### KINETIC: T = p²/6\n### POTENTIAL: V = 3x²\n### HAMILTONIAN: H = p²/6 + 3x²\n### EQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_T_uses_p"] >= 0.7, f"Hash labels T should extract, got {result.scores['q_T_uses_p']}"
+        assert result.scores["q_correct_H"] >= 0.7, f"Hash labels H should extract, got {result.scores['q_correct_H']}"
+
+    def test_derivation_then_labels(self):
+        """Model writes long derivation first, then structured labels at the end.
+        Extractors must take LAST match, not first."""
+        text = """### 3. **Kinetic Energy**
+The kinetic energy is T = (1/2)*m*v² = (3/2)*v²
+
+### 5. **Hamiltonian**
+H = T + V = (3/2)*v² + 3x²
+
+---
+
+### Final Output:
+
+COORDINATES: q = x
+MOMENTUM: p = 3*dx/dt
+KINETIC: T = p²/6
+POTENTIAL: V = 3x²
+HAMILTONIAN: H = p²/6 + 3x²
+EQUATIONS:
+  dq/dt = p/3
+  dp/dt = -6x"""
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        # Must extract from final labels, not derivation headers
+        assert result.scores["q_T_uses_p"] >= 0.7, f"Should extract last KINETIC (p form), got {result.scores['q_T_uses_p']}"
+        assert result.scores["q_correct_H"] >= 0.7, f"Should extract last HAMILTONIAN, got {result.scores['q_correct_H']}"
+
+    def test_incline_coordinate_s(self):
+        """Model uses s instead of x for incline problems — extractors must handle."""
+        text = "COORDINATES: q = s\nMOMENTUM: p = 2*ds/dt\nKINETIC: T = p²/4\nPOTENTIAL: V = -9.8*s\nHAMILTONIAN: H = p²/4 - 9.8*s\nEQUATIONS:\n  ds/dt = p/2\n  dp/dt = 9.8"
+        meta = {**SPRING_META, "H_expr": "p**2/4 - 49*s/5", "dqdt": "p/2", "dpdt": "49/5",
+                "T_expr": "p**2/4", "V_expr": "-49*s/5"}
+        result = hamiltonian_reward(SPRING_PROMPT, text, meta)
+        assert result.scores["q_correct_dqdt"] >= 0.7, f"s-coordinate dqdt should extract, got {result.scores['q_correct_dqdt']}"
+
+    def test_latex_frac_in_kinetic(self):
+        """Model writes KINETIC with LaTeX \\frac{}{}."""
+        text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: $ T = \\frac{p^2}{6} $\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
+        result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
+        assert result.scores["q_T_uses_p"] >= 0.7, f"LaTeX frac T should parse, got {result.scores['q_T_uses_p']}"
+        assert result.scores["q_correct_H"] >= 0.7, f"H should still work, got {result.scores['q_correct_H']}"

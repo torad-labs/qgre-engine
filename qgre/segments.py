@@ -185,6 +185,195 @@ def make_hif_json_segmenter(tokenizer: Any) -> Segmenter:
     return partial(_hif_json_segmenter_impl, tokenizer=tokenizer)
 
 
+# --- Hamiltonian structured-label segmenter (decode-and-regex) ---
+
+# Maps label patterns to step regions. Order matters — first match wins at each position.
+# Each label's tokens get ONLY that label's quality signal.
+HAMILTONIAN_LABEL_PATTERNS: list[tuple[str, str]] = [
+    (r"(?:^|\n)\s*(?:\*{0,2}|#{1,4}\s*)COORDINATES\s*(?:\*{0,2})\s*:", "STEP_1"),
+    (r"(?:^|\n)\s*(?:\*{0,2}|#{1,4}\s*)MOMENTUM\s*(?:\*{0,2})\s*:", "STEP_2"),
+    (r"(?:^|\n)\s*(?:\*{0,2}|#{1,4}\s*)KINETIC\s*(?:\*{0,2})\s*:", "STEP_3"),
+    (r"(?:^|\n)\s*(?:\*{0,2}|#{1,4}\s*)POTENTIAL\s*(?:\*{0,2})\s*:", "STEP_4"),
+    (r"(?:^|\n)\s*(?:\*{0,2}|#{1,4}\s*)HAMILTONIAN\s*(?:\*{0,2})\s*:", "STEP_5"),
+    (r"(?:^|\n)\s*(?:\*{0,2}|#{1,4}\s*)EQUATIONS\s*(?:\*{0,2})\s*:", "STEP_6"),
+]
+
+
+def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
+    """Segment Hamiltonian structured output by label.
+
+    Each label (COORDINATES, MOMENTUM, KINETIC, POTENTIAL, HAMILTONIAN, EQUATIONS)
+    maps to its own STEP region so each section gets its own quality advantage signal.
+    Derivation text before any label gets STEP_1 (format/math quality).
+    """
+    if not token_ids:
+        return []
+
+    n = len(token_ids)
+    regions = ["STEP_1"] * n  # Default: derivation text → format quality
+
+    # Pass 1: Handle <think> tokens by ID
+    in_think = False
+    for i, tid in enumerate(token_ids):
+        if tid == THINK_START:
+            in_think = True
+            regions[i] = "THINK"
+            continue
+        if tid == THINK_END:
+            regions[i] = "THINK"
+            in_think = False
+            continue
+        if in_think:
+            regions[i] = "THINK"
+
+    # Pass 2: Decode and find label positions
+    try:
+        text = tokenizer.decode(token_ids, skip_special_tokens=False)
+    except Exception:
+        return regions
+
+    # Build char→token index mapping
+    token_texts = []
+    for tid in token_ids:
+        try:
+            token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
+        except Exception:
+            token_texts.append("")
+
+    char_to_token = []
+    for i, tt in enumerate(token_texts):
+        for _ in range(len(tt)):
+            char_to_token.append(i)
+
+    # Find label positions
+    label_spans: list[tuple[int, str]] = []  # (start_char, region)
+    for pattern, region in HAMILTONIAN_LABEL_PATTERNS:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            label_spans.append((m.start(), region))
+
+    if not label_spans:
+        return regions  # No labels found → all STEP_1
+
+    # Sort by position, assign regions from each label to the next
+    label_spans.sort(key=lambda x: x[0])
+
+    for idx, (start_char, region) in enumerate(label_spans):
+        end_char = label_spans[idx + 1][0] if idx + 1 < len(label_spans) else len(text)
+        for c in range(start_char, min(end_char, len(char_to_token))):
+            tok_idx = char_to_token[c]
+            if regions[tok_idx] != "THINK":
+                regions[tok_idx] = region
+
+    return regions
+
+
+def make_hamiltonian_segmenter(tokenizer: Any) -> Segmenter:
+    """Create a Hamiltonian segmenter bound to a specific tokenizer."""
+    return partial(_hamiltonian_segmenter_impl, tokenizer=tokenizer)
+
+
+# --- Generic label segmenter (config-driven) ---
+
+def _label_segmenter_impl(
+    token_ids: list[int],
+    tokenizer: Any,
+    patterns: list[tuple[str, str]],
+    default_region: str = "STEP_1",
+    ignore_case: bool = False,
+) -> list[str]:
+    """Generic label-based segmenter — config-driven, no domain-specific code.
+
+    Any domain can define regex→step mappings in YAML and get per-section
+    credit assignment automatically.
+    """
+    if not token_ids:
+        return []
+
+    n = len(token_ids)
+    regions = [default_region] * n
+
+    # Pass 1: Handle <think> tokens by ID
+    in_think = False
+    for i, tid in enumerate(token_ids):
+        if tid == THINK_START:
+            in_think = True
+            regions[i] = "THINK"
+            continue
+        if tid == THINK_END:
+            regions[i] = "THINK"
+            in_think = False
+            continue
+        if in_think:
+            regions[i] = "THINK"
+
+    # Pass 2: Decode and find label positions
+    try:
+        text = tokenizer.decode(token_ids, skip_special_tokens=False)
+    except Exception:
+        return regions
+
+    # Build char→token index mapping
+    token_texts = []
+    for tid in token_ids:
+        try:
+            token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
+        except Exception:
+            token_texts.append("")
+
+    char_to_token = []
+    for i, tt in enumerate(token_texts):
+        for _ in range(len(tt)):
+            char_to_token.append(i)
+
+    # Find label positions
+    flags = re.IGNORECASE if ignore_case else 0
+    label_spans: list[tuple[int, str]] = []
+    for pattern, region in patterns:
+        for m in re.finditer(pattern, text, flags):
+            label_spans.append((m.start(), region))
+
+    if not label_spans:
+        return regions
+
+    # Sort by position, assign regions from each label to the next
+    label_spans.sort(key=lambda x: x[0])
+
+    for idx, (start_char, region) in enumerate(label_spans):
+        end_char = label_spans[idx + 1][0] if idx + 1 < len(label_spans) else len(text)
+        for c in range(start_char, min(end_char, len(char_to_token))):
+            tok_idx = char_to_token[c]
+            if regions[tok_idx] != "THINK":
+                regions[tok_idx] = region
+
+    return regions
+
+
+def make_label_segmenter(
+    tokenizer: Any,
+    label_config: Any,  # LabelSegmenterConfig from config.py
+) -> Segmenter:
+    """Create a generic label segmenter from config.
+
+    Usage in YAML:
+        algorithm:
+          segmenter: label
+          label_segmenter:
+            default_region: STEP_1
+            ignore_case: true
+            patterns:
+              - pattern: '(?:^|\\n)\\s*KINETIC\\s*:'
+                region: STEP_3
+    """
+    patterns = [(p.pattern, p.region) for p in label_config.patterns]
+    return partial(
+        _label_segmenter_impl,
+        tokenizer=tokenizer,
+        patterns=patterns,
+        default_region=label_config.default_region,
+        ignore_case=label_config.ignore_case,
+    )
+
+
 # Backward compatibility alias
 segment_completion = qwen3_xml_segmenter
 
