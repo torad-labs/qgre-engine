@@ -1,28 +1,92 @@
 """Fused chunked logprob computation — Phase 4 of PLAN.md.
 
 Computes log probabilities WITHOUT materializing the full [seq, vocab] logits tensor.
-Instead, processes lm_head in chunks of `chunk_size` tokens at a time:
-  hidden_states[:, chunk] @ lm_head.weight.T → [chunk, vocab] → log_softmax → gather → discard
+Uses Unsloth's UNSLOTH_RETURN_HIDDEN_STATES env var to get hidden states from the
+full patched forward (preserving LoRA, gradient checkpointing, inplace attention),
+then processes lm_head in chunks.
 
 Peak VRAM: chunk_size × vocab_size × dtype_bytes (e.g., 256 × 151936 × 2 = 74MB)
 vs full:   seq_len × vocab_size × dtype_bytes   (e.g., 4096 × 151936 × 2 = 1.17GB)
 
-CRITICAL implementation notes (from deep analysis 2026-03-23):
+CRITICAL implementation notes (from deep analysis + tech scan 2026-03-23):
 1. torch.checkpoint per chunk — without it, autograd stores ALL chunk logits (2.37GB)
 2. torch.cat(chunks) — NOT in-place assignment to torch.zeros (breaks autograd graph)
 3. .float() cast before selective_log_softmax — bf16 path is 10-50× slower
+4. Use UNSLOTH_RETURN_HIDDEN_STATES, NOT body splitting — body bypass causes 0.25 divergence
 
 Inspired by Liger Kernel's fused linear cross entropy approach (linkedin/Liger-Kernel).
-Reference: "Cutting LLM Memory by 84%" (Medium, Feb 2026).
+Unsloth's own GRPO trainer uses the same UNSLOTH_RETURN_HIDDEN_STATES pattern.
 """
 
 from __future__ import annotations
+
+import os
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from qgre.nemo_extracted.logits import selective_log_softmax
+
+
+@contextmanager
+def unsloth_hidden_states_mode():
+    """Context manager to toggle Unsloth's hidden states return mode.
+
+    When active, model(input_ids).logits returns hidden_states [batch, seq, hidden_dim]
+    instead of logits [batch, seq, vocab_size]. This is Unsloth's internal mechanism
+    for avoiding full logit materialization in their GRPO trainer.
+    """
+    prev = os.environ.get("UNSLOTH_RETURN_HIDDEN_STATES", "0")
+    os.environ["UNSLOTH_RETURN_HIDDEN_STATES"] = "1"
+    try:
+        yield
+    finally:
+        os.environ["UNSLOTH_RETURN_HIDDEN_STATES"] = prev
+
+
+def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **kwargs):
+    """Get hidden states and lm_head from model using Unsloth's env var mechanism.
+
+    Uses UNSLOTH_RETURN_HIDDEN_STATES=1 to make the Unsloth-patched forward
+    return hidden states instead of logits. This preserves ALL Unsloth optimizations
+    (LoRA, gradient checkpointing, inplace attention) unlike body-only splitting.
+
+    Args:
+        model: The Unsloth-wrapped language model
+        input_ids: [batch, seq] token IDs
+        **kwargs: Additional kwargs passed to model forward (e.g., attention_mask)
+
+    Returns:
+        (hidden_states, lm_head) — hidden_states [batch, seq, hidden], lm_head nn.Linear
+        Returns (None, None) if Unsloth env var mechanism doesn't work.
+    """
+    # Get lm_head module — works on any HF CausalLM
+    lm_head = None
+    try:
+        lm_head = model.get_output_embeddings()
+        if not isinstance(lm_head, nn.Linear):
+            lm_head = None
+    except (AttributeError, TypeError):
+        pass
+
+    if lm_head is None:
+        return None, None
+
+    # Get hidden states via Unsloth's env var mechanism
+    with unsloth_hidden_states_mode():
+        output = model(input_ids, **kwargs)
+
+    hidden_states = output.logits if hasattr(output, "logits") else output
+
+    # Shape assertion: hidden_dim should be << vocab_size
+    # If Unsloth didn't honor the env var, we'd get [batch, seq, 151936] instead of [batch, seq, 2048]
+    if hidden_states.shape[-1] > 10000:
+        # Env var didn't take effect — got logits instead of hidden states
+        return None, None
+
+    return hidden_states, lm_head
 
 
 def _chunk_forward(chunk_hidden: torch.Tensor, lm_head: nn.Linear, chunk_labels: torch.Tensor) -> torch.Tensor:
@@ -78,9 +142,6 @@ def chunked_logprobs_from_hidden(
         chunk_labels = labels[:, start:end]
 
         if use_checkpoint:
-            # torch.checkpoint: don't save chunk_logits for backward — recompute them.
-            # This is the key memory optimization. Without it, autograd stores ALL
-            # chunk logits (16 × 148MB = 2.37GB) in saved_tensors for backward.
             chunk_lp = torch_checkpoint(
                 _chunk_forward, chunk_hidden, lm_head, chunk_labels,
                 use_reentrant=False,
@@ -94,87 +155,3 @@ def chunked_logprobs_from_hidden(
     # back through lm_head → hidden_states → model parameters.
     # DO NOT replace with torch.zeros + in-place slice assignment.
     return torch.cat(chunks, dim=1)
-
-
-def get_hidden_states_and_lm_head(
-    model: nn.Module,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor | None = None,
-):
-    """Extract hidden states (before lm_head) and the lm_head linear layer.
-
-    Works with Unsloth PeftModel, HuggingFace CausalLM, or any model with
-    a `.model` body and `.lm_head` attribute.
-
-    Args:
-        model: The language model
-        input_ids: [batch, seq] token IDs
-        attention_mask: [batch, seq] attention mask (CRITICAL: must be passed
-            to body forward to avoid attending to padding tokens)
-
-    Returns:
-        (hidden_states, lm_head) — hidden_states [batch, seq, hidden], lm_head nn.Linear
-        Returns (None, None) if body/lm_head split cannot be resolved.
-    """
-    # Navigate through Unsloth/PEFT wrappers to find the model body and lm_head
-    inner = model
-    while hasattr(inner, "model") and not hasattr(inner, "lm_head"):
-        inner = inner.model
-    if hasattr(inner, "base_model"):
-        inner = inner.base_model
-    while hasattr(inner, "model") and not hasattr(inner, "lm_head"):
-        inner = inner.model
-
-    if not hasattr(inner, "lm_head"):
-        return None, None
-
-    # Descend past CausalLM wrappers: if inner.model itself has both .model and
-    # .lm_head, it's a CausalLM (e.g., Qwen3ForCausalLM), not the transformer body.
-    # Keep going deeper until we find the module that OWNS lm_head — where .model
-    # is the actual body (no .lm_head of its own).
-    causal_lm = inner.model if hasattr(inner, "model") else None
-    while causal_lm is not None and hasattr(causal_lm, "lm_head") and hasattr(causal_lm, "model"):
-        inner = causal_lm
-        causal_lm = inner.model if hasattr(inner, "model") else None
-
-    lm_head = inner.lm_head
-
-    # Get the model body (everything except lm_head)
-    body = inner.model if hasattr(inner, "model") else None
-    if body is None:
-        return None, None
-
-    # Safety: body must NOT have its own lm_head — if it does, the descent
-    # didn't go deep enough and body is still a CausalLM, not the transformer body
-    if hasattr(body, "lm_head"):
-        return None, None
-
-    # Forward through body only — pass attention_mask to avoid padding corruption
-    kwargs = {}
-    if attention_mask is not None:
-        kwargs["attention_mask"] = attention_mask
-
-    try:
-        body_output = body(input_ids, **kwargs)
-    except TypeError as e:
-        if attention_mask is not None and "unexpected keyword argument" in str(e) and "attention_mask" in str(e):
-            import warnings
-            warnings.warn(
-                f"Model body does not accept attention_mask — falling back without it. "
-                f"Padded tokens may corrupt hidden states. Error: {e}"
-            )
-            body_output = body(input_ids)
-        else:
-            raise  # Re-raise unexpected TypeErrors — don't swallow real bugs
-
-    # Handle various output formats
-    if hasattr(body_output, "last_hidden_state"):
-        hidden_states = body_output.last_hidden_state
-    elif isinstance(body_output, tuple) and len(body_output) > 0:
-        hidden_states = body_output[0]
-    elif isinstance(body_output, torch.Tensor):
-        hidden_states = body_output
-    else:
-        return None, None
-
-    return hidden_states, lm_head

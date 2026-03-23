@@ -376,27 +376,21 @@ class QGRETrainer:
             # Forward pass: fused (chunked lm_head + checkpoint) or standard (full logits)
             if self._use_fused_logprobs:
                 from qgre.fused_logprobs import get_hidden_states_and_lm_head, chunked_logprobs_from_hidden
-                # Build attention mask for padded sequences
-                mb_attention_mask = (mb_ids != self.tokenizer.pad_token_id).long() if self.tokenizer and hasattr(self.tokenizer, 'pad_token_id') and self.tokenizer.pad_token_id is not None else None
-                hidden_states, lm_head = get_hidden_states_and_lm_head(self.model, mb_ids, attention_mask=mb_attention_mask)
+                hidden_states, lm_head = get_hidden_states_and_lm_head(self.model, mb_ids)
                 if hidden_states is not None and lm_head is not None:
-                    # Fused path: body → hidden_states → chunked lm_head + checkpoint
-                    # Saves ~2GB by never materializing full [seq, vocab] logit tensor.
-                    # torch.checkpoint per chunk prevents autograd from storing all chunks.
+                    # Fused path: Unsloth returns hidden states via UNSLOTH_RETURN_HIDDEN_STATES=1.
+                    # Then chunked lm_head + checkpoint avoids full [seq, vocab] logit tensor.
                     mb_lp = chunked_logprobs_from_hidden(
                         hidden_states[:, :-1, :], lm_head, mb_ids[:, 1:],
                         chunk_size=self._fused_chunk_size,
                     )
-                    # One-time validation: verify fused path produces numerically
-                    # equivalent results to the standard path. Runs BOTH paths on step 1,
-                    # asserts allclose. One extra forward pass — then never again.
+                    # One-time validation on step 1: grad_fn + numeric equivalence
                     if not self._fused_validated:
                         if mb_lp.grad_fn is None:
                             raise RuntimeError(
                                 "Fused logprobs has no grad_fn — autograd graph is broken. "
                                 "Set algorithm.use_fused_logprobs=false to fall back."
                             )
-                        # Numeric equivalence: run standard path and compare
                         with torch.no_grad():
                             std_output = self.model(mb_ids)
                             std_logits = std_output.logits if hasattr(std_output, "logits") else std_output
@@ -414,14 +408,17 @@ class QGRETrainer:
                         self._fused_validated = True
                     del hidden_states
                 else:
-                    # Wrapper chain failed — hard error, not silent fallback.
-                    # The wrapper chain is tested and known to work on Unsloth Qwen3.
-                    raise RuntimeError(
-                        "Fused logprobs: get_hidden_states_and_lm_head returned None. "
-                        "Wrapper chain could not split body from lm_head. "
-                        "Set algorithm.use_fused_logprobs=false to fall back to standard path."
-                    )
-                    mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
+                    # Unsloth env var mechanism didn't work — fall back to standard
+                    import warnings
+                    if not hasattr(self, '_fused_fallback_warned'):
+                        warnings.warn(
+                            f"Step {self.global_step}: fused logprobs unavailable — "
+                            f"UNSLOTH_RETURN_HIDDEN_STATES not supported by this model. "
+                            f"Falling back to standard forward path."
+                        )
+                        self._fused_fallback_warned = True
+                        self._use_fused_logprobs = False
+                    mb_output = self.model(mb_ids)
                     del mb_output
                     mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
                     del mb_logits
