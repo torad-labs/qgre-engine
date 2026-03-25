@@ -125,6 +125,7 @@ class QGRETrainer:
             normalize_advantages=alg.loss_type != "dr_grpo",
             filter_groups=alg.grpo.filter_groups,
             step_region_map=alg.step_region_map,
+            frontier_amplification=alg.frontier_amplification,
         )
 
         # Loss function (NeMo RL extracted)
@@ -262,6 +263,17 @@ class QGRETrainer:
             fallback = max(p for p in self.phase_qualities if p <= tier_phase) if any(p <= tier_phase for p in self.phase_qualities) else min(self.phase_qualities)
             active_qualities.append(self.phase_qualities.get(tier_phase, self.phase_qualities[fallback]))
 
+        # Compute frontier steps — steps blocking phase advancement (below mastery threshold).
+        # These get amplified advantages to focus gradient on the bottleneck.
+        frontier_steps = set()
+        max_phase = max(self.step_qualities.keys())
+        for tier in self.game_state.active_tiers:
+            current_phase = self.game_state.tier_phases.get(tier, 1)
+            if current_phase <= max_phase:
+                mastery = self.game_state.get_tier_step_mastery(tier, current_phase)
+                if mastery < self.config.training.mastery_threshold:
+                    frontier_steps.add(current_phase)
+
         # Compute per-token advantages (segment → step rewards → SPO/GRPO → GDPO → broadcast)
         token_advantages, batch_regions = self.advantage_estimator.compute_advantages(
             batch_prompt_ids=batch.prompt_ids,
@@ -269,6 +281,7 @@ class QGRETrainer:
             batch_reward_results=reward_results,
             batch_active_qualities=active_qualities,
             group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
+            frontier_steps=frontier_steps,
         )
 
         # Build full sequences on model device

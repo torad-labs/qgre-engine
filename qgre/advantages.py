@@ -69,11 +69,13 @@ class QGREStepAdvantageEstimator:
         normalize_advantages: bool = True,
         filter_groups: bool = True,
         step_region_map: dict[int, int] | None = None,
+        frontier_amplification: float = 2.0,
     ):
         self.lr = lr
         self.mode = mode
         self.normalize_advantages = normalize_advantages
         self.filter_groups = filter_groups
+        self.frontier_amplification = frontier_amplification
         self._reward_key_checked = False
         if step_qualities is None:
             raise ValueError(
@@ -115,8 +117,15 @@ class QGREStepAdvantageEstimator:
         batch_reward_results: list[RewardResult],
         batch_active_qualities: list[list[str]],
         group_size: int | None = None,
+        frontier_steps: set[int] | None = None,
     ) -> tuple[list[torch.Tensor], list[list[str]]]:
         """Compute per-token advantages via segment → step rewards → SPO/GRPO → GDPO → broadcast.
+
+        Args:
+            frontier_steps: Steps that block phase advancement (below mastery threshold).
+                When set, these steps receive amplified advantages (frontier_amplification).
+                Steps NOT in the frontier get base weight 1.0; frontier steps get
+                1.0 + frontier_amplification (default: 3x total gradient pressure).
 
         Returns:
             (batch_advantages, batch_regions) — per-token advantages and region labels
@@ -173,9 +182,12 @@ class QGREStepAdvantageEstimator:
             )
 
         # Advantage normalization — mode-dependent:
-        # SPO: GLOBAL normalization across all steps and samples (SPO paper Algorithm 1).
-        #   Ã = (A - μ_B) / σ_B where μ_B, σ_B are computed across the entire batch.
-        #   This stabilizes the gradient scale while preserving per-prompt baseline signal.
+        #
+        # SPO raw mode (QGRE-native): NO normalization. SPO baseline (r - V) is already
+        # per-prompt centered. Adding batch normalization double-centers and erases the
+        # importance hierarchy between steps. Raw advantages preserve which steps have
+        # large signal (far from baseline) vs small signal (near baseline).
+        #
         # GRPO+normalize: per-step mean+std normalization (GDPO-style).
         # GRPO+dr_grpo: per-step mean-only subtraction (no std division).
         for step_num in self._step_nums:
@@ -189,15 +201,11 @@ class QGREStepAdvantageEstimator:
                 )
                 step_advs[step_num] = torch.nan_to_num(step_advs[step_num], nan=0.0)
             if self.mode == "spo":
-                # SPO: per-step normalization across the batch (SPO paper Algorithm 1).
-                # SPO advantages are already per-prompt baselined (r - V).
-                # Now normalize each step across the batch for stable gradient scale.
-                mean = step_advs[step_num].mean()
-                std = step_advs[step_num].std(correction=0)
-                if std > 1e-8:
-                    step_advs[step_num] = (step_advs[step_num] - mean) / (std + 1e-8)
-                else:
-                    step_advs[step_num] = step_advs[step_num] - mean
+                # SPO: use raw (r - V) advantages. The per-prompt EMA baseline IS the
+                # centering mechanism. No batch normalization — this preserves the natural
+                # magnitude hierarchy where bottleneck steps (far from baseline) produce
+                # larger gradients than mastered steps (near baseline).
+                pass
             elif self.normalize_advantages:
                 mean = step_advs[step_num].mean()
                 std = step_advs[step_num].std(correction=0)
@@ -209,6 +217,14 @@ class QGREStepAdvantageEstimator:
                 mean = step_advs[step_num].mean()
                 step_advs[step_num] = step_advs[step_num] - mean
 
+        # Phase-aware frontier amplification: multiply advantages for steps that block
+        # phase advancement. Mastered steps get weight 1.0, frontier steps get
+        # (1 + frontier_amplification). This focuses gradient pressure on the bottleneck.
+        if frontier_steps and self.frontier_amplification > 0:
+            for step_num in self._step_nums:
+                if step_num in frontier_steps:
+                    step_advs[step_num] = step_advs[step_num] * (1.0 + self.frontier_amplification)
+
         # Phase 3: Broadcast per-step advantages to per-token by region
         # Virtual steps (via step_region_map) add their advantage to the mapped region's tokens
         batch_advantages: list[torch.Tensor] = []
@@ -218,13 +234,15 @@ class QGREStepAdvantageEstimator:
                 if region.startswith("STEP_"):
                     sn = int(region.split("_")[1])
                     if sn in step_advs:
-                        # Collect primary + virtual step advantages, then average to prevent
-                        # magnitude imbalance on regions with multiple contributing steps
+                        # Collect primary + virtual step advantages and SUM them.
+                        # Each quality targeting this region pushes at full strength.
+                        # With raw SPO advantages (bounded by reward scale [0,1]),
+                        # summation preserves the full gradient from every contributing quality.
                         contribs = [step_advs[sn][i]]
                         for vs in self._region_extra_steps.get(sn, []):
                             if vs in step_advs:
                                 contribs.append(step_advs[vs][i])
-                        token_advs[t] = torch.stack(contribs).mean()
+                        token_advs[t] = torch.stack(contribs).sum()
                 elif region == "THINK" and 0 in step_advs:
                     token_advs[t] = step_advs[0][i]
             batch_advantages.append(token_advs)

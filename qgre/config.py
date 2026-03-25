@@ -115,6 +115,10 @@ class AlgorithmConfig:
     # Dynamic length control (Huawei): penalize length only when group accuracy is high
     length_penalty_coef: float = 0.0  # 0=off
     length_penalty_threshold: float = 0.5  # correctness ratio above which length penalty applies
+    # Phase-aware frontier amplification: multiply advantages for steps blocking advancement.
+    # Mastered steps get weight 1.0, frontier steps get (1 + frontier_amplification).
+    # 0=off, 2.0=triple gradient on bottleneck steps (recommended for multi-step curriculum).
+    frontier_amplification: float = 2.0
 
 
 @dataclass

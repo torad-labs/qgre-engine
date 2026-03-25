@@ -46,9 +46,7 @@ algorithm:
   spo:
     lr: 0.01
     n: 1
-    kl_adaptive: true
-    min_lr: 0.005
-    max_lr: 0.1
+    kl_adaptive: false
   clip_ratio_low: 0.2
   clip_ratio_high: 0.28
   llds_coef: 0.0
