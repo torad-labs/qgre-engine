@@ -397,6 +397,74 @@ def _extract_labeled(text: str, label: str) -> str | None:
     return None
 
 
+# ─── Section-agnostic expression finder ──────────────────────────────────────
+
+def _find_all_expressions(text: str) -> dict[str, list[str]]:
+    """Extract ALL 'X = expr' patterns from the text, grouped by variable name.
+
+    Returns dict mapping variable letter (T, V, H, p, q, etc.) to list of
+    expression strings found. Takes the RAW text from each match — no label
+    matching, no section detection. Finds math wherever it appears.
+    """
+    results: dict[str, list[str]] = {}
+
+    # Strip LaTeX display delimiters so we can find expressions inside $$ blocks
+    cleaned = text
+    cleaned = re.sub(r"\$\$\s*", " ", cleaned)
+    cleaned = re.sub(r"\$", " ", cleaned)
+
+    # Pattern: letter(s) = expression (on same line or after = )
+    for m in re.finditer(r'([A-Za-z_][A-Za-z_0-9]*)\s*=\s*([^\n,;]{3,})', cleaned):
+        var = m.group(1).strip()
+        expr = m.group(2).strip()
+        # Strip trailing markdown/LaTeX artifacts
+        expr = re.sub(r"[\*$\\]+$", "", expr).strip()
+        # Skip prose (has common English words)
+        if re.search(r"\b(the|was|is|from|and|for|with|where|since|given|that|this)\b", expr, re.IGNORECASE):
+            continue
+        # Skip very short or empty
+        if len(expr) < 1:
+            continue
+        results.setdefault(var, []).append(expr)
+
+    # Also find dX/dt = expr patterns (for Hamilton's equations)
+    for m in re.finditer(r'd([a-z_]+)/dt\s*=\s*([^\n,;]{2,})', cleaned):
+        var = f"d{m.group(1)}/dt"
+        expr = m.group(2).strip()
+        expr = re.sub(r"[\*$\\]+$", "", expr).strip()
+        if len(expr) < 1:
+            continue
+        results.setdefault(var, []).append(expr)
+
+    # LaTeX fraction derivatives: \frac{dq}{dt} = expr
+    for m in re.finditer(r'\\frac\{d([a-z_]+)\}\{dt\}\s*=\s*([^\n,;]{2,})', text):
+        var = f"d{m.group(1)}/dt"
+        expr = m.group(2).strip()
+        expr = re.sub(r"[\*$\\]+$", "", expr).strip()
+        results.setdefault(var, []).append(expr)
+
+    return results
+
+
+def _best_match(candidates: list[str], teacher_str: str, variables: list[str] | None = None) -> float:
+    """Score the best-matching candidate expression against ground truth.
+
+    Tries each candidate, returns the highest score. This is the core of
+    section-agnostic scoring — instead of requiring the expression to be
+    in a specific labeled section, we find it anywhere in the text.
+    """
+    if not candidates:
+        return 0.0
+    best = 0.0
+    for expr in candidates:
+        score = _score_expression(expr, teacher_str, variables or [])
+        if score > best:
+            best = score
+        if best >= 1.0:
+            break
+    return best
+
+
 def _extract_equations_block(text: str) -> list[str]:
     """Extract equations from EQUATIONS: block or scattered patterns.
 
@@ -518,150 +586,84 @@ def _score_momentum_defined(text: str) -> float:
 
 
 def _score_T_uses_p(text: str, meta: dict) -> float:
-    """q_T_uses_p: KINETIC section has T in terms of momentum p, NOT velocity q̇.
+    """q_T_uses_p: T is expressed in terms of momentum p, matching ground truth.
 
-    Checks the FULL kinetic expression chain, not just the final simplification.
-    Model often writes T = p²/(2m) = (mẋ)²/(2m) = ẋ²/2 — the p² at the start matters.
+    Section-agnostic: finds ALL 'T = expr' anywhere in the text, checks if
+    any contain p and match the ground truth. No label required.
     """
-    # Get full kinetic line (before rsplit), not just final = part
-    # Use LAST match — model writes headers early, structured labels at end
-    kinetic_full = None
-    for pat in [r"KINETIC:\s*[A-Za-z_]*\s*=\s*([^\n]+)", r"KINETIC:\s*([^\n]+)"]:
-        matches = list(re.finditer(pat, text, re.IGNORECASE))
-        if matches:
-            kinetic_full = matches[-1].group(1).strip()
-            break
-    if kinetic_full is None:
-        m = re.search(r"T\s*=\s*([^\n;]+)", text)
-        if m:
-            kinetic_full = m.group(1).strip()
-        else:
-            return 0.0
-
-    # Also get the final form for strict checking
-    parts = kinetic_full.rsplit("=", 1)
-    kinetic_final = parts[-1].strip() if len(parts) > 1 else kinetic_full
-
-    # Check for momentum variables (good)
-    has_p = bool(re.search(r"p[_²^2\s/(*]|p\*\*2|p\^2", kinetic_full))
-    # Check for velocity in the FINAL form (bad — means final answer uses velocity)
-    has_velocity_final = bool(re.search(
-        r"[ẋẏṙ]|\\dot|d[a-z]/dt|_VDOT_|q̇|θ̇", kinetic_final, re.IGNORECASE
-    ))
-
-    if has_p and not has_velocity_final:
-        # Final answer is in p form — check correctness
-        expected_T = meta.get("T_expr", "")
-        if expected_T:
-            score = _score_expression(kinetic_final, expected_T, [])
-            return max(0.7, score)  # At least 0.7 for having p form
-        return 0.8
-    if has_p and has_velocity_final:
-        # Started with p but simplified back to velocity in final form.
-        # No credit — only the FINAL form matters. The whole point of
-        # Hamiltonian mechanics is expressing T in terms of p, not velocity.
+    expected_T = meta.get("T_expr", "")
+    if not expected_T:
         return 0.0
-    if has_velocity_final:
-        return 0.0  # Wrote T in velocity form — no p means no credit
-    return 0.0  # No p in T — this is the one thing we're training for
+
+    # Gather all T expressions from the text
+    all_exprs = _find_all_expressions(text)
+    t_candidates = all_exprs.get("T", [])
+
+    # Filter to candidates that contain p (the whole point)
+    p_candidates = [e for e in t_candidates if re.search(r"p[_²^2\s/(*]|p\*\*2|p\^2|\bp\b", e)]
+
+    if p_candidates:
+        score = _best_match(p_candidates, expected_T)
+        return max(0.7, score)  # At least 0.7 for having p form
+
+    # No T = p... found. Check if ANY expression in the text matches ground truth T
+    # (model might write it as part of H derivation without a separate T = line)
+    if t_candidates:
+        # T expressions exist but none have p — velocity form
+        return 0.0
+
+    return 0.0  # No T expression found at all
 
 
 def _score_T_in_momentum(text: str) -> float:
-    """Check if kinetic energy T is expressed in momentum form (p²) vs velocity form (q̇²).
+    """Check if kinetic energy T is expressed in momentum form (p²) vs velocity form.
 
-    Metadata-free — checks variable form only, not correctness.
-
-    Returns:
-        1.0 — KINETIC section found, T contains p AND no velocity markers
-        0.5 — KINETIC section found, contains BOTH p and velocity markers (partial conversion)
-        0.2 — KINETIC section found but T in velocity form only (no p)
-        0.3 — KINETIC section found but form unclear (no p, no velocity)
-        0.0 — no KINETIC section and no T = fallback found
+    Section-agnostic: finds ALL 'T = expr' anywhere in the text.
+    Returns 1.0 if ANY T expression contains p without velocity markers.
     """
     try:
-        # Extract full kinetic line (before final rsplit) — same approach as _score_T_uses_p
-        kinetic_full = None
-        for pat in [r"KINETIC:\s*[A-Za-z_]*\s*=\s*([^\n]+)", r"KINETIC:\s*([^\n]+)"]:
-            matches = list(re.finditer(pat, text, re.IGNORECASE))
-            if matches:
-                kinetic_full = matches[-1].group(1).strip()
-                break
-        if kinetic_full is None:
-            m = re.search(r"T\s*=\s*([^\n;]+)", text)
-            if m:
-                kinetic_full = m.group(1).strip()
-            else:
-                return 0.0
-
-        # Empty extracted content → not found
-        if not kinetic_full.strip():
+        all_exprs = _find_all_expressions(text)
+        t_candidates = all_exprs.get("T", [])
+        if not t_candidates:
             return 0.0
 
-        # Check for momentum variables anywhere in the kinetic line
-        # Require p followed by operator/exponent, not just whitespace (avoids matching "p " standalone)
-        has_p = bool(re.search(r"p[_²/(*]|p\*\*|p\^|p_[a-z]|\bp\d", kinetic_full))
+        for expr in t_candidates:
+            has_p = bool(re.search(r"p[_²/(*]|p\*\*|p\^|p_[a-z]|\bp\d|\bp\b", expr))
+            has_velocity = bool(re.search(
+                r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt", expr
+            ))
+            if has_p and not has_velocity:
+                return 1.0
+            if has_p and has_velocity:
+                return 0.5
 
-        # Check for velocity markers anywhere in the kinetic line
-        # Covers: precomposed Unicode ẋ ẏ ṙ, LaTeX \dot{, combining dot U+0307,
-        #         written derivatives d[a-z]/dt, θ̇ (theta + combining dot),
-        #         post-normalization _VDOT_
-        has_velocity = bool(re.search(
-            r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt", kinetic_full
-        ))
-
-        if has_p and not has_velocity:
-            return 1.0
-        if has_p and has_velocity:
-            return 0.5  # Started with p but also has velocity — partial
-        # No p in T = no credit. Velocity form or unclear form both fail.
-        return 0.0
+        return 0.0  # No T expression with p found
     except Exception:
         return 0.0
 
 
 def _score_H_in_momentum(text: str) -> float:
-    """Check if Hamiltonian H is expressed using momentum variable p rather than velocity form.
+    """Check if Hamiltonian H is expressed using momentum variable p.
 
-    Metadata-free — checks variable form only, not correctness.
-
-    Returns:
-        1.0 — H found, contains p-form variable AND no velocity markers
-        0.5 — H found, contains BOTH p-form and velocity-form variables (incomplete substitution)
-        0.2 — H found but contains ONLY velocity-form variables
-        0.1 — H found but is a pure number (model evaluated numerically)
-        0.3 — H found but form unclear (no p, no velocity)
-        0.0 — no H found
+    Section-agnostic: finds ALL 'H = expr' anywhere in the text.
+    Returns 1.0 if ANY H expression contains p without velocity markers.
     """
     try:
-        extracted_H = _extract_H(text)
-        if extracted_H is None or not extracted_H.strip():
+        all_exprs = _find_all_expressions(text)
+        h_candidates = all_exprs.get("H", [])
+        if not h_candidates:
             return 0.0
 
-        # Check if H is a pure number
-        sym = _try_sympify(extracted_H)
-        if sym is not None and sym.is_number:
-            return 0.1
-
-        # Normalize for consistent velocity marker detection
-        normed = _normalize_for_sympy(extracted_H)
-
-        # Check for momentum variables — require p followed by operator/exponent, not just whitespace
-        has_p = bool(re.search(r"p[_²/(*+\-]|p\*\*|p\^|p_[a-z]|\bp\d", normed)) or \
-                bool(re.search(r"p[_²/(*+\-]|p\*\*|p\^|p_[a-z]|\bp\d", extracted_H))
-
-        # Check for velocity markers in normalized string (_VDOT_ from normalization)
-        has_velocity = bool(re.search(r"_VDOT_", normed))
-        # Also check original for precomposed Unicode, LaTeX, combining dot, d[a-z]/dt forms
-        if not has_velocity:
+        for expr in h_candidates:
+            has_p = bool(re.search(r"p[_²/(*+\-]|p\*\*|p\^|p_[a-z]|\bp\d|\bp\b", expr))
             has_velocity = bool(re.search(
-                r"[ẋẏṙ]|\\dot\{|θ̇|\u0307|d[a-zA-Z]/dt", extracted_H
+                r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt", expr
             ))
+            if has_p and not has_velocity:
+                return 1.0
+            if has_p and has_velocity:
+                return 0.5
 
-        if has_p and not has_velocity:
-            return 1.0
-        if has_p and has_velocity:
-            return 0.5  # Started with p but also has velocity — partial
-        # No p in H = no credit. The Hamiltonian must be in (p, q) form.
         return 0.0
     except Exception:
         return 0.0
