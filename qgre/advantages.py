@@ -172,11 +172,12 @@ class QGREStepAdvantageEstimator:
                 group_size=group_size or batch_size,
             )
 
-        # GDPO-style: normalize each step's advantages across the batch
-        # When normalize_advantages=False (Dr.GRPO), skip std division to avoid bias
-        # SPO mode: skip mean subtraction entirely — SPO advantages are already per-prompt
-        # baselined (r - V). Batch mean-centering destroys per-prompt signal by injecting
-        # noise from unrelated prompts. GRPO needs it; SPO does not.
+        # Advantage normalization — mode-dependent:
+        # SPO: GLOBAL normalization across all steps and samples (SPO paper Algorithm 1).
+        #   Ã = (A - μ_B) / σ_B where μ_B, σ_B are computed across the entire batch.
+        #   This stabilizes the gradient scale while preserving per-prompt baseline signal.
+        # GRPO+normalize: per-step mean+std normalization (GDPO-style).
+        # GRPO+dr_grpo: per-step mean-only subtraction (no std division).
         for step_num in self._step_nums:
             # NaN guard: replace NaN advantages before normalization (ms-swift #8123)
             if step_advs[step_num].isnan().any():
@@ -188,7 +189,7 @@ class QGREStepAdvantageEstimator:
                 )
                 step_advs[step_num] = torch.nan_to_num(step_advs[step_num], nan=0.0)
             if self.mode == "spo":
-                # SPO: no batch normalization — per-prompt baseline is the only centering
+                # SPO: skip per-step normalization — we do global normalization below
                 pass
             elif self.normalize_advantages:
                 mean = step_advs[step_num].mean()
@@ -200,6 +201,20 @@ class QGREStepAdvantageEstimator:
             else:
                 mean = step_advs[step_num].mean()
                 step_advs[step_num] = step_advs[step_num] - mean
+
+        # SPO global normalization (SPO paper Algorithm 1):
+        # Normalize across ALL steps and ALL samples in the batch simultaneously.
+        # This gives a stable gradient scale while preserving the per-prompt baseline signal.
+        if self.mode == "spo":
+            all_advs = torch.cat([step_advs[s] for s in self._step_nums])
+            global_mean = all_advs.mean()
+            global_std = all_advs.std(correction=0)
+            if global_std > 1e-8:
+                for step_num in self._step_nums:
+                    step_advs[step_num] = (step_advs[step_num] - global_mean) / (global_std + 1e-8)
+            else:
+                for step_num in self._step_nums:
+                    step_advs[step_num] = step_advs[step_num] - global_mean
 
         # Phase 3: Broadcast per-step advantages to per-token by region
         # Virtual steps (via step_region_map) add their advantage to the mapped region's tokens
