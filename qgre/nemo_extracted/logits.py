@@ -82,15 +82,19 @@ def logprobs_from_logits(
         [batch, seq] log probabilities for each token (float32)
     """
     batch, seq_len, vocab = logits.shape
-    result = torch.zeros(batch, seq_len, dtype=torch.float32, device=logits.device)
-
+    # Use torch.cat to preserve autograd graph — NOT torch.zeros + in-place assignment.
+    # torch.zeros creates a leaf tensor; in-place slice assignment severs the graph.
+    # Same pattern as chunked_logprobs_from_hidden in fused_logprobs.py.
+    chunks = []
     for start in range(0, seq_len, chunk_size):
         end = min(start + chunk_size, seq_len)
-        result[:, start:end] = selective_log_softmax(
+        chunks.append(selective_log_softmax(
             logits[:, start:end, :], labels[:, start:end],
-        )
+        ))
 
-    return result
+    if not chunks:
+        return torch.zeros(batch, 0, dtype=torch.float32, device=logits.device)
+    return torch.cat(chunks, dim=1)
 
 
 def compute_response_logprobs(

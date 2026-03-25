@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import pytest
 
-from qgre.fused_logprobs import chunked_logprobs_from_hidden
+from qgre.fused_logprobs import chunked_logprobs_from_hidden, get_hidden_states_and_lm_head
 
 
 class TestChunkedLogprobs:
@@ -76,3 +76,96 @@ class TestChunkedLogprobs:
         assert result.grad_fn is not None
         result.sum().backward()
         assert lm_head.bias.grad is not None, "Bias grad must flow"
+
+
+class TestGetHiddenStatesAndLmHead:
+    """Test hidden states extraction with model-agnostic shape check and labels guard."""
+
+    def _make_stub_model(self, hidden_dim, vocab_size, return_dim=None):
+        """Create a stub model that returns tensors of specified shape."""
+        out_dim = return_dim if return_dim is not None else hidden_dim
+
+        class StubModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
+
+                class _Config:
+                    pass
+                self.config = _Config()
+                self.config.vocab_size = vocab_size
+
+            def get_output_embeddings(self):
+                return self._lm_head
+
+            def forward(self, input_ids, **kwargs):
+                batch, seq = input_ids.shape
+                class Out:
+                    pass
+                result = Out()
+                result.logits = torch.randn(batch, seq, out_dim)
+                return result
+
+        return StubModel()
+
+    def test_labels_assert_rejects_labels_in_kwargs(self):
+        """Passing labels in kwargs must raise AssertionError."""
+        model = self._make_stub_model(32, 100)
+        input_ids = torch.randint(0, 100, (1, 10))
+        with pytest.raises(AssertionError, match="labels"):
+            get_hidden_states_and_lm_head(model, input_ids, labels=torch.zeros(1, 10))
+
+    def test_shape_check_returns_none_when_output_matches_vocab(self):
+        """When output last dim == vocab_size, function returns (None, None)."""
+        # Model returns tensor with shape[-1] == vocab_size (got logits, not hidden states)
+        model = self._make_stub_model(32, 100, return_dim=100)
+        input_ids = torch.randint(0, 100, (1, 10))
+        hs, lm = get_hidden_states_and_lm_head(model, input_ids)
+        assert hs is None, "Should return None when shape matches vocab_size"
+        assert lm is None
+
+    def test_shape_check_succeeds_when_output_is_hidden_dim(self):
+        """When output last dim < vocab_size, function returns hidden states."""
+        model = self._make_stub_model(32, 100, return_dim=32)
+        input_ids = torch.randint(0, 100, (1, 10))
+        hs, lm = get_hidden_states_and_lm_head(model, input_ids)
+        assert hs is not None, "Should succeed when hidden_dim < vocab_size"
+        assert hs.shape[-1] == 32
+        assert isinstance(lm, nn.Linear)
+
+    def test_model_without_config_uses_lm_head_dims(self):
+        """When model has no config attribute, shape check uses lm_head.in_features."""
+        class NoConfigModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self._lm_head = nn.Linear(32, 100, bias=False)
+
+            def get_output_embeddings(self):
+                return self._lm_head
+
+            def forward(self, input_ids, **kwargs):
+                batch, seq = input_ids.shape
+                class Out:
+                    pass
+                result = Out()
+                result.logits = torch.randn(batch, seq, 32)
+                return result
+
+        model = NoConfigModel()
+        input_ids = torch.randint(0, 100, (1, 10))
+        hs, lm = get_hidden_states_and_lm_head(model, input_ids)
+        assert hs is not None, "Should succeed — output dim 32 matches lm_head.in_features"
+
+    def test_no_lm_head_returns_none(self):
+        """When model has no get_output_embeddings or it returns non-Linear."""
+        class NoEmbModel(nn.Module):
+            def get_output_embeddings(self):
+                return None  # Not nn.Linear
+            def forward(self, input_ids, **kwargs):
+                return torch.randn(1, 10, 32)
+
+        model = NoEmbModel()
+        input_ids = torch.randint(0, 100, (1, 10))
+        hs, lm = get_hidden_states_and_lm_head(model, input_ids)
+        assert hs is None
+        assert lm is None

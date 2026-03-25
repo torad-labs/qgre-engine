@@ -20,9 +20,6 @@ Unsloth's own GRPO trainer uses the same UNSLOTH_RETURN_HIDDEN_STATES pattern.
 
 from __future__ import annotations
 
-import os
-from contextlib import contextmanager
-
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
@@ -30,28 +27,11 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from qgre.nemo_extracted.logits import selective_log_softmax
 
 
-@contextmanager
-def unsloth_hidden_states_mode():
-    """Context manager to toggle Unsloth's hidden states return mode.
-
-    When active, model(input_ids).logits returns hidden_states [batch, seq, hidden_dim]
-    instead of logits [batch, seq, vocab_size]. This is Unsloth's internal mechanism
-    for avoiding full logit materialization in their GRPO trainer.
-    """
-    prev = os.environ.get("UNSLOTH_RETURN_HIDDEN_STATES", "0")
-    os.environ["UNSLOTH_RETURN_HIDDEN_STATES"] = "1"
-    try:
-        yield
-    finally:
-        os.environ["UNSLOTH_RETURN_HIDDEN_STATES"] = prev
-
-
 def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **kwargs):
-    """Get hidden states and lm_head from model using Unsloth's env var mechanism.
+    """Get hidden states and lm_head from model.
 
-    Uses UNSLOTH_RETURN_HIDDEN_STATES=1 to make the Unsloth-patched forward
-    return hidden states instead of logits. This preserves ALL Unsloth optimizations
-    (LoRA, gradient checkpointing, inplace attention) unlike body-only splitting.
+    UNSLOTH_RETURN_HIDDEN_STATES=1 is set globally at startup (__main__.py).
+    All forward calls return hidden states in output.logits field.
 
     Args:
         model: The Unsloth-wrapped language model
@@ -60,30 +40,50 @@ def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **k
 
     Returns:
         (hidden_states, lm_head) — hidden_states [batch, seq, hidden], lm_head nn.Linear
-        Returns (None, None) if Unsloth env var mechanism doesn't work.
+        Returns (None, None) if hidden states mode didn't take effect.
     """
+    # CRITICAL: Do NOT pass labels. Unsloth issue #3000 (open): Qwen3Moe
+    # bypasses NOT_RETURN_LOGITS when labels are present. See rejection framework.
+    assert "labels" not in kwargs, (
+        "Do not pass labels to forward when using hidden states mode. "
+        "See Unsloth issue #3000: labels bypass UNSLOTH_RETURN_HIDDEN_STATES."
+    )
+
     # Get lm_head module — works on any HF CausalLM
     lm_head = None
     try:
         lm_head = model.get_output_embeddings()
         if not isinstance(lm_head, nn.Linear):
             lm_head = None
-    except (AttributeError, TypeError):
-        pass
+    except AttributeError:
+        lm_head = None  # Model doesn't implement get_output_embeddings
 
     if lm_head is None:
         return None, None
 
-    # Get hidden states via Unsloth's env var mechanism
-    with unsloth_hidden_states_mode():
-        output = model(input_ids, **kwargs)
-
+    # No env var toggling needed — set globally at startup
+    output = model(input_ids, **kwargs)
     hidden_states = output.logits if hasattr(output, "logits") else output
 
-    # Shape assertion: hidden_dim should be << vocab_size
-    # If Unsloth didn't honor the env var, we'd get [batch, seq, 151936] instead of [batch, seq, 2048]
-    if hidden_states.shape[-1] > 10000:
-        # Env var didn't take effect — got logits instead of hidden states
+    # Model-agnostic shape check: use lm_head dimensions as ground truth.
+    # lm_head is nn.Linear(hidden_dim, vocab_size). If output matches
+    # lm_head.out_features → got logits. If matches in_features → got hidden states.
+    last_dim = hidden_states.shape[-1]
+    if last_dim == lm_head.out_features:
+        import warnings
+        warnings.warn(
+            f"get_hidden_states_and_lm_head: output dim {last_dim} matches vocab_size "
+            f"(lm_head.out_features={lm_head.out_features}). Model returned logits, "
+            f"not hidden states. UNSLOTH_RETURN_HIDDEN_STATES may not have taken effect."
+        )
+        return None, None
+    if last_dim != lm_head.in_features:
+        import warnings
+        warnings.warn(
+            f"get_hidden_states_and_lm_head: output dim {last_dim} matches neither "
+            f"hidden_dim ({lm_head.in_features}) nor vocab_size ({lm_head.out_features}). "
+            f"Model output is corrupted or architecture is unsupported."
+        )
         return None, None
 
     return hidden_states, lm_head
@@ -134,6 +134,8 @@ def chunked_logprobs_from_hidden(
         WITH grad_fn connected to hidden_states → model parameters
     """
     batch, seq_len, hidden = hidden_states.shape
+    if seq_len == 0:
+        return torch.zeros(batch, 0, dtype=torch.float32, device=hidden_states.device)
     chunks = []
 
     for start in range(0, seq_len, chunk_size):

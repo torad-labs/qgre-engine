@@ -30,17 +30,29 @@ def _cfg() -> QGREConfig:
 
 
 class MockModel(nn.Module):
-    """Minimal model that returns random logits."""
+    """Minimal model that returns hidden states (simulating UNSLOTH_RETURN_HIDDEN_STATES=1).
+
+    With the fused logprobs fix, all forward calls return hidden states.
+    Both fused and non-fused paths reconstruct logits via lm_head.
+    """
 
     def __init__(self, vocab_size=160000, hidden=32):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, hidden)
         self.head = nn.Linear(hidden, vocab_size)
 
+        class _Config:
+            pass
+        self.config = _Config()
+        self.config.vocab_size = vocab_size
+
+    def get_output_embeddings(self):
+        return self.head
+
     def forward(self, input_ids, **kwargs):
         x = self.embed(input_ids)
-        logits = self.head(x)
-        return MagicMock(logits=logits)
+        # Return hidden states (not logits) — matches global UNSLOTH_RETURN_HIDDEN_STATES=1
+        return MagicMock(logits=x)
 
 
 def _make_tokens(n=32):
@@ -560,6 +572,36 @@ def test_gradient_accumulation_loss_accumulated():
 
 
 # --- Fix 9: Mastery threshold from config ---
+
+
+def test_fused_logprobs_path():
+    """Fused logprobs path (use_fused_logprobs=True) produces finite loss."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cfg = _cfg()
+        cfg.algorithm.use_fused_logprobs = True
+        cfg.logging.completion_dir = str(Path(tmpdir) / "completions")
+        cfg.logging.checkpoint_dir = str(Path(tmpdir) / "checkpoints")
+
+        model = MockModel()
+        trainer = QGRETrainer(
+            model=model, tokenizer=None,
+            reward_fn=lambda *a, **k: RewardResult(reward=0.5, scores={"q_format_tags": 1.0}, phase=1),
+            config=cfg,
+        )
+        trainer.setup_optimizer()
+
+        batch = _make_batch(n_completions=2)
+        tokens = _make_tokens()
+        rrs = [
+            RewardResult(reward=0.8, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}, phase=1),
+            RewardResult(reward=0.3, scores={"q_format_tags": 0.5, "q_tag_content": 0.2}, phase=1),
+        ]
+
+        metrics = trainer.step(batch, [tokens, tokens], rrs)
+        assert "loss" in metrics
+        assert torch.isfinite(torch.tensor(metrics["loss"]))
+        # Fused validation should have passed on step 1
+        assert trainer._fused_validated
 
 
 def test_mastery_threshold_from_config():

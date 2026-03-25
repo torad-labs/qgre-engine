@@ -124,6 +124,7 @@ class QGRETrainer:
             segmenter=segmenter or uniform_segmenter,
             normalize_advantages=alg.loss_type != "dr_grpo",
             filter_groups=alg.grpo.filter_groups,
+            step_region_map=alg.step_region_map,
         )
 
         # Loss function (NeMo RL extracted)
@@ -282,6 +283,14 @@ class QGRETrainer:
         for i, c in enumerate(completions):
             comp_tensor[i, :len(c)] = torch.tensor(c, dtype=torch.long, device=device)
 
+        # Attention mask: 1 for real tokens, 0 for padding beyond completion length.
+        # Uses actual completion lengths, NOT token values — token ID 0 is a valid
+        # token in many vocabularies (e.g. Qwen3). Using (comp_tensor != 0) would
+        # silently mask real tokens, corrupting hidden states and gradients.
+        comp_attention_mask = torch.zeros_like(comp_tensor, dtype=torch.long)
+        for i, c in enumerate(completions):
+            comp_attention_mask[i, :len(c)] = 1
+
         # Build KL region weights from segmenter regions (THR-style, PLAN.md lines 798-802)
         # Gate: skip entirely when KL is disabled (default config). Saves the tensor
         # allocation + nested Python loop over every token every step.
@@ -303,7 +312,7 @@ class QGRETrainer:
 
         # SPO low-advantage filter: skip sequences with near-zero signal (PLAN.md lines 658-671)
         if self.config.algorithm.mode == "spo":
-            useful = (padded_advs.abs() > 0.01).any(dim=-1)
+            useful = (padded_advs.abs() > 0.001).any(dim=-1)
             if useful.sum() == 0:
                 # All advantages near-zero — skip backward pass but still record mastery + log completions
                 metrics = {"loss": 0.0, "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
@@ -330,6 +339,7 @@ class QGRETrainer:
                 idx = useful.nonzero(as_tuple=True)[0]
                 padded_advs = padded_advs[idx]
                 comp_tensor = comp_tensor[idx]
+                comp_attention_mask = comp_attention_mask[idx]
                 if kl_region_weights is not None:
                     kl_region_weights = kl_region_weights[idx]
 
@@ -356,6 +366,7 @@ class QGRETrainer:
         for mb_start in range(0, actual_batch, micro_batch_size):
             mb_end = min(mb_start + micro_batch_size, actual_batch)
             mb_ids = comp_tensor[mb_start:mb_end]
+            mb_attn_mask = comp_attention_mask[mb_start:mb_end]
             mb_advs = padded_advs[mb_start:mb_end]
             mb_mask = response_mask[mb_start:mb_end]
 
@@ -371,64 +382,70 @@ class QGRETrainer:
                     from unsloth import FastLanguageModel as FLM
                     FLM.for_training(self.model)
                 except ImportError:
-                    pass
+                    import warnings
+                    warnings.warn(
+                        "Could not call FastLanguageModel.for_training() — Unsloth not importable. "
+                        "If using Unsloth models, inplace attention kernels may cause backward errors."
+                    )
 
-            # Forward pass: fused (chunked lm_head + checkpoint) or standard (full logits)
+            # Forward pass: fused (chunked lm_head + checkpoint) or non-fused (full lm_head)
+            # Both paths start from hidden states (UNSLOTH_RETURN_HIDDEN_STATES=1 is global).
+            # Fused saves ~2GB VRAM via chunking. Non-fused materializes full logit tensor.
             if self._use_fused_logprobs:
                 from qgre.fused_logprobs import get_hidden_states_and_lm_head, chunked_logprobs_from_hidden
-                hidden_states, lm_head = get_hidden_states_and_lm_head(self.model, mb_ids)
+                hidden_states, lm_head = get_hidden_states_and_lm_head(self.model, mb_ids, attention_mask=mb_attn_mask)
                 if hidden_states is not None and lm_head is not None:
-                    # Fused path: Unsloth returns hidden states via UNSLOTH_RETURN_HIDDEN_STATES=1.
-                    # Then chunked lm_head + checkpoint avoids full [seq, vocab] logit tensor.
+                    # Fused path: chunked lm_head + checkpoint avoids full [seq, vocab] logit tensor.
                     mb_lp = chunked_logprobs_from_hidden(
                         hidden_states[:, :-1, :], lm_head, mb_ids[:, 1:],
                         chunk_size=self._fused_chunk_size,
                     )
-                    # One-time validation on step 1: grad_fn + numeric equivalence
-                    if not self._fused_validated:
+                    # One-time validation: chunking correctness only.
+                    # Compares chunked vs full lm_head projection from same hidden states.
+                    # Does NOT validate model-level correctness (caught by training loop).
+                    if not self._fused_validated and mb_lp.shape[1] > 0:
                         if mb_lp.grad_fn is None:
                             raise RuntimeError(
                                 "Fused logprobs has no grad_fn — autograd graph is broken. "
                                 "Set algorithm.use_fused_logprobs=false to fall back."
                             )
                         with torch.no_grad():
-                            std_output = self.model(mb_ids)
-                            std_logits = std_output.logits if hasattr(std_output, "logits") else std_output
-                            del std_output
-                            # Cast to float32 — fused path uses fp32, standard must match
-                            std_lp = logprobs_from_logits(std_logits[:, :-1, :].float(), mb_ids[:, 1:])
-                            del std_logits
+                            manual_logits = lm_head(hidden_states[:, :-1, :]).float()
+                            std_lp = logprobs_from_logits(manual_logits, mb_ids[:, 1:])
+                            del manual_logits
                             min_len_v = min(mb_lp.shape[1], std_lp.shape[1])
                             if not torch.allclose(mb_lp[:, :min_len_v].detach(), std_lp[:, :min_len_v], atol=1e-3):
                                 max_diff = (mb_lp[:, :min_len_v].detach() - std_lp[:, :min_len_v]).abs().max().item()
                                 raise RuntimeError(
-                                    f"Fused logprobs diverge from standard path (max diff: {max_diff:.6f}). "
+                                    f"Fused logprobs diverge from full projection (max diff: {max_diff:.6f}). "
                                     f"Set algorithm.use_fused_logprobs=false to fall back."
                                 )
                             del std_lp
                         self._fused_validated = True
                     del hidden_states
                 else:
-                    # Unsloth env var mechanism didn't work — fall back to standard
-                    import warnings
-                    if not hasattr(self, '_fused_fallback_warned'):
-                        warnings.warn(
-                            f"Step {self.global_step}: fused logprobs unavailable — "
-                            f"UNSLOTH_RETURN_HIDDEN_STATES not supported by this model. "
-                            f"Falling back to standard forward path."
-                        )
-                        self._fused_fallback_warned = True
-                        self._use_fused_logprobs = False
-                    mb_output = self.model(mb_ids)
-                    del mb_output
-                    mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
-                    del mb_logits
+                    # Hidden states mode didn't take effect — crash with diagnostics
+                    raise RuntimeError(
+                        f"Step {self.global_step}: fused logprobs unavailable — "
+                        f"UNSLOTH_RETURN_HIDDEN_STATES did not take effect. "
+                        f"Delete unsloth_compiled_cache/ and restart. "
+                        f"To disable fused logprobs entirely, set algorithm.use_fused_logprobs=false."
+                    )
             else:
-                # Standard path: full forward, materialize logits → logprobs
-                mb_output = self.model(mb_ids)
-                mb_logits = mb_output.logits if hasattr(mb_output, "logits") else mb_output
-                del mb_output
-                mb_lp = logprobs_from_logits(mb_logits[:, :-1, :], mb_ids[:, 1:])
+                # Non-fused path: full lm_head projection without chunking.
+                # Costs ~2GB more VRAM than fused (materializes full [seq, vocab] tensor).
+                # This is the degraded-but-correct escape hatch.
+                from qgre.fused_logprobs import get_hidden_states_and_lm_head
+                hs, lm_head_nf = get_hidden_states_and_lm_head(self.model, mb_ids, attention_mask=mb_attn_mask)
+                if hs is None or lm_head_nf is None:
+                    raise RuntimeError(
+                        f"Step {self.global_step}: model did not return hidden states. "
+                        f"UNSLOTH_RETURN_HIDDEN_STATES did not take effect. "
+                        f"Delete unsloth_compiled_cache/ and restart."
+                    )
+                mb_logits = lm_head_nf(hs[:, :-1, :]).float()
+                del hs
+                mb_lp = logprobs_from_logits(mb_logits, mb_ids[:, 1:])
                 del mb_logits
 
             mb_old_lp = mb_lp.detach()
@@ -627,12 +644,23 @@ class QGRETrainer:
         if checkpoint.get("cuda_rng_state") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state(checkpoint["cuda_rng_state"])
 
+        # Re-validate fused logprobs after resume — model weights changed
+        self._fused_validated = False
+
         # LoRA verification on resume (PLAN.md line 487-488: mandatory step)
         try:
             from qgre.lora_verify import LoRAVerifier
-            LoRAVerifier.verify_active(self.model, self.tokenizer)
-        except (ImportError, AttributeError):
-            pass  # Non-fatal if tokenizer not set or Unsloth not loaded
+        except ImportError:
+            pass  # LoRA verification unavailable — Unsloth not installed
+        else:
+            try:
+                LoRAVerifier.verify_active(self.model, self.tokenizer)
+            except AttributeError as e:
+                import warnings
+                warnings.warn(
+                    f"LoRA verification failed after resume: {e}. "
+                    f"LoRA adapters may not be active. Check model state."
+                )
 
         return True
 
@@ -755,6 +783,7 @@ class QGRETrainer:
 
         self._dataloader = dataloader  # Store ref for difficulty gate updates
         self.setup_optimizer()
+        self.optimizer.zero_grad()  # Clean slate — no stale gradients from init or resume
         cfg = self.config.training
 
         # MLflow experiment setup (PILLARS.md line 128)

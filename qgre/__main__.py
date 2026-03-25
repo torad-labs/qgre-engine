@@ -13,6 +13,26 @@ _cuda_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
 if "expandable_segments" not in _cuda_conf:
     os.environ["PYTORCH_CUDA_ALLOC_CONF"] = f"{_cuda_conf},expandable_segments:True".lstrip(",")
 
+# MUST be before any Unsloth import — baked into compiled cache at compile time.
+# See: docs/fix-fused-logprobs-compiled-cache.md
+os.environ["UNSLOTH_RETURN_HIDDEN_STATES"] = "1"
+
+# Delete compiled cache to force recompilation with correct env var.
+# Standard Unsloth practice (issues #4181, #4294, #3763). 10-30s cost.
+import shutil
+from pathlib import Path
+_compiled_cache = Path("unsloth_compiled_cache")
+if _compiled_cache.exists():
+    try:
+        shutil.rmtree(_compiled_cache)
+    except OSError as e:
+        import warnings
+        warnings.warn(
+            f"Failed to delete {_compiled_cache}: {e}. "
+            f"Stale compiled cache may cause UNSLOTH_RETURN_HIDDEN_STATES to not take effect. "
+            f"Delete manually: rm -rf {_compiled_cache.resolve()}"
+        )
+
 import argparse
 import importlib
 import sys
