@@ -189,8 +189,15 @@ class QGREStepAdvantageEstimator:
                 )
                 step_advs[step_num] = torch.nan_to_num(step_advs[step_num], nan=0.0)
             if self.mode == "spo":
-                # SPO: skip per-step normalization — we do global normalization below
-                pass
+                # SPO: per-step normalization across the batch (SPO paper Algorithm 1).
+                # SPO advantages are already per-prompt baselined (r - V).
+                # Now normalize each step across the batch for stable gradient scale.
+                mean = step_advs[step_num].mean()
+                std = step_advs[step_num].std(correction=0)
+                if std > 1e-8:
+                    step_advs[step_num] = (step_advs[step_num] - mean) / (std + 1e-8)
+                else:
+                    step_advs[step_num] = step_advs[step_num] - mean
             elif self.normalize_advantages:
                 mean = step_advs[step_num].mean()
                 std = step_advs[step_num].std(correction=0)
@@ -201,20 +208,6 @@ class QGREStepAdvantageEstimator:
             else:
                 mean = step_advs[step_num].mean()
                 step_advs[step_num] = step_advs[step_num] - mean
-
-        # SPO global normalization (SPO paper Algorithm 1):
-        # Normalize across ALL steps and ALL samples in the batch simultaneously.
-        # This gives a stable gradient scale while preserving the per-prompt baseline signal.
-        if self.mode == "spo":
-            all_advs = torch.cat([step_advs[s] for s in self._step_nums])
-            global_mean = all_advs.mean()
-            global_std = all_advs.std(correction=0)
-            if global_std > 1e-8:
-                for step_num in self._step_nums:
-                    step_advs[step_num] = (step_advs[step_num] - global_mean) / (global_std + 1e-8)
-            else:
-                for step_num in self._step_nums:
-                    step_advs[step_num] = step_advs[step_num] - global_mean
 
         # Phase 3: Broadcast per-step advantages to per-token by region
         # Virtual steps (via step_region_map) add their advantage to the mapped region's tokens
