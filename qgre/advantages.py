@@ -68,6 +68,7 @@ class QGREStepAdvantageEstimator:
         segmenter: Segmenter | None = None,
         normalize_advantages: bool = True,
         filter_groups: bool = True,
+        step_region_map: dict[int, int] | None = None,
     ):
         self.lr = lr
         self.mode = mode
@@ -85,6 +86,27 @@ class QGREStepAdvantageEstimator:
         self._step_nums = sorted(self.step_qualities.keys())
         self.V: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
         self._step_seen: dict[int, set[int]] = defaultdict(set)
+        # step_region_map: virtual steps (no segmenter region) → region step whose tokens carry their advantage
+        # e.g., {7: 2} means step 7's advantage is added to STEP_2 tokens
+        self.step_region_map = step_region_map or {}
+        # Validate: virtual steps must exist in step_qualities, region targets must too
+        if self.step_region_map:
+            import warnings
+            for vs, rs in self.step_region_map.items():
+                if vs not in self.step_qualities:
+                    warnings.warn(
+                        f"step_region_map key {vs} not in step_qualities — "
+                        f"mapped advantage will never be computed."
+                    )
+                if rs not in self.step_qualities:
+                    warnings.warn(
+                        f"step_region_map value {rs} (target for step {vs}) not in step_qualities — "
+                        f"no tokens will carry step {vs}'s advantage. Check segmenter regions."
+                    )
+        # Build reverse map: region_step → [virtual steps that map to it]
+        self._region_extra_steps: dict[int, list[int]] = defaultdict(list)
+        for virtual_step, region_step in self.step_region_map.items():
+            self._region_extra_steps[region_step].append(virtual_step)
 
     def compute_advantages(
         self,
@@ -173,6 +195,7 @@ class QGREStepAdvantageEstimator:
                 step_advs[step_num] = step_advs[step_num] - mean
 
         # Phase 3: Broadcast per-step advantages to per-token by region
+        # Virtual steps (via step_region_map) add their advantage to the mapped region's tokens
         batch_advantages: list[torch.Tensor] = []
         for i in range(batch_size):
             token_advs = torch.zeros(len(batch_token_ids[i]))
@@ -180,7 +203,13 @@ class QGREStepAdvantageEstimator:
                 if region.startswith("STEP_"):
                     sn = int(region.split("_")[1])
                     if sn in step_advs:
-                        token_advs[t] = step_advs[sn][i]
+                        # Collect primary + virtual step advantages, then average to prevent
+                        # magnitude imbalance on regions with multiple contributing steps
+                        contribs = [step_advs[sn][i]]
+                        for vs in self._region_extra_steps.get(sn, []):
+                            if vs in step_advs:
+                                contribs.append(step_advs[vs][i])
+                        token_advs[t] = torch.stack(contribs).mean()
                 elif region == "THINK" and 0 in step_advs:
                     token_advs[t] = step_advs[0][i]
             batch_advantages.append(token_advs)

@@ -95,6 +95,7 @@ class AlgorithmConfig:
     # entropy_coeff removed: -mean(logprob) has wrong gradient direction for entropy bonus.
     # neg_logprob_mean is logged as a metric only (no backprop). See Fix 3 notes.
     step_qualities: dict | None = None  # {step_num: [quality_names]} — domain-specific
+    step_region_map: dict | None = None  # {virtual_step: region_step} — maps steps without segments to a region
     segmenter: str = "uniform"  # "uniform", "qwen3_xml", "label", or "module.path:function_name"
     label_segmenter: LabelSegmenterConfig | None = None  # Config for segmenter="label"
     # Fused logprobs: chunked lm_head projection saves ~2GB VRAM by not materializing full logit tensor
@@ -201,6 +202,11 @@ class QGREConfig:
             if "step_qualities" in algo_fields and algo_fields["step_qualities"] is not None:
                 algo_fields["step_qualities"] = {
                     int(k): list(v) for k, v in algo_fields["step_qualities"].items()
+                }
+            # Ensure step_region_map keys/values are ints
+            if "step_region_map" in algo_fields and algo_fields["step_region_map"] is not None:
+                algo_fields["step_region_map"] = {
+                    int(k): int(v) for k, v in algo_fields["step_region_map"].items()
                 }
             cfg.algorithm = AlgorithmConfig(spo=spo, grpo=grpo, **algo_fields)
         if "training" in d:
