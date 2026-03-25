@@ -638,7 +638,7 @@ def _score_T_in_momentum(text: str) -> float:
         for expr in t_candidates:
             has_p = bool(re.search(r"p[_²/(*]|p\*\*|p\^|p_[a-z]|\bp\d|\bp\b", expr))
             has_velocity = bool(re.search(
-                r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt", expr
+                r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt|\\frac\{d[a-zθ]", expr
             ))
             if has_p and not has_velocity:
                 return 1.0
@@ -665,7 +665,7 @@ def _score_H_in_momentum(text: str) -> float:
         for expr in h_candidates:
             has_p = bool(re.search(r"p[_²/(*+\-]|p\*\*|p\^|p_[a-z]|\bp\d|\bp\b", expr))
             has_velocity = bool(re.search(
-                r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt", expr
+                r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt|\\frac\{d[a-zθ]", expr
             ))
             if has_p and not has_velocity:
                 return 1.0
