@@ -47,6 +47,8 @@ def _normalize_text(s: str) -> str:
 def _normalize_for_sympy(expr_str: str) -> str:
     """Clean up expression string for sympy parsing."""
     s = expr_str.strip()
+    # Strip trailing incomplete LaTeX/markdown: **, $, \, etc.
+    s = re.sub(r"[\*$\\]+$", "", s).strip()
     # Strip markdown bold/italic at boundaries only (not multiplication *)
     s = re.sub(r"^\*{2,3}|(?<!\w)\*{2,3}$|\*{2,3}$", "", s).strip()
     # Strip LaTeX delimiters: $$ ... $$, $ ... $
@@ -150,11 +152,54 @@ def _try_sympify(expr_str: str) -> sp.Basic | None:
         return None
 
 
+def _remap_variables(student: sp.Basic, teacher: sp.Basic) -> sp.Basic:
+    """Remap student variables to match teacher's coordinate names.
+
+    The model may use x where ground truth uses y, or s where it uses x.
+    Both are valid — the coordinate name is arbitrary. This function finds
+    a consistent mapping from student symbols to teacher symbols.
+
+    Only remaps single-letter coordinate variables (x, y, s, r, q, theta).
+    Does NOT remap p (momentum) or constants (m, g, k).
+    """
+    _COORDS = {"x", "y", "s", "r", "q", "theta", "theta1", "theta2",
+                "x1", "x2", "p_x", "p_y", "p_r", "p_s", "p_theta"}
+    _MOMENTA = {"p", "p_x", "p_y", "p_r", "p_s", "p_theta", "p1", "p2"}
+
+    student_syms = {s for s in student.free_symbols if s.name in _COORDS}
+    teacher_syms = {s for s in teacher.free_symbols if s.name in _COORDS}
+
+    # If symbols already match, no remapping needed
+    if student_syms & teacher_syms == teacher_syms:
+        return student
+
+    # Simple case: one coordinate variable each — direct map
+    student_coords = student_syms - {s for s in student.free_symbols if s.name in _MOMENTA}
+    teacher_coords = teacher_syms - {s for s in teacher.free_symbols if s.name in _MOMENTA}
+
+    if len(student_coords) == 1 and len(teacher_coords) == 1:
+        s_var = next(iter(student_coords))
+        t_var = next(iter(teacher_coords))
+        if s_var != t_var:
+            return student.subs(s_var, t_var)
+
+    # Multi-variable: try positional mapping (sorted by name)
+    if len(student_coords) == len(teacher_coords) and len(student_coords) > 0:
+        s_sorted = sorted(student_coords, key=lambda s: s.name)
+        t_sorted = sorted(teacher_coords, key=lambda s: s.name)
+        subs = {s: t for s, t in zip(s_sorted, t_sorted) if s != t}
+        if subs:
+            return student.subs(subs)
+
+    return student  # Can't remap — return as-is
+
+
 def _score_expression(student_str: str | None, teacher_str: str, variables: list[str]) -> float:
     """Score a mathematical expression against ground truth.
 
     Returns 0.0-1.0:
-    - 1.0: exact symbolic or numerical match
+    - 1.0: exact symbolic or numerical match (including after variable remapping)
+    - 0.8: correct up to sign (V vs -V — valid physics, different reference frame)
     - 0.2-0.85: partial credit based on numerical closeness
     - 0.2: attempted but unparseable
     - 0.0: not found
@@ -175,48 +220,93 @@ def _score_expression(student_str: str | None, teacher_str: str, variables: list
     if not isinstance(teacher, sp.Basic) or isinstance(teacher, sp.logic.boolalg.BooleanAtom):
         return _string_similarity(student_str, teacher_str)
 
-    # Exact symbolic match — try multiple simplification strategies
-    for simplifier in [sp.simplify, sp.trigsimp, sp.ratsimp, sp.nsimplify]:
+    # Variable remapping: student may use x where teacher uses y (both valid)
+    student_remapped = _remap_variables(student, teacher)
+
+    # Try both original and remapped student against teacher
+    candidates = [student_remapped]
+    if student_remapped != student:
+        candidates.append(student)
+
+    for candidate in candidates:
+        # Exact symbolic match — try multiple simplification strategies
+        for simplifier in [sp.simplify, sp.trigsimp, sp.ratsimp, sp.nsimplify]:
+            try:
+                if simplifier(candidate - teacher) == 0:
+                    return 1.0
+            except Exception:
+                continue
+
         try:
-            if simplifier(student - teacher) == 0:
+            if sp.simplify(sp.expand(candidate) - sp.expand(teacher)) == 0:
                 return 1.0
         except Exception:
-            continue
+            pass
 
-    try:
-        if sp.simplify(sp.expand(student) - sp.expand(teacher)) == 0:
-            return 1.0
-    except Exception:
-        pass
+        try:
+            if sp.trigsimp(sp.expand_trig(candidate - teacher)) == 0:
+                return 1.0
+        except Exception:
+            pass
 
-    try:
-        if sp.trigsimp(sp.expand_trig(student - teacher)) == 0:
-            return 1.0
-    except Exception:
-        pass
+        # Sign convention check: student = -teacher is valid physics (different reference frame)
+        for simplifier in [sp.simplify, sp.expand]:
+            try:
+                if simplifier(candidate + teacher) == 0:
+                    return 0.8  # Correct magnitude, opposite sign — partial credit
+            except Exception:
+                continue
 
-    # Numerical equivalence check at two points
+    # Numerical equivalence check at two points (use remapped candidate)
+    candidate = candidates[0]
     try:
-        free = (student.free_symbols | teacher.free_symbols) - {sp.Symbol('pi')}
+        free = (candidate.free_symbols | teacher.free_symbols) - {sp.Symbol('pi')}
         if free:
-            for test_vals in [{s: sp.Rational(3, 7) for s in free}, {s: sp.Rational(5, 11) for s in free}]:
-                s_val = float(student.subs(test_vals))
+            _probes = [sp.Rational(3, 7), sp.Rational(5, 11), sp.Rational(7, 13),
+                       sp.Rational(11, 17), sp.Rational(13, 19), sp.Rational(17, 23)]
+            free_list = sorted(free, key=str)
+            probe_set_1 = {s: _probes[j % len(_probes)] for j, s in enumerate(free_list)}
+            probe_set_2 = {s: _probes[(j + 1) % len(_probes)] for j, s in enumerate(free_list)}
+            for test_vals in [probe_set_1, probe_set_2]:
+                s_val = float(candidate.subs(test_vals))
                 t_val = float(teacher.subs(test_vals))
-                if abs(t_val) > 1e-10 and abs(s_val - t_val) > 1e-6 * max(abs(t_val), 1):
+                if abs(t_val) <= 1e-10:
+                    if abs(s_val) > 1e-6:
+                        break
+                    continue
+                if abs(s_val - t_val) > 1e-6 * max(abs(t_val), 1):
                     break
             else:
-                return 1.0  # Both points matched
+                return 1.0
+
+            # Check sign-flipped numerical match
+            for test_vals in [probe_set_1, probe_set_2]:
+                s_val = float(candidate.subs(test_vals))
+                t_val = float(teacher.subs(test_vals))
+                if abs(t_val) <= 1e-10:
+                    continue
+                if abs(s_val + t_val) > 1e-6 * max(abs(t_val), 1):
+                    break
+            else:
+                return 0.8  # Numerical sign-flip match
+        else:
+            s_val = float(candidate)
+            t_val = float(teacher)
+            if abs(s_val - t_val) < 1e-8 * max(abs(t_val), 1):
+                return 1.0
+            if abs(s_val + t_val) < 1e-8 * max(abs(t_val), 1):
+                return 0.8
     except Exception:
         pass
 
     # Partial credit based on numerical closeness
     try:
-        free = (student.free_symbols | teacher.free_symbols) - {sp.Symbol('pi')}
+        free = (candidate.free_symbols | teacher.free_symbols) - {sp.Symbol('pi')}
         numerical_score = 0.0
         if free:
             test_point = {s: sp.Rational(3, 7) for s in free}
             try:
-                s_val = float(student.subs(test_point))
+                s_val = float(candidate.subs(test_point))
                 t_val = float(teacher.subs(test_point))
                 if abs(t_val) > 1e-10:
                     ratio = s_val / t_val
@@ -226,9 +316,12 @@ def _score_expression(student_str: str | None, teacher_str: str, variables: list
             except Exception:
                 pass
 
-        student_syms = student.free_symbols
+        student_syms = candidate.free_symbols
         teacher_syms = teacher.free_symbols
-        sym_overlap = len(student_syms & teacher_syms) / len(teacher_syms) if teacher_syms else 1.0
+        if not teacher_syms:
+            sym_overlap = 0.0 if student_syms else numerical_score
+        else:
+            sym_overlap = len(student_syms & teacher_syms) / len(teacher_syms)
 
         partial = 0.2 + 0.5 * numerical_score + 0.2 * sym_overlap
         return min(partial, 0.85)
@@ -252,24 +345,55 @@ def _string_similarity(a: str, b: str) -> float:
 
 # ─── Structured section extractors ────────────────────────────────────────────
 
+_LABEL_ALIASES = {
+    "COORDINATES": ["coordinates", "coordinate", "generalized coordinate"],
+    "MOMENTUM": ["momentum", "conjugate momentum"],
+    "KINETIC": ["kinetic", "kinetic energy"],
+    "POTENTIAL": ["potential", "potential energy"],
+    "HAMILTONIAN": ["hamiltonian"],
+    "EQUATIONS": ["equations", "equations of motion", "hamilton's equations"],
+}
+
+
 def _extract_labeled(text: str, label: str) -> str | None:
     """Extract the value after a labeled line like 'KINETIC: T = ...'
 
     Takes the LAST match — the model writes derivation headers early
     (### 2. **Kinetic Energy**) and structured labels at the end
     (**KINETIC:** T = p²/6). We want the final labeled answer.
+
+    Also matches bold markdown headers: **Kinetic Energy:** T = ...
     """
-    patterns = [
-        rf"{label}:\s*[A-Za-z_]*\s*=\s*([^\n]+)",  # KINETIC: T = ...
-        rf"{label}:\s*([^\n]+)",                      # KINETIC: p²/6
-    ]
+    # Build alias patterns for this label
+    aliases = _LABEL_ALIASES.get(label.upper(), [label.lower()])
+    all_labels = [label] + aliases
+
+    patterns = []
+    for lbl in all_labels:
+        esc = re.escape(lbl)
+        patterns.extend([
+            rf"\*{{0,3}}{esc}\*{{0,3}}[:\s]+[A-Za-z_]*\s*=\s*([^\n]+)",  # **KINETIC:** T = ... or KINETIC: T = ...
+            rf"\*{{0,3}}{esc}\*{{0,3}}[:\s]+\$?\s*([^\n]+)",              # **Kinetic Energy:** $ T = p²/6 $
+        ])
+
     for pat in patterns:
         matches = list(re.finditer(pat, text, re.IGNORECASE))
         if matches:
             expr = matches[-1].group(1).strip()  # Last match
+            # Strip trailing LaTeX/markdown artifacts: **, $, \
+            expr = re.sub(r"[\*$\\]+$", "", expr).strip()
+            # Strip leading $ from LaTeX inline
+            expr = re.sub(r"^\$\s*", "", expr).strip()
             # Take the last = if there are multiple (e.g. "T = p²/(2m) = p²/6")
+            # But only if the part after = looks like a math expression, not prose
             parts = expr.rsplit("=", 1)
-            return parts[-1].strip() if len(parts) > 1 else expr
+            if len(parts) > 1:
+                rhs = parts[-1].strip()
+                # If RHS looks like prose (contains common words), use the full expr instead
+                if re.search(r"\b(the|was|is|from|and|for|with|where|since|given)\b", rhs, re.IGNORECASE):
+                    return expr  # Full expression, not the prose after last =
+                return rhs
+            return expr
     return None
 
 
@@ -342,8 +466,11 @@ def _score_format(text: str) -> float:
     """q_format: structured response with labeled sections."""
     labels_found = 0
     for label in ["COORDINATES", "MOMENTUM", "KINETIC", "POTENTIAL", "HAMILTONIAN", "EQUATIONS"]:
-        if re.search(rf"{label}\s*:", text, re.IGNORECASE):
-            labels_found += 1
+        aliases = _LABEL_ALIASES.get(label, [label.lower()])
+        for lbl in [label] + aliases:
+            if re.search(rf"\*{{0,3}}{re.escape(lbl)}\*{{0,3}}\s*:", text, re.IGNORECASE):
+                labels_found += 1
+                break
 
     if labels_found >= 5:
         return 1.0
@@ -375,7 +502,7 @@ def _score_momentum_defined(text: str) -> float:
 
     if has_label and momentum_str:
         has_numbers = bool(re.search(r"\d", momentum_str))
-        has_expression = bool(re.search(r"[a-z*/+\-]", momentum_str))
+        has_expression = bool(re.search(r"[a-z\u0370-\u03FF\u0300-\u036F*/+\-]", momentum_str))
         if has_numbers and has_expression:
             return 1.0
         if has_expression:
@@ -431,13 +558,113 @@ def _score_T_uses_p(text: str, meta: dict) -> float:
         return 0.8
     if has_p and has_velocity_final:
         # Started with p but simplified back to velocity in final form.
-        # Score same as pure velocity — only the FINAL form matters.
-        # No credit for "knowing p" if you undo it. This kills the
-        # local attractor where the model oscillates at 0.5.
-        return 0.2
+        # No credit — only the FINAL form matters. The whole point of
+        # Hamiltonian mechanics is expressing T in terms of p, not velocity.
+        return 0.0
     if has_velocity_final:
-        return 0.2  # Wrote T but in velocity form
-    return 0.3  # Wrote something but unclear
+        return 0.0  # Wrote T in velocity form — no p means no credit
+    return 0.0  # No p in T — this is the one thing we're training for
+
+
+def _score_T_in_momentum(text: str) -> float:
+    """Check if kinetic energy T is expressed in momentum form (p²) vs velocity form (q̇²).
+
+    Metadata-free — checks variable form only, not correctness.
+
+    Returns:
+        1.0 — KINETIC section found, T contains p AND no velocity markers
+        0.5 — KINETIC section found, contains BOTH p and velocity markers (partial conversion)
+        0.2 — KINETIC section found but T in velocity form only (no p)
+        0.3 — KINETIC section found but form unclear (no p, no velocity)
+        0.0 — no KINETIC section and no T = fallback found
+    """
+    try:
+        # Extract full kinetic line (before final rsplit) — same approach as _score_T_uses_p
+        kinetic_full = None
+        for pat in [r"KINETIC:\s*[A-Za-z_]*\s*=\s*([^\n]+)", r"KINETIC:\s*([^\n]+)"]:
+            matches = list(re.finditer(pat, text, re.IGNORECASE))
+            if matches:
+                kinetic_full = matches[-1].group(1).strip()
+                break
+        if kinetic_full is None:
+            m = re.search(r"T\s*=\s*([^\n;]+)", text)
+            if m:
+                kinetic_full = m.group(1).strip()
+            else:
+                return 0.0
+
+        # Empty extracted content → not found
+        if not kinetic_full.strip():
+            return 0.0
+
+        # Check for momentum variables anywhere in the kinetic line
+        # Require p followed by operator/exponent, not just whitespace (avoids matching "p " standalone)
+        has_p = bool(re.search(r"p[_²/(*]|p\*\*|p\^|p_[a-z]|\bp\d", kinetic_full))
+
+        # Check for velocity markers anywhere in the kinetic line
+        # Covers: precomposed Unicode ẋ ẏ ṙ, LaTeX \dot{, combining dot U+0307,
+        #         written derivatives d[a-z]/dt, θ̇ (theta + combining dot),
+        #         post-normalization _VDOT_
+        has_velocity = bool(re.search(
+            r"[ẋẏṙ]|\\dot|_VDOT_|\u0307|d[a-zθ]/dt", kinetic_full
+        ))
+
+        if has_p and not has_velocity:
+            return 1.0
+        if has_p and has_velocity:
+            return 0.5  # Started with p but also has velocity — partial
+        # No p in T = no credit. Velocity form or unclear form both fail.
+        return 0.0
+    except Exception:
+        return 0.0
+
+
+def _score_H_in_momentum(text: str) -> float:
+    """Check if Hamiltonian H is expressed using momentum variable p rather than velocity form.
+
+    Metadata-free — checks variable form only, not correctness.
+
+    Returns:
+        1.0 — H found, contains p-form variable AND no velocity markers
+        0.5 — H found, contains BOTH p-form and velocity-form variables (incomplete substitution)
+        0.2 — H found but contains ONLY velocity-form variables
+        0.1 — H found but is a pure number (model evaluated numerically)
+        0.3 — H found but form unclear (no p, no velocity)
+        0.0 — no H found
+    """
+    try:
+        extracted_H = _extract_H(text)
+        if extracted_H is None or not extracted_H.strip():
+            return 0.0
+
+        # Check if H is a pure number
+        sym = _try_sympify(extracted_H)
+        if sym is not None and sym.is_number:
+            return 0.1
+
+        # Normalize for consistent velocity marker detection
+        normed = _normalize_for_sympy(extracted_H)
+
+        # Check for momentum variables — require p followed by operator/exponent, not just whitespace
+        has_p = bool(re.search(r"p[_²/(*+\-]|p\*\*|p\^|p_[a-z]|\bp\d", normed)) or \
+                bool(re.search(r"p[_²/(*+\-]|p\*\*|p\^|p_[a-z]|\bp\d", extracted_H))
+
+        # Check for velocity markers in normalized string (_VDOT_ from normalization)
+        has_velocity = bool(re.search(r"_VDOT_", normed))
+        # Also check original for precomposed Unicode, LaTeX, combining dot, d[a-z]/dt forms
+        if not has_velocity:
+            has_velocity = bool(re.search(
+                r"[ẋẏṙ]|\\dot\{|θ̇|\u0307|d[a-zA-Z]/dt", extracted_H
+            ))
+
+        if has_p and not has_velocity:
+            return 1.0
+        if has_p and has_velocity:
+            return 0.5  # Started with p but also has velocity — partial
+        # No p in H = no credit. The Hamiltonian must be in (p, q) form.
+        return 0.0
+    except Exception:
+        return 0.0
 
 
 def _score_V_correct(text: str, meta: dict) -> float:
@@ -672,6 +899,234 @@ def _score_consistency(text: str, meta: dict) -> float:
     return sum(consistency_scores) / max(len(consistency_scores), 1)
 
 
+def _score_correct_coefficient(text: str, meta: dict) -> float:
+    """Quality scorer: checks numerical coefficients in H and equations against ground truth.
+
+    Targets the failure where the model writes correct structure but wrong coefficients
+    (e.g., dp/dt = -3x instead of -6x).
+
+    Returns:
+        1.0 — all coefficients in H and equations match ground truth
+        0.7 — H coefficients correct but equation coefficients wrong (or vice versa)
+        0.4 — some coefficients correct
+        0.2 — expressions found but unparseable or all wrong
+        0.0 — no H_expr/dqdt/dpdt in meta, or nothing extractable
+    """
+    try:
+        has_H_expr = bool(meta.get("H_expr", ""))
+        has_dqdt = bool(meta.get("dqdt", ""))
+        has_dpdt = bool(meta.get("dpdt", ""))
+
+        if not has_H_expr and not has_dqdt and not has_dpdt:
+            return 0.0
+
+        component_scores: list[float] = []
+        any_extracted = False
+
+        # ── Score H ──────────────────────────────────────────────────────────
+        h_score: float | None = None
+        if has_H_expr:
+            extracted_H = _extract_H(text)
+            if extracted_H is not None:
+                any_extracted = True
+                h_score = _score_expression(extracted_H, meta["H_expr"], [])
+                component_scores.append(h_score)
+
+        # ── Score equations ──────────────────────────────────────────────────
+        eq_score: float | None = None
+        if has_dqdt or has_dpdt:
+            extracted_eqs = _extract_equations_block(text)
+            eq_component_scores: list[float] = []
+
+            if extracted_eqs:
+                any_extracted = True
+
+                if has_dqdt:
+                    expected_parts = [e.strip() for e in meta["dqdt"].split(";") if e.strip()]
+                    part_scores = []
+                    for exp_part in expected_parts:
+                        best = max(
+                            (_score_expression(ext, exp_part, []) for ext in extracted_eqs),
+                            default=0.0,
+                        )
+                        part_scores.append(best)
+                    if part_scores:
+                        eq_component_scores.append(sum(part_scores) / len(part_scores))
+
+                if has_dpdt:
+                    expected_parts = [e.strip() for e in meta["dpdt"].split(";") if e.strip()]
+                    part_scores = []
+                    for exp_part in expected_parts:
+                        best = max(
+                            (_score_expression(ext, exp_part, []) for ext in extracted_eqs),
+                            default=0.0,
+                        )
+                        part_scores.append(best)
+                    if part_scores:
+                        eq_component_scores.append(sum(part_scores) / len(part_scores))
+
+            if eq_component_scores:
+                eq_score = sum(eq_component_scores) / len(eq_component_scores)
+                component_scores.append(eq_score)
+
+        if not any_extracted:
+            return 0.0
+
+        if not component_scores:
+            return 0.2
+
+        avg = sum(component_scores) / len(component_scores)
+
+        # Tier assignment:
+        # 1.0 requires ALL components to be >= 0.9 (all coefficients correct)
+        if all(s >= 0.9 for s in component_scores):
+            return 1.0
+
+        # 0.7 tier: one side clearly correct, the other wrong (or vice versa)
+        if h_score is not None and eq_score is not None:
+            if (h_score >= 0.85 and eq_score < 0.6) or (eq_score >= 0.85 and h_score < 0.6):
+                return 0.7
+
+        # General average-based tiers
+        if avg >= 0.75:
+            return 0.7
+        if avg >= 0.35:
+            return 0.4
+        return max(0.2, avg)
+    except Exception:
+        return 0.0
+
+
+def _score_derivative_correct(text: str, meta: dict) -> float:
+    """Quality scorer: checks if dp/dt derivative is correct, with a DISTINCT signal (0.5)
+    for factor-of-2 errors.
+
+    Targets the observed failure where ∂(ax²)/∂x = ax instead of 2ax.
+
+    Returns:
+        1.0 — dp/dt matches ground truth exactly (sympy or numerical)
+        0.5 — dp/dt is exactly half or double of ground truth (factor-of-2 error)
+        0.2 — dp/dt found but doesn't match in any way
+        0.0 — no dp/dt found or no dpdt in meta
+    """
+    try:
+        expected = meta.get("dpdt", "")
+        if not expected or expected == "none":
+            return 0.0
+
+        expected_parts = [e.strip() for e in expected.split(";") if e.strip()]
+
+        extracted = _extract_equations_block(text)
+
+        if not extracted:
+            # Check if dp/dt pattern exists anywhere for minimal partial credit
+            if re.search(r"dp/dt|dp_[a-z]+/dt|-∂H/∂[a-z]|-dH/d[a-z]", text):
+                return 0.1
+            return 0.0
+
+        # Find best matching equation across all expected parts
+        best_score = 0.0
+        best_student_str: str | None = None
+        best_teacher_str: str | None = None
+
+        for exp_part in expected_parts:
+            for ext in extracted:
+                score = _score_expression(ext, exp_part, [])
+                if score > best_score:
+                    best_score = score
+                    best_student_str = ext
+                    best_teacher_str = exp_part
+
+        # Exact match
+        if best_score >= 0.9:
+            return 1.0
+
+        # Factor-of-2 detection — the key differentiator for missing chain-rule coefficient
+        if best_student_str is not None and best_teacher_str is not None:
+            student_sym = _try_sympify(best_student_str)
+            teacher_sym = _try_sympify(best_teacher_str)
+
+            if student_sym is not None and teacher_sym is not None:
+                try:
+                    free = (student_sym.free_symbols | teacher_sym.free_symbols) - {sp.Symbol("pi")}
+                    test_point = {s: sp.Rational(3, 7) for s in free}
+                    student_val = float(student_sym.subs(test_point))
+                    teacher_val = float(teacher_sym.subs(test_point))
+
+                    if abs(teacher_val) > 1e-10:
+                        ratio = student_val / teacher_val
+                        if abs(ratio - 0.5) < 0.05:
+                            return 0.5  # Student wrote half the derivative (forgot factor of 2)
+                        if abs(ratio - 2.0) < 0.05:
+                            return 0.5  # Student doubled the derivative
+                except Exception:
+                    pass
+
+        # Partial credit capped at 0.4
+        if best_score > 0.0:
+            return min(best_score, 0.4)
+
+        # dp/dt found in extracted equations but matched nothing
+        return 0.2
+
+    except Exception:
+        return 0.0
+
+
+def _score_defines_momentum(text: str) -> float:
+    """Quality scorer: checks if completion explicitly defines momentum p via
+    the Lagrangian partial derivative p = ∂L/∂q̇, not just incidentally mentions p.
+
+    Returns:
+        1.0 — explicit ∂L/∂q̇ notation found (LaTeX, Unicode, or text forms)
+        0.7 — MOMENTUM section has a numeric expression for p but no ∂L notation
+        0.3 — p = appears somewhere without a MOMENTUM label
+        0.0 — no p = found anywhere
+    """
+    if not text:
+        return 0.0
+
+    # ── 1. Check for explicit partial derivative of L w.r.t. generalized velocity ──
+    _PARTIAL_PATTERNS = [
+        # LaTeX: \frac{\partial L}{\partial \dot{q}} or \partial L / \partial \dot{q}
+        r"\\frac\s*\{\\partial\s*L\}\s*\{\\partial\s*\\dot",
+        r"\\partial\s*L\s*/\s*\\partial\s*\\dot",
+        r"\\partial\s*L\s*/\s*\\partial",
+        # Unicode: ∂L/∂q̇  ∂L/∂θ̇  ∂L/∂ẋ  ∂L/∂ṙ
+        r"∂L\s*/\s*∂",
+        r"∂\s*L\s*/\s*∂",
+        # Text forms: "partial L / partial", "partial L/partial", "dL/d"
+        r"partial\s+L\s*/\s*partial",
+        r"dL\s*/\s*d",
+    ]
+    try:
+        for pat in _PARTIAL_PATTERNS:
+            if re.search(pat, text, re.IGNORECASE):
+                return 1.0
+    except Exception:
+        pass
+
+    # ── 2. MOMENTUM section with numeric expression but no ∂L ──
+    try:
+        momentum_str = _extract_labeled(text, "MOMENTUM")
+        if momentum_str is not None and momentum_str.strip():
+            has_numbers = bool(re.search(r"\d", momentum_str))
+            has_p_eq = bool(re.search(r"p\s*=", text, re.IGNORECASE))
+            if has_numbers and has_p_eq:
+                return 0.7
+    except Exception:
+        pass
+
+    # ── 3. p = appears anywhere, no MOMENTUM label ──
+    try:
+        if re.search(r"p\s*=", text, re.IGNORECASE):
+            return 0.3
+    except Exception:
+        pass
+
+    return 0.0
+
+
 # ─── Main reward function ─────────────────────────────────────────────────────
 
 def hamiltonian_reward(
@@ -707,6 +1162,13 @@ def hamiltonian_reward(
     # ── Phase 4: Full Hamiltonian + consistency ──
     scores["q_correct_H"] = _score_correct_H(text, meta)
     scores["q_consistency"] = _score_consistency(text, meta)
+
+    # ── Phase 5: Granular momentum/variable/derivative checks ──
+    scores["q_defines_momentum"] = _score_defines_momentum(text)
+    scores["q_T_in_momentum"] = _score_T_in_momentum(text)
+    scores["q_H_in_momentum"] = _score_H_in_momentum(text)
+    scores["q_correct_coefficient"] = _score_correct_coefficient(text, meta)
+    scores["q_derivative_correct"] = _score_derivative_correct(text, meta)
 
     total = sum(scores.values()) / max(len(scores), 1)
 

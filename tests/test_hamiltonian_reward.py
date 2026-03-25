@@ -65,6 +65,83 @@ Hamilton's equations give us:
 """
 
 
+PENDULUM_PROMPT = (
+    "A simple pendulum of mass 2 kg and length 0.5 m swings under gravity. "
+    "Let θ be the angle from vertical.\n\nDerive the Hamiltonian H(θ, p) from "
+    "first principles and find Hamilton's equations of motion."
+)
+
+# Physics verification:
+#   m=2, L=0.5, g=9.8
+#   T = (1/2)*m*L²*θ̇² = (1/2)*2*(0.25)*θ̇² = 0.25*θ̇²
+#   p_theta = m*L²*θ̇ = 0.5*θ̇  →  θ̇ = 2*p_theta
+#   T = 0.25*(2*p_theta)² = p_theta²
+#   V = -m*g*L*cos(θ) = -2*9.8*0.5*cos(θ) = -9.8*cos(θ) = -49*cos(θ)/5
+#   H = p_theta² - 49*cos(theta)/5
+#   dθ/dt = ∂H/∂p_theta = 2*p_theta
+#   dp_theta/dt = -∂H/∂θ = -49*sin(theta)/5
+PENDULUM_META = {
+    "ground_truth": "H = p_theta**2 - 49*cos(theta)/5; dtheta/dt = 2*p_theta; dp/dt = -49*sin(theta)/5",
+    "H_expr": "p_theta**2 - 49*cos(theta)/5",
+    "T_expr": "p_theta**2",
+    "V_expr": "-49*cos(theta)/5",
+    "dqdt": "2*p_theta",
+    "dpdt": "-49*sin(theta)/5",
+    "coordinates": "theta",
+    "difficulty": "tier2",
+    "system": "pendulum",
+}
+
+# Explicit Lagrangian notation: ∂L/∂θ̇ is stated. T is in p form. Correct answer.
+PENDULUM_EXPLICIT_MOMENTUM = """
+COORDINATES: q = θ
+MOMENTUM: p = ∂L/∂θ̇ = mL²θ̇ = 2(0.25)θ̇ = 0.5θ̇
+KINETIC: T = p²/(2mL²) = p²/(2·0.5) = p²
+POTENTIAL: V = -mgLcos(θ) = -9.8cos(θ)
+HAMILTONIAN: H = p² - 9.8cos(θ)
+EQUATIONS:
+  dθ/dt = 2p
+  dp/dt = -9.8sin(θ)
+"""
+
+# Implicit definition: states p = 0.5θ̇ without deriving via ∂L/∂θ̇. T in p form.
+PENDULUM_IMPLICIT_MOMENTUM = """
+COORDINATES: q = θ
+MOMENTUM: p = 0.5θ̇
+KINETIC: T = p²
+POTENTIAL: V = -9.8cos(θ)
+HAMILTONIAN: H = p² - 9.8cos(θ)
+EQUATIONS:
+  dθ/dt = 2p
+  dp/dt = -9.8sin(θ)
+"""
+
+# Failure mode: T and H written in velocity form (θ̇) rather than momentum form (p).
+PENDULUM_VELOCITY_FORM = """
+COORDINATES: q = θ
+MOMENTUM: p = 0.5θ̇
+KINETIC: T = 0.25θ̇²
+POTENTIAL: V = -9.8cos(θ)
+HAMILTONIAN: H = 0.25θ̇² - 9.8cos(θ)
+EQUATIONS:
+  dθ/dt = θ̇
+  dp/dt = -9.8sin(θ)
+"""
+
+# Failure mode: wrong coefficient on dp/dt.
+# Correct: dp/dt = -9.8sin(θ). Model writes -4.9sin(θ) (off by factor of 2).
+PENDULUM_WRONG_DERIVATIVE = """
+COORDINATES: q = θ
+MOMENTUM: p = ∂L/∂θ̇ = 0.5θ̇
+KINETIC: T = p²
+POTENTIAL: V = -9.8cos(θ)
+HAMILTONIAN: H = p² - 9.8cos(θ)
+EQUATIONS:
+  dθ/dt = 2p
+  dp/dt = -4.9sin(θ)
+"""
+
+
 class TestStructuredFormat:
     """Test that labeled sections are correctly extracted and scored."""
 
@@ -206,6 +283,193 @@ class TestEdgeCases:
         assert result.scores["q_T_uses_p"] <= 0.2
 
 
+class TestGranularMomentumQualities:
+    """Tests for q_defines_momentum and q_T_in_momentum and q_H_in_momentum.
+
+    These qualities do not exist in the reward function yet — tests are written
+    RED first per C07 (test-first). They will pass once the scorer is implemented.
+    """
+
+    # ── q_defines_momentum ────────────────────────────────────────────────────
+
+    def test_explicit_lagrangian_notation_scores_high(self):
+        """∂L/∂θ̇ notation with numeric derivation → q_defines_momentum >= 0.8."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        score = result.scores["q_defines_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score >= 0.8, (
+            f"Explicit Lagrangian notation should score >= 0.8, got {score}"
+        )
+
+    def test_implicit_definition_partial_credit(self):
+        """p = 0.5θ̇ with no ∂L/∂θ̇ → q_defines_momentum partial credit [0.3, 0.7]."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_IMPLICIT_MOMENTUM, PENDULUM_META)
+        score = result.scores["q_defines_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert 0.3 <= score <= 0.7, (
+            f"Implicit definition should score between 0.3 and 0.7, got {score}"
+        )
+
+    def test_no_momentum_scores_zero(self):
+        """Completion with no p definition → q_defines_momentum <= 0.1."""
+        no_momentum = "COORDINATES: q = θ\nKINETIC: T = 0.25θ̇²\nPOTENTIAL: V = -9.8cos(θ)\nHAMILTONIAN: H = 0.25θ̇² - 9.8cos(θ)\nEQUATIONS:\n  dθ/dt = θ̇\n  dp/dt = -9.8sin(θ)"
+        result = hamiltonian_reward(PENDULUM_PROMPT, no_momentum, PENDULUM_META)
+        score = result.scores["q_defines_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score <= 0.1, (
+            f"No momentum definition should score <= 0.1, got {score}"
+        )
+
+    # ── q_T_in_momentum ───────────────────────────────────────────────────────
+
+    def test_T_momentum_form_scores_high(self):
+        """T = p² (momentum form) → q_T_in_momentum >= 0.8."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        score = result.scores["q_T_in_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score >= 0.8, (
+            f"T in momentum form should score >= 0.8, got {score}"
+        )
+
+    def test_T_velocity_form_scores_low(self):
+        """T = 0.25θ̇² (velocity form) → q_T_in_momentum <= 0.3."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_VELOCITY_FORM, PENDULUM_META)
+        score = result.scores["q_T_in_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score <= 0.3, (
+            f"T in velocity form should score <= 0.3, got {score}"
+        )
+
+    def test_T_mixed_partial(self):
+        """T contains both p and θ̇ terms → q_T_in_momentum is partial (0.3, 0.8)."""
+        mixed_T = (
+            "COORDINATES: q = θ\nMOMENTUM: p = 0.5θ̇\n"
+            "KINETIC: T = p²/2 + 0.1θ̇²\n"
+            "POTENTIAL: V = -9.8cos(θ)\n"
+            "HAMILTONIAN: H = p²/2 + 0.1θ̇² - 9.8cos(θ)\n"
+            "EQUATIONS:\n  dθ/dt = 2p\n  dp/dt = -9.8sin(θ)"
+        )
+        result = hamiltonian_reward(PENDULUM_PROMPT, mixed_T, PENDULUM_META)
+        score = result.scores["q_T_in_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert 0.3 < score < 0.8, (
+            f"Mixed T (p² and θ̇²) should score between 0.3 and 0.8, got {score}"
+        )
+
+    # ── q_H_in_momentum ───────────────────────────────────────────────────────
+
+    def test_H_momentum_form_scores_high(self):
+        """H = p² - 9.8cos(θ) (momentum form) → q_H_in_momentum >= 0.8."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        score = result.scores["q_H_in_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score >= 0.8, (
+            f"H in momentum form should score >= 0.8, got {score}"
+        )
+
+    def test_H_velocity_form_scores_low(self):
+        """H = 0.25θ̇² - 9.8cos(θ) (velocity form) → q_H_in_momentum <= 0.3."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_VELOCITY_FORM, PENDULUM_META)
+        score = result.scores["q_H_in_momentum"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score <= 0.3, (
+            f"H in velocity form should score <= 0.3, got {score}"
+        )
+
+
+class TestGranularCoefficientQualities:
+    """Tests for q_correct_coefficient and q_derivative_correct.
+
+    These qualities do not exist yet — tests are written RED first.
+    """
+
+    # ── q_correct_coefficient ─────────────────────────────────────────────────
+
+    def test_correct_coefficients_score_high(self):
+        """All coefficients correct (p², -9.8cos(θ), 2p, -9.8sin(θ)) → q_correct_coefficient >= 0.7."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        score = result.scores["q_correct_coefficient"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score >= 0.7, (
+            f"Correct coefficients should score >= 0.7, got {score}"
+        )
+
+    def test_wrong_coefficient_scores_lower(self):
+        """dp/dt = -4.9sin(θ) instead of -9.8sin(θ) → q_correct_coefficient < correct.
+        H and dq/dt are still correct (2/3 components), so score is partial, not zero."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_WRONG_DERIVATIVE, PENDULUM_META)
+        score = result.scores["q_correct_coefficient"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score < 1.0, (
+            f"Wrong dp/dt coefficient should score < 1.0, got {score}"
+        )
+
+    def test_coefficient_gradient(self):
+        """Correct coefficients must score at least 0.2 higher than wrong coefficients."""
+        correct = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        wrong = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_WRONG_DERIVATIVE, PENDULUM_META)
+        gap = correct.scores["q_correct_coefficient"] - wrong.scores["q_correct_coefficient"]
+        assert gap >= 0.2, (
+            f"Correct ({correct.scores['q_correct_coefficient']:.2f}) must beat "
+            f"wrong ({wrong.scores['q_correct_coefficient']:.2f}) by >= 0.2, gap={gap:.2f}"
+        )
+
+    # ── q_derivative_correct ──────────────────────────────────────────────────
+
+    def test_correct_derivative_scores_high(self):
+        """Both dθ/dt = 2p and dp/dt = -9.8sin(θ) correct → q_derivative_correct >= 0.8."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        score = result.scores["q_derivative_correct"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        assert score >= 0.8, (
+            f"Correct derivatives should score >= 0.8, got {score}"
+        )
+
+    def test_factor_of_two_error_distinct_signal(self):
+        """dp/dt off by factor of 2 → q_derivative_correct gives a distinct mid-range signal."""
+        result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_WRONG_DERIVATIVE, PENDULUM_META)
+        score = result.scores["q_derivative_correct"]
+        assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
+        # Half the derivatives are right (dθ/dt is correct), half wrong (dp/dt off by 2)
+        # Score should be in the middle range — not 0, not 1
+        assert 0.3 <= score <= 0.7, (
+            f"Factor-of-2 error should produce mid-range signal [0.3, 0.7], got {score}"
+        )
+
+    def test_derivative_gradient(self):
+        """Correct derivatives must score higher than wrong derivatives."""
+        correct = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        wrong = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_WRONG_DERIVATIVE, PENDULUM_META)
+        assert correct.scores["q_derivative_correct"] > wrong.scores["q_derivative_correct"], (
+            f"Correct ({correct.scores['q_derivative_correct']:.2f}) should beat "
+            f"wrong ({wrong.scores['q_derivative_correct']:.2f})"
+        )
+
+
+class TestGranularOrdering:
+    """End-to-end ordering tests: better physics → higher reward.
+
+    These tests verify the gradient signal that GRPO/SPO relies on to improve.
+    A reward function with no ordering signal cannot train anything.
+    """
+
+    def test_momentum_form_beats_velocity_form(self):
+        """Momentum form (p²) must score higher overall than velocity form (θ̇²)."""
+        momentum = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        velocity = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_VELOCITY_FORM, PENDULUM_META)
+        assert momentum.reward > velocity.reward, (
+            f"Momentum form ({momentum.reward:.3f}) should beat velocity form ({velocity.reward:.3f})"
+        )
+
+    def test_correct_derivative_beats_wrong(self):
+        """Correct dp/dt must score higher overall than off-by-factor-of-2 dp/dt."""
+        correct = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
+        wrong = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_WRONG_DERIVATIVE, PENDULUM_META)
+        assert correct.reward > wrong.reward, (
+            f"Correct derivatives ({correct.reward:.3f}) should beat wrong ({wrong.reward:.3f})"
+        )
+
+
 class TestNeverCrash:
     """Fuzz test: reward function must NEVER crash, no matter what the model outputs.
 
@@ -255,6 +519,12 @@ class TestNeverCrash:
         # Code blocks
         "```python\nH = p**2/6 + 3*x**2\n```",
         "```\nCOORDINATES: q = x\nHAMILTONIAN: H = p²/6 + 3x²\n```",
+        # Pendulum-specific garbage patterns (from Immune Memory: Qwen3-1.7B output formats)
+        "MOMENTUM: p = ∂L/∂???",
+        "KINETIC: T = p^2/(2*0)",
+        "HAMILTONIAN: H = θ̇² + ṙ² / idk",
+        "∂(ax²)/∂x = ???",
+        "MOMENTUM: p = ∂L/∂θ̇ = undefined",
     ]
 
     @pytest.mark.parametrize("completion", GARBAGE_COMPLETIONS)
