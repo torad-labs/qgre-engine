@@ -14,7 +14,7 @@ METHOD — follow these steps for every problem:
 1. Choose generalized coordinates q (x, θ, r, etc.).
 2. Write the conjugate momentum p. For example: p = m * dx/dt, so if m=3, then p = 3 * dx/dt.
 3. Write kinetic energy T using the letter p: T = p²/(2m). Plug in the mass number but KEEP the letter p. The whole point of the Hamiltonian formulation is that T and H are written in terms of p and q — not in terms of dq/dt. Even if you simplify during your derivation, your final T must have the letter p.
-4. Write potential energy V in terms of q. Plug in the numbers from the problem: for gravity V = m*g*y with numbers, for springs V = (k/2)*x² with numbers, for constant force F use V = -F*x with numbers.
+4. Write potential energy V in terms of q. Plug in the numbers from the problem: for gravity V = m*g*y with numbers, for springs V = (k/2)*x² with numbers, for constant force F use V = -F*x with numbers. If multiple forces act on the system, add ALL their potentials together: V = V_spring + V_gravity.
 5. H = T + V. Your final H must have p and your coordinate — not dq/dt.
 6. Hamilton's equations: dq/dt = ∂H/∂p, dp/dt = -∂H/∂q.
 
