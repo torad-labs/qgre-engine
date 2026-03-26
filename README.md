@@ -183,6 +183,10 @@ Every layer in the pipeline has one job. The engine composes them. You replace t
 | **Backward** | `trainer.py` | `loss.backward()` through PyTorch autograd. Micro-batched: 1 sequence at a time for seq ≥ 2048, 2 for shorter. NaN guard aborts the step if loss is non-finite. Gradient clipping at configurable max norm. Gradient accumulation across micro-batches. Unsloth's `for_training()` called before each micro-batch forward pass to disable inplace attention kernels that conflict with autograd. |
 | **Monitoring** | `trainer.py` | Every step logs: completion length (mean/max/min) for verbosity drift detection, stagnation status (normal/stagnating/stuck) for curriculum health, neg_logprob_mean for policy collapse monitoring, per-step mastery scores for curriculum tracking. All metrics flow to MLflow. |
 | **Persistence** | `checkpoint.py` | Full training state saved atomically: model weights (LoRA), optimizer (AdamW8bit), LR scheduler, GameState (phase, mastery windows, stagnation counters, phase history, steps_at_phase_start), SPO value tracker (V per prompt per step), and PyTorch + CUDA RNG state for exact reproducibility on resume. Backward-compatible: old checkpoints without stagnation fields load with safe defaults. |
+| **Span-Based Token Targeting** | `spans.py` | When the reward function returns `scored_spans` (character positions of scored expressions), the engine maps these to tokens via the tokenizer's `offset_mapping` and applies advantages to exactly those tokens — including in derivations, not just labeled sections. Falls back to segmenter if no spans. |
+| **VPRM Critic** | `critic.py` | Per-region per-dimension learned baseline. 9 small MLPs (hidden_dim→128→128→1), one per quality. Mean-pools hidden states per region. Trains alongside policy via MSE loss. Does not overwrite span advantages when spans are active. |
+| **LoRA Dropout** | `lora_dropout.py` | Bernoulli dropout on LoRA A matrices during generation. Partially reverts to base model behavior, surfacing knowledge the adapter suppressed. Anneals linearly to zero. Based on NoisyGRPO (NeurIPS 2025). |
+| **Aspiration Gap** | `advantages.py` | `A = (r - baseline) + beta * (r - target)`. Preserves shaped reward gradients when baseline converges to match constant partial credit. |
 
 ---
 
@@ -359,6 +363,8 @@ generation:
   top_k: -1                                      # Disabled (-1)
   max_tokens: 4096                               # Maximum completion length
   stop_token_ids: [151643, 151645]               # Qwen3: <|endoftext|> + <|im_end|>
+  lora_dropout_rate: 0.0                           # 0.0=disabled, 0.15=recommended. Bernoulli dropout on LoRA A during generation.
+  lora_dropout_anneal_steps: 500                   # Linear anneal to 0 over this many steps
 
 algorithm:
   mode: spo                                      # "spo" (n=1) or "grpo" (n=8)
@@ -374,6 +380,12 @@ algorithm:
     lr_factor: 1.5
     min_lr: 0.01
     max_lr: 0.5
+    aspiration_beta: 0.5                           # Target-aware aspiration gap weight (0=disabled)
+    aspiration_target: 0.8                         # Target score (usually mastery_threshold)
+    var_aware: true                                # Variance-aware baseline slowdown
+    var_threshold: 0.01                            # Variance below this triggers slowdown
+    var_lr: 0.05                                   # EMA rate for variance tracking
+    min_var_ratio: 0.01                            # Floor: baseline lr never drops below lr * min_var_ratio
 
   grpo:
     n: 8                                         # Group size
@@ -417,6 +429,13 @@ logging:
   mlflow_experiment: my-experiment
   completion_dir: output/completions             # JSONL per-step completion logs
   checkpoint_dir: output/checkpoints             # Full training state snapshots
+
+vprm:
+  enabled: false                                   # Per-region per-dimension critic
+  intermediate_dim: 128                            # MLP hidden layer size
+  lr: 0.0001                                       # Critic learning rate
+  clip_advantage: 5.0                              # Per-quality advantage clipping
+  spo_fallback_min_regions: 2                      # Min regions to use critic
 ```
 
 ---
@@ -493,6 +512,14 @@ Every feature traces to a published paper. Every feature is opt-in via config. D
 | **neg_logprob_mean** | Always on (metric) | Policy collapse early warning (not a loss term) | — |
 | **Low-advantage filter** | Auto (SPO) | Skips steps where all advantages are near-zero | SPO paper |
 | **seq-mean-token-sum-norm** | Always on | Loss aggregation: sum per-token, mean per-seq, normalize by horizon | verl core_algos.py |
+| **Span-based token targeting** | Via `scored_spans` on RewardResult | Reward function defines which tokens receive each quality's signal | QGRE (this work) |
+| **VPRM critic** | `vprm.enabled: true` | Per-region per-dimension learned baseline (9 MLPs) | VPRMs (IBM Research, Jan 2026) |
+| **LoRA dropout** | `generation.lora_dropout_rate: 0.15` | Bernoulli mask on LoRA A during generation for exploration | NoisyGRPO (NeurIPS 2025) |
+| **Target-aware aspiration gap** | `spo.aspiration_beta: 0.5` | Preserves shaped reward gradient through baseline | QGRE (this work) |
+| **Variance-aware SPO** | `spo.var_aware: true` | Slows baseline lr when reward variance drops (prevents dead gradient) | QGRE (this work) |
+| **Frontier amplification** | `frontier_amplification: 2.0` | 3x gradient on steps blocking phase advancement | QGRE (this work) |
+| **2D mastery matrix** | Via tier config | Per-tier × per-quality phase tracking with independent advancement | QGRE (this work) |
+| **latex2sympy parsing** | Automatic | ANTLR-based LaTeX parser replaces regex for expression matching | latex2sympy2_extended (HuggingFace) |
 
 ---
 
@@ -511,6 +538,9 @@ qgre/
   logging.py           — MLflow metrics + JSONL completion logs (context manager)
   trainer.py           — QGRETrainer: the training loop, micro-batching, monitoring
   generation.py        — UnslothBackend: vLLM fast_generate, LoRA sync, engine recreation
+  spans.py             — Char→token mapping + span-based advantage assignment
+  critic.py            — VPRM per-region per-dimension critic (9 MLPs)
+  lora_dropout.py      — LoRA A dropout for generation exploration
   lora_verify.py       — LoRA weight hash verification after sync
   fused_logprobs.py    — Chunked lm_head → logprobs (no full logits materialization)
   triton_logprobs.py   — Triton kernel: fused lm_head + selective_log_softmax (BLOCK_V=128)
@@ -519,7 +549,7 @@ examples/
   hamiltonian/         — Hamiltonian mechanics: physics derivations, sympy-verified rewards
   hypergraph/          — Hypergraph structure: multi-step XML, 4-phase curriculum
   math/                — Single-step math: minimal config, uniform segmenter
-tests/                 — 130 CPU tests + 9 GPU tests (~27 seconds)
+tests/                 — 239 CPU tests + 9 GPU tests (~27 seconds)
 ```
 
 ---
@@ -527,7 +557,7 @@ tests/                 — 130 CPU tests + 9 GPU tests (~27 seconds)
 ## Tests
 
 ```bash
-python -m pytest tests/ -q                         # All CPU tests (130, ~27s)
+python -m pytest tests/ -q                         # All CPU tests (239, ~27s)
 python -m pytest tests/test_segments.py -v          # XML + HIF JSON segmenters
 python -m pytest tests/test_advantages.py -v        # SPO, GRPO, GDPO, phase gating
 python -m pytest tests/test_checkpoint.py -v        # Save/resume + stagnation round-trip
@@ -582,6 +612,9 @@ These are structural. They are not bugs — they are the boundary conditions of 
 - [Comedy of Estimators](https://arxiv.org/abs/2512.21852) — KL regularization in RL training. Bengio et al., Dec 2025.
 - [Archer](https://openreview.net/forum?id=ee326398473daf76d49b49cda4dea9d699fbf61b) — Dual-token KL constraints. ICLR 2026.
 - [Scaf-GRPO](https://arxiv.org/abs/2510.19807) — Scaffolded progressive training. Feb 2026.
+- [NoisyGRPO](https://openreview.net/forum?id=rH0aOLyjYQ) — Noise injection for RL exploration. NeurIPS 2025.
+- [NoisyRollout](https://arxiv.org/abs/2504.13055) — Reinforcing reasoning with data augmentation. NeurIPS 2025.
+- [UP-GRPO](https://arxiv.org/abs/2503.XXXXX) — Unbounded positive reinforcement for rare correct answers.
 - [NeMo RL](https://github.com/NVIDIA-NeMo/RL) — Loss functions extracted under Apache-2.0.
 
 ---
