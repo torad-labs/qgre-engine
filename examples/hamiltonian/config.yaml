@@ -82,6 +82,14 @@ training:
   mastery_threshold: 0.8
   stagnation_timeout: 100
 
+# VPRM disabled: needs redesign to work with span-based advantages.
+# Currently VPRM pools hidden states by section regions (STEP_N) which conflicts
+# with span-based token targeting. Next step: make VPRM pool from span positions.
+# vprm:
+#   enabled: true
+#   intermediate_dim: 128
+#   lr: 0.0001
+
 logging:
   mlflow_experiment: hamiltonian-curriculum-400
   completion_dir: output/hamiltonian/completions

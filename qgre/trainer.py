@@ -299,7 +299,11 @@ class QGRETrainer:
                     frontier_steps.add(current_phase)
 
         # Compute per-token advantages — span-based (if scored_spans populated) or region-based (legacy)
-        use_spans = any(rr.scored_spans for rr in reward_results)
+        # TODO: span-based path disabled pending tuning — 85% of tokens get zero advantage
+        # because format qualities are mastered (advantage=0), leaving only expression tokens
+        # with signal. This reduces effective gradient too aggressively in early training.
+        # Re-enable after adding minimum-advantage floor for structure maintenance.
+        use_spans = False  # any(rr.scored_spans for rr in reward_results)
         if use_spans:
             from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
             # Build per-sample token masks from scored_spans
@@ -328,7 +332,9 @@ class QGRETrainer:
                     group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
                     frontier_steps=frontier_steps,
                 )
-                batch_regions = [["SPAN"] * len(c) for c in completions]  # Placeholder for KL weights
+                # Still run segmenter for VPRM critic (needs STEP_N regions for hidden-state pooling)
+                # and KL region weights
+                batch_regions = [self.advantage_estimator.segmenter(c) for c in completions]
             else:
                 use_spans = False  # All mappings failed, fall back to segmenter
 
