@@ -151,6 +151,12 @@ class QGREStepAdvantageEstimator:
         self._step_nums = sorted(self.step_qualities.keys())
         self.V: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(float))
         self._step_seen: dict[int, set[int]] = defaultdict(set)
+        # Variance-aware baseline: track per-(prompt, step) reward variance
+        self._reward_var: dict[int, dict[int, float]] = defaultdict(lambda: defaultdict(lambda: self._var_threshold))
+        self._var_aware = True  # Overridden from config in trainer
+        self._var_threshold = 0.01
+        self._var_lr = 0.05
+        self._min_var_ratio = 0.01
         # step_region_map: virtual steps (no segmenter region) → region step whose tokens carry their advantage
         # e.g., {7: 2} means step 7's advantage is added to STEP_2 tokens
         self.step_region_map = step_region_map or {}
@@ -317,7 +323,17 @@ class QGREStepAdvantageEstimator:
                     self._step_seen[pid].add(step_num)
 
                 step_advs[step_num][i] = r - v
-                self.V[pid][step_num] = v + self.lr * (r - v)
+
+                # Variance-aware baseline: slow lr when reward is constant
+                effective_lr = self.lr
+                if self._var_aware:
+                    old_var = self._reward_var[pid][step_num]
+                    new_var = old_var + self._var_lr * ((r - v) ** 2 - old_var)
+                    self._reward_var[pid][step_num] = new_var
+                    if new_var < self._var_threshold:
+                        effective_lr = self.lr * max(new_var / self._var_threshold, self._min_var_ratio)
+
+                self.V[pid][step_num] = v + effective_lr * (r - v)
 
     def _compute_grpo_advantages(
         self,
@@ -395,6 +411,7 @@ class QGREStepAdvantageEstimator:
         return {
             "V": {pid: dict(steps) for pid, steps in self.V.items()},
             "step_seen": {pid: list(steps) for pid, steps in self._step_seen.items()},
+            "reward_var": {pid: dict(steps) for pid, steps in self._reward_var.items()},
             "lr": self.lr,
             "mode": self.mode,
         }
@@ -498,6 +515,10 @@ class QGREStepAdvantageEstimator:
         self._step_seen = defaultdict(set)
         for pid, steps in state.get("step_seen", {}).items():
             self._step_seen[int(pid)] = set(int(s) for s in steps)
+        self._reward_var = defaultdict(lambda: defaultdict(lambda: self._var_threshold))
+        for pid, steps in state.get("reward_var", {}).items():
+            for step_num, val in steps.items():
+                self._reward_var[int(pid)][int(step_num)] = float(val)
 
 
 def compute_advantages_vprm(

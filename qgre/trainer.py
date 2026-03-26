@@ -127,6 +127,12 @@ class QGRETrainer:
             step_region_map=alg.step_region_map,
             frontier_amplification=alg.frontier_amplification,
         )
+        # Wire variance-aware SPO config
+        spo_cfg = alg.spo
+        self.advantage_estimator._var_aware = spo_cfg.var_aware
+        self.advantage_estimator._var_threshold = spo_cfg.var_threshold
+        self.advantage_estimator._var_lr = spo_cfg.var_lr
+        self.advantage_estimator._min_var_ratio = spo_cfg.min_var_ratio
 
         # VPRM critic — per-region per-dimension learned baseline
         self.vprm_critic = None
@@ -976,13 +982,34 @@ class QGRETrainer:
                 if self.global_step >= cfg.total_steps:
                     break
 
-                # 1. Generate (inference mode)
+                # 1. Generate (inference mode) with optional LoRA dropout for exploration
                 if hasattr(backend, "set_inference_mode"):
                     backend.set_inference_mode()
+
+                # LoRA dropout: partially revert to base model during generation
+                gen_cfg = self.config.generation
+                restore_lora = None
+                if gen_cfg.lora_dropout_rate > 0:
+                    from qgre.lora_dropout import apply_lora_dropout, compute_dropout_rate
+                    current_rate = compute_dropout_rate(
+                        gen_cfg.lora_dropout_rate, gen_cfg.lora_dropout_anneal_steps, self.global_step,
+                    )
+                    if current_rate > 0:
+                        restore_lora = apply_lora_dropout(self.model, current_rate)
+                        # Sync noisy weights to vLLM
+                        if hasattr(backend, "save_weights"):
+                            backend.save_weights(str(Path(self.config.logging.checkpoint_dir) / "lora_latest"))
+
                 output = backend.generate(
                     batch.input_ids.to(next(self.model.parameters()).device),
                     batch.attention_mask.to(next(self.model.parameters()).device),
                 )
+
+                # Restore clean weights after generation
+                if restore_lora is not None:
+                    restore_lora()
+                    if hasattr(backend, "save_weights"):
+                        backend.save_weights(str(Path(self.config.logging.checkpoint_dir) / "lora_latest"))
 
                 # 2. Score via reward_fn
                 reward_results = []

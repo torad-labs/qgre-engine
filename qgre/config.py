@@ -44,6 +44,9 @@ class GenerationConfig:
     top_k: int = -1
     max_tokens: int = 4096
     stop_token_ids: list[int] = field(default_factory=lambda: [151643, 151645])  # Qwen3: <|endoftext|> + <|im_end|>
+    # LoRA dropout during generation: partially revert to base model for exploration
+    lora_dropout_rate: float = 0.0  # 0.0 = disabled, 0.15 = recommended
+    lora_dropout_anneal_steps: int = 500  # Linear anneal to 0 over this many steps
 
 
 @dataclass
@@ -57,6 +60,11 @@ class SPOConfig:
     lr_factor: float = 1.5
     min_lr: float = 0.01
     max_lr: float = 0.5
+    # Variance-aware baseline: slow baseline lr when reward variance drops (prevents dead gradient)
+    var_aware: bool = True
+    var_threshold: float = 0.01  # Variance below this triggers slowdown
+    var_lr: float = 0.05  # EMA rate for variance tracking
+    min_var_ratio: float = 0.01  # Floor: baseline lr never drops below lr * min_var_ratio
 
 
 @dataclass
