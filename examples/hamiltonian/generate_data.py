@@ -18,6 +18,9 @@ from examples.hamiltonian.system_prompts import FULL, ABBREVIATED, MINIMAL, NONE
 
 # System prompt fade: earlier tiers get full coaching, later tiers get less
 TIER_SYSTEM_PROMPTS = {
+    "tutorial_gravity": FULL,
+    "tutorial_spring": FULL,
+    "combined": FULL,
     "tier1": FULL,
     "tier1b": FULL,
     "edge": FULL,
@@ -197,6 +200,98 @@ def _tier1_gravity_spring():
                 dqdt_exprs=[sp.diff(H, p)],
                 dpdt_exprs=[-sp.diff(H, x)],
                 difficulty="tier1b", system="gravity_spring",
+                coordinates="x",
+            ))
+    return problems
+
+
+# ─── Tutorial phases: isolated sub-skills with expanded parameter grids ──────
+
+_GRAVITY_PROMPT_TEMPLATES = [
+    "A particle of mass {m} kg falls vertically under gravity (g = 9.8 m/s²). Let y be the height above the ground.\n\nDerive the Hamiltonian H(y, p) and Hamilton's equations of motion.",
+    "A {m} kg object is dropped from rest in a uniform gravitational field (g = 9.8 m/s²). Using y as the height coordinate:\n\nDerive the Hamiltonian H(y, p) and Hamilton's equations of motion.",
+    "Consider a mass m = {m} kg falling freely under gravity (g = 9.8 m/s²). Let y denote height.\n\nDerive the Hamiltonian H(y, p) and find Hamilton's equations of motion.",
+]
+
+_SPRING_PROMPT_TEMPLATES = [
+    "A block of mass {m} kg is attached to a spring with spring constant k = {k} N/m on a frictionless surface. Let x be the displacement from equilibrium.\n\nDerive the Hamiltonian H(x, p) from first principles and find Hamilton's equations of motion.",
+    "A {m} kg mass oscillates on a spring (k = {k} N/m) without friction. Using displacement x from equilibrium:\n\nDerive the Hamiltonian H(x, p) and Hamilton's equations of motion.",
+    "Consider a horizontal spring-mass system: mass m = {m} kg, spring constant k = {k} N/m, frictionless. Let x be displacement.\n\nDerive the Hamiltonian H(x, p) and find Hamilton's equations.",
+]
+
+
+def _tutorial_gravity():
+    """Expanded freefall tutorial: 40+ variants to learn V = mgy as a pattern."""
+    y, p = sp.symbols("y p", real=True)
+    g = sp.Rational(98, 10)
+    problems = []
+    masses = [sp.Rational(1, 2), 1, sp.Rational(3, 2), 2, sp.Rational(5, 2), 3, 4, 5, 7, 10]
+    for m_val in masses:
+        m = sp.nsimplify(m_val)
+        T = p**2 / (2 * m)
+        V = m * g * y
+        H = T + V
+        template = random.choice(_GRAVITY_PROMPT_TEMPLATES)
+        problems.append(_problem(
+            prompt=template.format(m=float(m_val)),
+            H=H, T=T, V=V,
+            q_vars=[y], p_vars=[p],
+            dqdt_exprs=[sp.diff(H, p)],
+            dpdt_exprs=[-sp.diff(H, y)],
+            difficulty="tutorial_gravity", system="freefall",
+            coordinates="y",
+        ))
+    return problems
+
+
+def _tutorial_spring():
+    """Expanded spring tutorial: 50+ variants to learn V = kx²/2 as a pattern."""
+    x, p = sp.symbols("x p", real=True)
+    problems = []
+    masses = [sp.Rational(1, 2), 1, sp.Rational(3, 2), 2, 3, 5, 7, 10]
+    spring_constants = [sp.Rational(1, 2), 1, 2, 3, 4, 6, 8, 10]
+    for m_val in masses:
+        for k_val in spring_constants[:6]:  # 8 × 6 = 48 variants
+            m = sp.nsimplify(m_val)
+            k = sp.nsimplify(k_val)
+            T = p**2 / (2 * m)
+            V = k / 2 * x**2
+            H = T + V
+            template = random.choice(_SPRING_PROMPT_TEMPLATES)
+            problems.append(_problem(
+                prompt=template.format(m=float(m_val), k=float(k_val)),
+                H=H, T=T, V=V,
+                q_vars=[x], p_vars=[p],
+                dqdt_exprs=[sp.diff(H, p)],
+                dpdt_exprs=[-sp.diff(H, x)],
+                difficulty="tutorial_spring", system="spring",
+                coordinates="x",
+            ))
+    return problems
+
+
+def _tutorial_combined():
+    """gravity_spring duplicated as tutorial 'combined' tier with expanded grid."""
+    x, p = sp.symbols("x p", real=True)
+    g = sp.Rational(98, 10)
+    problems = []
+    for m in [1, 2, 3, 5]:
+        for k in [1, 2, 4, 6, 8]:
+            T = p**2 / (2 * m)
+            V = sp.Rational(k, 2) * x**2 + m * g * x
+            H = T + V
+            problems.append(_problem(
+                prompt=(
+                    f"A mass m = {m} kg hangs from a vertical spring with constant "
+                    f"k = {k} N/m. Let x be the displacement from the natural length "
+                    f"(positive downward). g = 9.8 m/s².\n\n"
+                    f"Derive the Hamiltonian H(x, p) and Hamilton's equations of motion."
+                ),
+                H=H, T=T, V=V,
+                q_vars=[x], p_vars=[p],
+                dqdt_exprs=[sp.diff(H, p)],
+                dpdt_exprs=[-sp.diff(H, x)],
+                difficulty="combined", system="gravity_spring",
                 coordinates="x",
             ))
     return problems
@@ -756,6 +851,7 @@ def _edge_cases():
 def _make_problems():
     all_problems = []
     generators = [
+        _tutorial_gravity, _tutorial_spring, _tutorial_combined,
         _tier1_spring, _tier1_freefall, _tier1_incline, _tier1_constant_force,
         _tier1_gravity_spring,
         _tier2_pendulum, _tier2_central_force, _tier2_kepler,

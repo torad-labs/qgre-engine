@@ -29,10 +29,11 @@ data:
   difficulty_column: difficulty
   # 2D mastery matrix curriculum — more granular tiers with system prompt fade
   # tier1/edge: full prompt | tier1b/tier2: abbreviated | tier2b/tier3: minimal | tier3b+: none
-  tier_order: [tier1, edge, tier1b, tier2, tier2b, tier3, tier3b, tier4, adversarial]
-  tier_advance_quality_phase: 4    # Must master through potential energy before harder tiers
-  tier_advance_threshold: 0.75     # Mastery threshold for tier advancement
-  initial_tiers: [tier1, edge]
+  # Tutorial phases: learn sub-skills in isolation, then combine
+  tier_order: [tutorial_gravity, tutorial_spring, combined, tier1, edge, tier1b, tier2, tier2b, tier3, tier3b, tier4, adversarial]
+  tier_advance_quality_phase: 4    # Must master through potential energy before next tier
+  tier_advance_threshold: 0.80     # Mastery threshold for tier advancement
+  initial_tiers: [tutorial_gravity]  # Start on freefall ONLY
 
 generation:
   temperature: 1.0
