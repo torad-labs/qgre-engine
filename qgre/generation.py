@@ -75,6 +75,28 @@ class UnslothBackend:
         self.model = model
         self.tokenizer = tokenizer
         self._FastLanguageModel = FastLanguageModel
+
+        # Patch vLLM max_logprobs: Unsloth sets max_logprobs=0 by default,
+        # but LLDS needs logprobs=1. Find the vLLM engine and set max_logprobs.
+        try:
+            llm = getattr(model, '_vllm_engine', None) or getattr(model, 'llm', None)
+            if llm is None:
+                # Unsloth stores the LLM on the model — traverse attributes
+                for attr_name in dir(model):
+                    attr = getattr(model, attr_name, None)
+                    if hasattr(attr, 'llm_engine'):
+                        llm = attr
+                        break
+            if llm is not None:
+                engine = getattr(llm, 'llm_engine', llm)
+                if hasattr(engine, 'model_config'):
+                    engine.model_config.max_logprobs = 5
+                    import warnings
+                    warnings.warn("Patched vLLM max_logprobs=5 for LLDS logprob extraction")
+        except Exception as e:
+            import warnings
+            warnings.warn(f"Could not patch vLLM max_logprobs: {e}. LLDS may not receive logprobs.")
+
         return model, tokenizer
 
     def set_training_mode(self):
