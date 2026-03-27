@@ -120,6 +120,7 @@ class TutorialConfig:
     skill_tree: dict[str, SkillConfig] = field(default_factory=dict)
     post_mastery_behavior: str = "review_only"  # review_only | pause | continue_all
     untracked_always_active: bool = True
+    sequential_mastery: bool = False  # Focus on one skill at a time instead of all active skills
 
 
 @dataclass

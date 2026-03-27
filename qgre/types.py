@@ -162,6 +162,7 @@ class GameState:
     all_prompts: list = field(default_factory=list)
     post_mastery_behavior: str = "review_only"
     untracked_always_active: bool = True
+    _sequential_mastery: bool = False
     default_aspiration_target: float = 0.8
     _prompt_to_skill: dict = field(default_factory=dict, repr=False)
     _tier_to_skills: dict = field(default_factory=dict, repr=False)  # tier_name → [skill_keys]
@@ -210,6 +211,7 @@ class GameState:
         self.tutorial_enabled = True
         self.post_mastery_behavior = tutorial_config.post_mastery_behavior
         self.untracked_always_active = tutorial_config.untracked_always_active
+        self._sequential_mastery = tutorial_config.sequential_mastery
         self.all_prompts = list(all_prompt_ids) if all_prompt_ids else []
 
         self.skill_tree = {}
@@ -358,12 +360,21 @@ class GameState:
             self._active_base_pool = []
             self._mastered_pool = []
 
+            # Collect active (unlocked + not mastered) and mastered skills
+            active_skills = []
             for key, node in self.skill_tree.items():
                 is_unlocked = node.unlocked(self.skill_tree)
                 if is_unlocked and not node.mastered:
-                    self._active_base_pool.extend(node.prompts)
+                    active_skills.append(node)
                 elif node.mastered:
                     self._mastered_pool.append(node)
+
+            if self._sequential_mastery and active_skills:
+                # One skill at a time: only the first active skill's prompts
+                self._active_base_pool = list(active_skills[0].prompts)
+            else:
+                for node in active_skills:
+                    self._active_base_pool.extend(node.prompts)
 
             if self.untracked_always_active:
                 tracked = set(self._prompt_to_skill.keys())
@@ -547,11 +558,15 @@ class GameState:
             return True
         skills_in_tier = self._tier_to_skills.get(tier_name, [])
         if not skills_in_tier:
-            return True  # No tutorial-tracked prompts in this tier
+            warnings.warn(f"[TUTORIAL] can_tier_unlock({tier_name}): no skills mapped. "
+                         f"_tier_to_skills keys: {list(self._tier_to_skills.keys())}. Allowing.")
+            return True
         for skill_key in skills_in_tier:
             node = self.skill_tree[skill_key]
             if node.status == SkillStatus.LOCKED:
+                warnings.warn(f"[TUTORIAL] can_tier_unlock({tier_name}): BLOCKED by {skill_key} (LOCKED)")
                 return False
+        warnings.warn(f"[TUTORIAL] can_tier_unlock({tier_name}): ALLOWED (skills: {skills_in_tier})")
         return True
 
     def get_aspiration_target(self, prompt_id: str) -> float:

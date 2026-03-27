@@ -36,10 +36,10 @@ data:
   initial_tiers: [tutorial_gravity]  # Start on freefall ONLY
 
 generation:
-  temperature: 1.0
+  temperature: 1.2
   top_p: 1.0
-  lora_dropout_rate: 0.15
-  lora_dropout_anneal_steps: 2000
+  lora_dropout_rate: 0.25
+  lora_dropout_anneal_steps: 5000
   top_k: -1
   max_tokens: 4096
   stop_token_ids: [151643, 151645]
@@ -96,6 +96,7 @@ tutorial:
   enabled: true
   post_mastery_behavior: review_only
   untracked_always_active: true
+  sequential_mastery: true  # Focus on one skill at a time
   skill_tree:
     # Root skills — no prerequisites, high threshold (easy tasks, high standard)
     # match_metadata selects prompts from training data by metadata column values
