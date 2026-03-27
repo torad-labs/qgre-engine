@@ -117,7 +117,8 @@ tutorial:
       review_probability: 0.15
       score_key: q_V_correct
 
-    # Compound skills — prerequisites required, lower threshold
+    # Compound skill — prerequisites required, lower threshold
+    # gravity_spring is in 'combined' tier (unlocks after tutorial tiers)
     gravity_spring:
       match_metadata: {system: gravity_spring}
       prerequisites: [freefall, spring_only]
@@ -126,24 +127,9 @@ tutorial:
       mastery_window: 20
       review_probability: 0.15
       score_key: q_correct_H
-
-    damped_spring:
-      match_metadata: {system: stiff_spring}
-      prerequisites: [spring_only]
-      mastery_threshold: 0.75
-      regression_threshold: 0.55
-      mastery_window: 20
-      review_probability: 0.15
-      score_key: q_correct_H
-
-    driven_oscillator:
-      match_metadata: {system: duffing}
-      prerequisites: [gravity_spring, damped_spring]
-      mastery_threshold: 0.70
-      regression_threshold: 0.50
-      mastery_window: 20
-      review_probability: 0.15
-      score_key: q_correct_H
+    # NOTE: damped_spring (stiff_spring system, edge tier) and driven_oscillator
+    # (duffing system, tier2) are NOT in the tutorial tree because their prompts
+    # are tier-gated behind later tiers. The tier system handles their progression.
 
 logging:
   mlflow_experiment: hamiltonian-curriculum-400
