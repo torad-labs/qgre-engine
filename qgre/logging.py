@@ -73,6 +73,7 @@ class CompletionLogger:
             if self._file is not None:
                 self._file.close()
             path = self.output_dir / f"step_{step:06d}.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
             self._file = open(path, "a")
             self._step = step
 
