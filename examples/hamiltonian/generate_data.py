@@ -871,6 +871,7 @@ def _make_problems():
 
 
 def main():
+    random.seed(42)  # BEFORE _make_problems — tutorial prompt templates must be deterministic
     problems = _make_problems()
 
     from collections import Counter

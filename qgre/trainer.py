@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -195,7 +196,7 @@ class QGRETrainer:
             clip_advantage=self._vprm_config.clip_advantage,
         ).to(device)
         self.vprm_optimizer = torch.optim.Adam(
-            self.vprm_critic.parameters(),
+            [p for p in self.vprm_critic.parameters() if p.requires_grad],
             lr=self._vprm_config.lr,
         )
         self._vprm_initialized = True
@@ -721,11 +722,15 @@ class QGRETrainer:
                 # Divergence monitoring — independent of has_grad (reads .data, no grad needed)
                 if self.global_step % 50 == 0:
                     with torch.no_grad():
+                        # Single .item() call to avoid 54 GPU syncs
                         divergence = sum(
-                            (op.data - tp.data).pow(2).mean().item()
+                            (op.data - tp.data).pow(2).mean()
                             for q in self.vprm_critic.quality_names
                             for op, tp in zip(self.vprm_critic.heads[q].parameters(), self.vprm_critic.target_heads[q].parameters())
-                        )
+                        ).item()
+                        if not math.isfinite(divergence):
+                            import warnings
+                            warnings.warn(f"Step {self.global_step}: target_divergence={divergence} — critic may contain NaN")
                         metrics["target_divergence"] = divergence
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -838,7 +843,10 @@ class QGRETrainer:
             from qgre.critic import VPRMCritic
             device = str(next(self.model.parameters()).device)
             self.vprm_critic = VPRMCritic.from_checkpoint(checkpoint["vprm_critic_state"], device=device)
-            self.vprm_optimizer = torch.optim.Adam(self.vprm_critic.parameters(), lr=self._vprm_config.lr)
+            self.vprm_optimizer = torch.optim.Adam(
+                [p for p in self.vprm_critic.parameters() if p.requires_grad],
+                lr=self._vprm_config.lr,
+            )
             if checkpoint.get("vprm_optimizer_state"):
                 self.vprm_optimizer.load_state_dict(checkpoint["vprm_optimizer_state"])
             self._vprm_initialized = True

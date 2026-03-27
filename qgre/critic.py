@@ -96,6 +96,10 @@ class VPRMCritic(nn.Module):
         """Polyak averaging: θ_target ← (1-τ)θ_target + τ*θ_online."""
         for q_name in self.quality_names:
             for op, tp in zip(self.heads[q_name].parameters(), self.target_heads[q_name].parameters()):
+                if not torch.isfinite(op.data).all():
+                    import warnings
+                    warnings.warn(f"NaN/Inf in online head '{q_name}' — skipping Polyak update")
+                    return
                 tp.data.mul_(1.0 - tau).add_(op.data, alpha=tau)
 
     @torch.no_grad()
