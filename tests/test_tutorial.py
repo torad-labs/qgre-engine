@@ -729,9 +729,9 @@ class TestIntegration:
         # Two prompts: one from freefall (target=0.85), one from gravity_spring (target=0.75)
         contexts = [
             PromptContext(prompt_id=1, skill_key="freefall", tier="t1",
-                         aspiration_target=0.85, is_active=True),
+                         aspiration_target=0.85, aspiration_warmup=1.0, is_active=True),
             PromptContext(prompt_id=2, skill_key="gravity_spring", tier="t1",
-                         aspiration_target=0.75, is_active=True),
+                         aspiration_target=0.75, aspiration_warmup=1.0, is_active=True),
         ]
 
         rr1 = RewardResult(reward=0.5, scores={"q_format": 0.5, "q_accuracy": 0.5})
@@ -773,7 +773,7 @@ class TestIntegration:
 
         # Untracked prompt → should use global default 0.8
         ctx = PromptContext(prompt_id=99, skill_key=None, tier="default",
-                            aspiration_target=0.8, is_active=True)
+                            aspiration_target=0.8, aspiration_warmup=1.0, is_active=True)
         rr = RewardResult(reward=0.5, scores={"q_format": 0.5})
 
         advs, _ = estimator.compute_advantages(

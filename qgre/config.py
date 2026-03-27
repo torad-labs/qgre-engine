@@ -107,6 +107,7 @@ class SkillConfig:
     mastery_window: int = 20
     review_probability: float = 0.15
     score_key: str | None = None  # Quality key from RewardResult.scores to track mastery (e.g. "q_V_correct"). None = overall reward.
+    aspiration_warmup_steps: int = 20  # After unlock, ramp aspiration beta from 0 → full over N steps
 
 
 _VALID_POST_MASTERY_BEHAVIORS = {"review_only", "pause", "continue_all"}

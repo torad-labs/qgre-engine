@@ -30,6 +30,7 @@ class PromptContext:
     skill_key: str | None       # Tutorial skill this prompt belongs to (None if untracked)
     tier: str                   # Difficulty tier from metadata (e.g. "tutorial_gravity")
     aspiration_target: float    # Per-skill mastery_threshold or global default
+    aspiration_warmup: float    # 0→1 ramp factor for recently unlocked skills
     is_active: bool             # Passes both tier gate AND skill gate
 
     @property
@@ -73,6 +74,9 @@ class SkillNode:
     _total_completions: int = field(default=0, repr=False)
     _initial_scores: list = field(default_factory=list, repr=False)  # First 5 scores after unlock
     _initial_mastery_logged: bool = field(default=False, repr=False)
+    _unlock_step: int | None = field(default=None, repr=False)  # Step when skill was unlocked
+    _pre_unlock_baseline: float | None = field(default=None, repr=False)  # Mastery score of prerequisites at unlock time
+    aspiration_warmup_steps: int = 20  # Ramp aspiration from 0→full over N steps after unlock
 
     def __post_init__(self):
         if not self.prerequisites:
@@ -232,6 +236,7 @@ class GameState:
                 mastery_window=sc.mastery_window,
                 review_probability=sc.review_probability,
                 score_key=sc.score_key,
+                aspiration_warmup_steps=sc.aspiration_warmup_steps,
                 recent_scores=deque(maxlen=sc.mastery_window),
             )
 
@@ -418,9 +423,15 @@ class GameState:
         for key, node in self.skill_tree.items():
             if node.status == SkillStatus.LOCKED and node.unlocked(self.skill_tree):
                 node._status = SkillStatus.ACTIVE
+                node._unlock_step = self.step_count
+                # Capture pre-unlock baseline: mean mastery of prerequisites at unlock time
+                pre_scores = [self.skill_tree[pre].mastery_score for pre in node.prerequisites]
+                node._pre_unlock_baseline = sum(pre_scores) / len(pre_scores) if pre_scores else 0.0
                 self._invalidate_prompt_cache()
                 logger.info(f"[TUTORIAL] SKILL UNLOCKED: {node.name} "
-                           f"(prerequisites met: {node.prerequisites})")
+                           f"(prerequisites met: {node.prerequisites}, "
+                           f"step={self.step_count}, "
+                           f"pre_unlock_baseline={node._pre_unlock_baseline:.3f})")
 
     def _check_relocks(self):
         """After a regression, cascade re-lock to dependents with full mastery reset."""
@@ -437,6 +448,8 @@ class GameState:
                         node._total_completions = 0
                         node._initial_scores.clear()
                         node._initial_mastery_logged = False
+                        node._unlock_step = None
+                        node._pre_unlock_baseline = None
                         changed = True
                         self._invalidate_prompt_cache()
                         logger.warning(f"[TUTORIAL] CASCADE RE-LOCK: {node.name} "
@@ -492,11 +505,14 @@ class GameState:
                 # Untracked: tier gate decides
                 is_active = active_tiers is None or tier in active_tiers
 
+            warmup = self.get_aspiration_warmup_factor(pid_str) if self.tutorial_enabled else 1.0
+
             contexts.append(PromptContext(
                 prompt_id=pid,
                 skill_key=skill_key,
                 tier=tier,
                 aspiration_target=asp_target,
+                aspiration_warmup=warmup,
                 is_active=is_active,
             ))
         return contexts
@@ -507,6 +523,26 @@ class GameState:
         if skill_key is not None:
             return self.skill_tree[skill_key].mastery_threshold
         return self.default_aspiration_target
+
+    def get_aspiration_warmup_factor(self, prompt_id: str) -> float:
+        """Return aspiration warmup multiplier (0→1) for recently unlocked skills.
+
+        Ramps aspiration beta linearly from 0 to 1 over aspiration_warmup_steps
+        after a skill unlocks. Prevents gradient shock from full aspiration pressure
+        on prompts the model has never seen.
+
+        Returns 1.0 for root skills, mastered skills, and untracked prompts.
+        """
+        skill_key = self._prompt_to_skill.get(prompt_id)
+        if skill_key is None:
+            return 1.0
+        node = self.skill_tree[skill_key]
+        if node._unlock_step is None:
+            return 1.0  # Root skill (never locked) or not yet tracked
+        steps_since_unlock = self.step_count - node._unlock_step
+        if steps_since_unlock >= node.aspiration_warmup_steps:
+            return 1.0
+        return max(0.0, steps_since_unlock / node.aspiration_warmup_steps)
 
     def get_tutorial_metrics(self) -> dict:
         """Return per-step tutorial metrics for logging."""
@@ -530,12 +566,26 @@ class GameState:
             metrics[f'tutorial/skill/{key}/status'] = node.status.value
             metrics[f'tutorial/skill/{key}/completions'] = len(node.recent_scores)
             metrics[f'tutorial/skill/{key}/aspiration_target'] = node.mastery_threshold
+            # Aspiration warmup factor (visible when ramping)
+            if node._unlock_step is not None:
+                steps_since = self.step_count - node._unlock_step
+                if steps_since < node.aspiration_warmup_steps:
+                    metrics[f'tutorial/skill/{key}/aspiration_warmup'] = steps_since / node.aspiration_warmup_steps
             # Transfer lift: initial mastery after unlock (logged once at 5 completions)
             if node.initial_mastery is not None and not node._initial_mastery_logged:
                 metrics[f'tutorial/skill/{key}/initial_mastery'] = node.initial_mastery
+                # Compute transfer_lift: how much did prerequisites help?
+                transfer_lift = node.initial_mastery - (node._pre_unlock_baseline or 0.0)
+                metrics[f'tutorial/skill/{key}/transfer_lift'] = transfer_lift
                 node._initial_mastery_logged = True
-                logger.info(f"[TUTORIAL] INITIAL MASTERY: {key} = {node.initial_mastery:.3f} "
-                           f"(first 5 completions after unlock)")
+                # Log prominently — this is the key metric for validating the tutorial system
+                logger.info(
+                    f"[TUTORIAL] *** TRANSFER LIFT: {key} ***\n"
+                    f"  initial_mastery = {node.initial_mastery:.3f} (first 5 completions)\n"
+                    f"  pre_unlock_baseline = {node._pre_unlock_baseline or 0:.3f} (prerequisite mastery at unlock)\n"
+                    f"  transfer_lift = {transfer_lift:+.3f} "
+                    f"({'POSITIVE — prerequisites helped' if transfer_lift > 0 else 'ZERO/NEGATIVE — check prerequisite structure'})"
+                )
         return metrics
 
     def tutorial_state_dict(self) -> dict:
@@ -551,6 +601,8 @@ class GameState:
                     'total_completions': node._total_completions,
                     'initial_scores': list(node._initial_scores),
                     'initial_mastery_logged': node._initial_mastery_logged,
+                    'unlock_step': node._unlock_step,
+                    'pre_unlock_baseline': node._pre_unlock_baseline,
                 }
                 for key, node in self.skill_tree.items()
             }
@@ -582,6 +634,8 @@ class GameState:
                 self.skill_tree[key]._total_completions = data.get('total_completions', 0)
                 self.skill_tree[key]._initial_scores = data.get('initial_scores', [])
                 self.skill_tree[key]._initial_mastery_logged = data.get('initial_mastery_logged', False)
+                self.skill_tree[key]._unlock_step = data.get('unlock_step', None)
+                self.skill_tree[key]._pre_unlock_baseline = data.get('pre_unlock_baseline', None)
         self._active_prompts_dirty = True
 
     # ── 1D backward compat properties ──

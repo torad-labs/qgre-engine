@@ -650,7 +650,7 @@ class QGRETrainer:
                         frontier_steps=frontier_steps,
                         frontier_amplification=self.config.algorithm.frontier_amplification,
                         min_regions=self.config.vprm.spo_fallback_min_regions,
-                        aspiration_beta=self.advantage_estimator._aspiration_beta,
+                        aspiration_beta=self.advantage_estimator._aspiration_beta * batch_contexts[orig_i].aspiration_warmup,
                         aspiration_target=batch_contexts[orig_i].aspiration_target,
                     )
 

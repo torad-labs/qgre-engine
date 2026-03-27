@@ -337,7 +337,8 @@ class QGREStepAdvantageEstimator:
                 # With this, sub-target completions get proportional negative push toward target.
                 if self._aspiration_beta > 0 and self._aspiration_target > 0:
                     target = batch_contexts[i].aspiration_target if batch_contexts else self._aspiration_target
-                    step_advs[step_num][i] += self._aspiration_beta * (r - target)
+                    warmup = batch_contexts[i].aspiration_warmup if batch_contexts else 1.0
+                    step_advs[step_num][i] += self._aspiration_beta * warmup * (r - target)
 
                 # Variance-aware baseline: slow lr when reward is constant
                 effective_lr = self.lr

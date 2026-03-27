@@ -105,7 +105,7 @@ tutorial:
       mastery_threshold: 0.85
       regression_threshold: 0.65
       mastery_window: 20
-      review_probability: 0.15
+      review_probability: 0.30
       score_key: q_V_correct
 
     spring_only:
@@ -114,7 +114,7 @@ tutorial:
       mastery_threshold: 0.85
       regression_threshold: 0.65
       mastery_window: 20
-      review_probability: 0.15
+      review_probability: 0.30
       score_key: q_V_correct
 
     # Compound skills — prerequisites required, lower threshold
@@ -125,7 +125,7 @@ tutorial:
       mastery_threshold: 0.75
       regression_threshold: 0.55
       mastery_window: 20
-      review_probability: 0.15
+      review_probability: 0.30
       score_key: q_correct_H
 
     damped_spring:
@@ -134,7 +134,7 @@ tutorial:
       mastery_threshold: 0.75
       regression_threshold: 0.55
       mastery_window: 20
-      review_probability: 0.15
+      review_probability: 0.30
       score_key: q_correct_H
 
     # Boss level — multiple interacting components
@@ -144,7 +144,7 @@ tutorial:
       mastery_threshold: 0.70
       regression_threshold: 0.50
       mastery_window: 20
-      review_probability: 0.15
+      review_probability: 0.30
       score_key: q_correct_H
 
 logging:
