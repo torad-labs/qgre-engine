@@ -83,7 +83,7 @@ training:
   save_freq: 50
   gradient_accumulation_steps: 1
   mastery_threshold: 0.8
-  stagnation_timeout: 100
+  stagnation_timeout: 50
 
 vprm:
   enabled: true
