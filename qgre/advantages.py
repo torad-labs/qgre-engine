@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from collections import defaultdict
 from typing import Callable
 
@@ -7,7 +8,7 @@ import numpy as np
 import torch
 
 from qgre.segments import Segmenter, segmenter_region_count, uniform_segmenter
-from qgre.types import RewardResult
+from qgre.types import PromptContext, RewardResult
 
 
 def apply_frontier_amplification(
@@ -171,7 +172,6 @@ class QGREStepAdvantageEstimator:
         self.step_region_map = step_region_map or {}
         # Validate: virtual steps must exist in step_qualities, region targets must too
         if self.step_region_map:
-            import warnings
             for vs, rs in self.step_region_map.items():
                 if vs not in self.step_qualities:
                     warnings.warn(
@@ -196,6 +196,7 @@ class QGREStepAdvantageEstimator:
         batch_active_qualities: list[list[str]],
         group_size: int | None = None,
         frontier_steps: set[int] | None = None,
+        batch_contexts: list[PromptContext] | None = None,
     ) -> tuple[list[torch.Tensor], list[list[str]]]:
         """Compute per-token advantages via segment → step rewards → SPO/GRPO → GDPO → broadcast.
 
@@ -212,7 +213,6 @@ class QGREStepAdvantageEstimator:
 
         # First-batch invariant: check reward keys overlap with step_qualities
         if not self._reward_key_checked and batch_reward_results:
-            import warnings
             all_quality_keys = set()
             for qs in self.step_qualities.values():
                 all_quality_keys.update(qs)
@@ -251,7 +251,8 @@ class QGREStepAdvantageEstimator:
         }
 
         if self.mode == "spo":
-            self._compute_spo_advantages(batch_prompt_ids, all_step_rewards, step_advs, batch_size)
+            self._compute_spo_advantages(batch_prompt_ids, all_step_rewards, step_advs, batch_size,
+                                         batch_contexts=batch_contexts)
         else:
             self._compute_grpo_advantages(
                 batch_prompt_ids, all_step_rewards, step_advs, batch_size,
@@ -259,40 +260,10 @@ class QGREStepAdvantageEstimator:
             )
 
         # Advantage normalization — mode-dependent:
-        #
-        # SPO raw mode (QGRE-native): NO normalization. SPO baseline (r - V) is already
-        # per-prompt centered. Adding batch normalization double-centers and erases the
-        # importance hierarchy between steps. Raw advantages preserve which steps have
-        # large signal (far from baseline) vs small signal (near baseline).
-        #
-        # GRPO+normalize: per-step mean+std normalization (GDPO-style).
-        # GRPO+dr_grpo: per-step mean-only subtraction (no std division).
-        for step_num in self._step_nums:
-            # NaN guard: replace NaN advantages before normalization (ms-swift #8123)
-            if step_advs[step_num].isnan().any():
-                import warnings
-                nan_count = step_advs[step_num].isnan().sum().item()
-                warnings.warn(
-                    f"Step {step_num}: {nan_count}/{len(step_advs[step_num])} advantages are NaN. "
-                    f"Check reward_fn for NaN returns. Replacing with 0.0."
-                )
-                step_advs[step_num] = torch.nan_to_num(step_advs[step_num], nan=0.0)
-            if self.mode == "spo":
-                # SPO: use raw (r - V) advantages. The per-prompt EMA baseline IS the
-                # centering mechanism. No batch normalization — this preserves the natural
-                # magnitude hierarchy where bottleneck steps (far from baseline) produce
-                # larger gradients than mastered steps (near baseline).
-                pass
-            elif self.normalize_advantages:
-                mean = step_advs[step_num].mean()
-                std = step_advs[step_num].std(correction=0)
-                if std > 1e-8:
-                    step_advs[step_num] = (step_advs[step_num] - mean) / (std + 1e-8)
-                else:
-                    step_advs[step_num] = step_advs[step_num] - mean
-            else:
-                mean = step_advs[step_num].mean()
-                step_advs[step_num] = step_advs[step_num] - mean
+        # SPO raw: no normalization (EMA baseline is the centering).
+        # GRPO+normalize: per-step mean+std (GDPO-style).
+        # GRPO+dr_grpo: per-step mean-only (no std division).
+        self._normalize_step_advantages(step_advs)
 
         # Phase-aware frontier amplification: focus gradient on bottleneck steps
         apply_frontier_amplification(step_advs, self._step_nums, frontier_steps, self.frontier_amplification)
@@ -307,12 +278,40 @@ class QGREStepAdvantageEstimator:
 
         return batch_advantages, all_regions
 
+    def _normalize_step_advantages(self, step_advs: dict[int, torch.Tensor]):
+        """NaN guard + mode-dependent normalization. Shared by region and span paths."""
+        for step_num in self._step_nums:
+            # NaN guard (ms-swift #8123): reward_fn can return NaN on malformed completions
+            if step_advs[step_num].isnan().any():
+                nan_count = step_advs[step_num].isnan().sum().item()
+                warnings.warn(
+                    f"Step {step_num}: {nan_count}/{len(step_advs[step_num])} advantages are NaN. "
+                    f"Check reward_fn for NaN returns. Replacing with 0.0."
+                )
+                step_advs[step_num] = torch.nan_to_num(step_advs[step_num], nan=0.0)
+            if self.mode == "spo":
+                # SPO raw: no normalization. The per-prompt EMA baseline IS the centering
+                # mechanism. Batch normalization would double-center and erase the importance
+                # hierarchy between steps (bottleneck steps should produce larger gradients).
+                pass
+            elif self.normalize_advantages:
+                mean = step_advs[step_num].mean()
+                std = step_advs[step_num].std(correction=0)
+                if std > 1e-8:
+                    step_advs[step_num] = (step_advs[step_num] - mean) / (std + 1e-8)
+                else:
+                    step_advs[step_num] = step_advs[step_num] - mean
+            else:
+                mean = step_advs[step_num].mean()
+                step_advs[step_num] = step_advs[step_num] - mean
+
     def _compute_spo_advantages(
         self,
         batch_prompt_ids: list[int],
         all_step_rewards: list[dict[int, float]],
         step_advs: dict[int, torch.Tensor],
         batch_size: int,
+        batch_contexts: list[PromptContext] | None = None,
     ):
         # Pre-compute batch mean per step for warm-start (PLAN.md spec: use batch mean, not sample)
         batch_means: dict[int, float] = {}
@@ -322,7 +321,7 @@ class QGREStepAdvantageEstimator:
 
         for step_num in self._step_nums:
             for i in range(batch_size):
-                pid = batch_prompt_ids[i]
+                pid = batch_contexts[i].prompt_id if batch_contexts else batch_prompt_ids[i]
                 r = all_step_rewards[i].get(step_num, 0.0)
                 v = self.V[pid][step_num]
 
@@ -337,7 +336,8 @@ class QGREStepAdvantageEstimator:
                 # Without this, the baseline eats the partial credit gradient (0.4 - 0.4 = 0).
                 # With this, sub-target completions get proportional negative push toward target.
                 if self._aspiration_beta > 0 and self._aspiration_target > 0:
-                    step_advs[step_num][i] += self._aspiration_beta * (r - self._aspiration_target)
+                    target = batch_contexts[i].aspiration_target if batch_contexts else self._aspiration_target
+                    step_advs[step_num][i] += self._aspiration_beta * (r - target)
 
                 # Variance-aware baseline: slow lr when reward is constant
                 effective_lr = self.lr
@@ -445,6 +445,7 @@ class QGREStepAdvantageEstimator:
         batch_token_masks: list[dict[str, torch.Tensor]],
         group_size: int | None = None,
         frontier_steps: set[int] | None = None,
+        batch_contexts: list[PromptContext] | None = None,
     ) -> list[torch.Tensor]:
         """Compute per-token advantages using span-based token masks.
 
@@ -475,32 +476,15 @@ class QGREStepAdvantageEstimator:
             s: torch.zeros(batch_size) for s in self._step_nums
         }
         if self.mode == "spo":
-            self._compute_spo_advantages(batch_prompt_ids, all_step_rewards, step_advs, batch_size)
+            self._compute_spo_advantages(batch_prompt_ids, all_step_rewards, step_advs, batch_size,
+                                         batch_contexts=batch_contexts)
         else:
             self._compute_grpo_advantages(
                 batch_prompt_ids, all_step_rewards, step_advs, batch_size,
                 group_size=group_size or batch_size,
             )
 
-        # Normalization (same as region-based path)
-        for step_num in self._step_nums:
-            if step_advs[step_num].isnan().any():
-                import warnings
-                nan_count = step_advs[step_num].isnan().sum().item()
-                warnings.warn(f"Step {step_num}: {nan_count} advantages are NaN. Replacing with 0.0.")
-                step_advs[step_num] = torch.nan_to_num(step_advs[step_num], nan=0.0)
-            if self.mode == "spo":
-                pass  # Raw SPO advantages
-            elif self.normalize_advantages:
-                mean = step_advs[step_num].mean()
-                std = step_advs[step_num].std(correction=0)
-                if std > 1e-8:
-                    step_advs[step_num] = (step_advs[step_num] - mean) / (std + 1e-8)
-                else:
-                    step_advs[step_num] = step_advs[step_num] - mean
-            else:
-                mean = step_advs[step_num].mean()
-                step_advs[step_num] = step_advs[step_num] - mean
+        self._normalize_step_advantages(step_advs)
 
         # Frontier amplification (same as region-based path)
         apply_frontier_amplification(step_advs, self._step_nums, frontier_steps, self.frontier_amplification)

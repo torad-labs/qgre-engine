@@ -92,6 +92,59 @@ vprm:
   clip_advantage: 5.0
   spo_fallback_min_regions: 2
 
+tutorial:
+  enabled: true
+  post_mastery_behavior: review_only
+  untracked_always_active: true
+  skill_tree:
+    # Root skills — no prerequisites, high threshold (easy tasks, high standard)
+    # match_metadata selects prompts from training data by metadata column values
+    freefall:
+      match_metadata: {system: freefall}
+      prerequisites: []
+      mastery_threshold: 0.85
+      regression_threshold: 0.65
+      mastery_window: 20
+      review_probability: 0.15
+      score_key: q_V_correct
+
+    spring_only:
+      match_metadata: {system: spring}
+      prerequisites: []
+      mastery_threshold: 0.85
+      regression_threshold: 0.65
+      mastery_window: 20
+      review_probability: 0.15
+      score_key: q_V_correct
+
+    # Compound skills — prerequisites required, lower threshold
+    gravity_spring:
+      match_metadata: {system: gravity_spring}
+      prerequisites: [freefall, spring_only]
+      mastery_threshold: 0.75
+      regression_threshold: 0.55
+      mastery_window: 20
+      review_probability: 0.15
+      score_key: q_correct_H
+
+    damped_spring:
+      match_metadata: {system: stiff_spring}
+      prerequisites: [spring_only]
+      mastery_threshold: 0.75
+      regression_threshold: 0.55
+      mastery_window: 20
+      review_probability: 0.15
+      score_key: q_correct_H
+
+    driven_oscillator:
+      match_metadata: {system: duffing}
+      prerequisites: [gravity_spring, damped_spring]
+      mastery_threshold: 0.70
+      regression_threshold: 0.50
+      mastery_window: 20
+      review_probability: 0.15
+      score_key: q_correct_H
+
 logging:
   mlflow_experiment: hamiltonian-curriculum-400
   completion_dir: output/hamiltonian/completions

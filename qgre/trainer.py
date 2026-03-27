@@ -312,6 +312,14 @@ class QGRETrainer:
                 if mastery < self.config.training.mastery_threshold:
                     frontier_steps.add(current_phase)
 
+        # Build prompt contexts once — used by advantages, VPRM, tutorial recording
+        batch_contexts = self.game_state.build_prompt_contexts(
+            prompt_ids=batch.prompt_ids,
+            metadata=batch.metadata,
+            difficulty_column=self._difficulty_column,
+            active_tiers=set(self.game_state.active_tiers),
+        )
+
         # Compute per-token advantages — span-based (if scored_spans populated) or region-based (legacy)
         use_spans = any(rr.scored_spans for rr in reward_results)
         if use_spans:
@@ -341,6 +349,7 @@ class QGRETrainer:
                     batch_token_masks=batch_token_masks,
                     group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
                     frontier_steps=frontier_steps,
+                    batch_contexts=batch_contexts,
                 )
                 # Still run segmenter for VPRM critic (needs STEP_N regions for hidden-state pooling)
                 # and KL region weights
@@ -356,6 +365,7 @@ class QGRETrainer:
                 batch_active_qualities=active_qualities,
                 group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
                 frontier_steps=frontier_steps,
+                batch_contexts=batch_contexts,
             )
 
         # Build full sequences on model device
@@ -432,7 +442,7 @@ class QGRETrainer:
                 # All advantages near-zero — skip backward pass but still record mastery + log completions
                 metrics = {"loss": 0.0, "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
                            "global_step": self.global_step, "phase": self.game_state.phase, "skipped": True}
-                self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics)
+                self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics, batch_contexts=batch_contexts)
                 # Log completions even on skipped steps
                 for i, rr in enumerate(reward_results):
                     comp_tokens = completions[i]
@@ -641,7 +651,7 @@ class QGRETrainer:
                         frontier_amplification=self.config.algorithm.frontier_amplification,
                         min_regions=self.config.vprm.spo_fallback_min_regions,
                         aspiration_beta=self.advantage_estimator._aspiration_beta,
-                        aspiration_target=self.advantage_estimator._aspiration_target,
+                        aspiration_target=batch_contexts[orig_i].aspiration_target,
                     )
 
                     if used_critic:
@@ -806,7 +816,7 @@ class QGRETrainer:
         metrics["completion_length/max"] = float(max(comp_lengths))
         metrics["completion_length/min"] = float(min(comp_lengths))
 
-        self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics)
+        self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics, batch_contexts=batch_contexts)
 
         # Log completions
         completions_text = []
@@ -925,7 +935,7 @@ class QGRETrainer:
             return metadata.get(self._difficulty_column, "default")
         return "default"
 
-    def _record_mastery_and_advance(self, reward_results, active_qualities, batch, metrics):
+    def _record_mastery_and_advance(self, reward_results, active_qualities, batch, metrics, batch_contexts):
         """Record per-tier mastery scores, check per-tier phase advancement, check tier unlock."""
         import numpy as np
         from collections import defaultdict
@@ -957,8 +967,8 @@ class QGRETrainer:
                 new_phase = self.game_state.tier_phases[tier]
                 metrics[f"tier_phase_advanced/{tier}"] = new_phase
                 # Reset SPO baselines for prompts in this tier at the new phase
-                tier_pids = [batch.prompt_ids[i] for i in range(len(reward_results))
-                             if self._get_prompt_tier(batch.metadata[i] if i < len(batch.metadata) else {}) == tier]
+                tier_pids = [batch_contexts[i].prompt_id for i in range(len(reward_results))
+                             if batch_contexts[i].tier == tier]
                 self.advantage_estimator.on_tier_advance(
                     new_tier=new_phase,
                     prompt_tier_map={pid: new_phase for pid in tier_pids},
@@ -975,6 +985,18 @@ class QGRETrainer:
                 warnings.warn(f"Step {self.global_step}: tier '{new_tier}' unlocked")
                 self._apply_difficulty_gate()
 
+        # Tutorial skill tree: record per-skill mastery score
+        if self.game_state.tutorial_enabled:
+            cache_snapshot = self.game_state.snapshot_pool_version()
+            for i, rr in enumerate(reward_results):
+                ctx = batch_contexts[i]
+                score = self.game_state.resolve_mastery_score(ctx.prompt_id_str, rr)
+                self.game_state.record_completion(ctx.prompt_id_str, score)
+            # Re-apply difficulty gate if tutorial state changed (skill mastered/unlocked/relocked)
+            if self.game_state.did_prompt_pool_change(cache_snapshot):
+                self._apply_difficulty_gate()
+            metrics.update(self.game_state.get_tutorial_metrics())
+
         self.game_state.step_count = self.global_step
         metrics["phase"] = self.game_state.phase
 
@@ -988,6 +1010,9 @@ class QGRETrainer:
 
         Sets dataloader to only sample prompts from active tiers, with equal
         weight per tier (prevents large tiers drowning small ones).
+
+        When the tutorial system is enabled, prompts must ALSO be in an active
+        skill. Both gates compose: tier gate AND skill gate must pass.
         """
         if self._dataloader is None or not hasattr(self._dataloader, "set_difficulty_gate"):
             return
@@ -998,7 +1023,14 @@ class QGRETrainer:
         allowed = set(self.game_state.active_tiers)
         self._dataloader.set_difficulty_gate(allowed, col)
 
+        # Tutorial composition: get active prompt IDs from skill tree
+        tutorial_active_pids = None
+        if self.game_state.tutorial_enabled:
+            tutorial_active = self.game_state.get_active_prompts()
+            tutorial_active_pids = set(tutorial_active)
+
         # Equal weight per tier: tier with fewer prompts gets higher per-prompt weight
+        # When tutorial active, also zero out prompts not in active skills
         from collections import Counter
         tier_counts = Counter(
             item["metadata"].get(col, "default") for item in self._dataloader.items
@@ -1006,13 +1038,29 @@ class QGRETrainer:
         tier_weights = {}
         for item in self._dataloader.items:
             tier = item["metadata"].get(col, "default")
+            pid = item["prompt_id"]
+            pid_str = str(pid)
             if tier in allowed:
-                tier_weights[item["prompt_id"]] = 1.0 / max(tier_counts[tier], 1)
+                # If tutorial is active, also check skill gate
+                if tutorial_active_pids is not None and pid_str not in tutorial_active_pids:
+                    tier_weights[pid] = 0.0  # Prompt in allowed tier but locked skill
+                else:
+                    tier_weights[pid] = 1.0 / max(tier_counts[tier], 1)
+            # else: difficulty gate already zeros it out
         if tier_weights:
             self._dataloader.set_priorities(tier_weights)
 
         import warnings
-        warnings.warn(f"Difficulty gate → {sorted(allowed)} ({len(allowed)} tiers active)")
+        active_count = sum(1 for w in tier_weights.values() if w > 0) if tier_weights else 0
+        if active_count == 0:
+            warnings.warn(
+                f"Difficulty gate: zero prompts active after tutorial + tier composition. "
+                f"Allowed tiers: {sorted(allowed)}. Tutorial active prompt count: "
+                f"{len(tutorial_active_pids) if tutorial_active_pids else 'N/A'}. "
+                f"Dataloader will fall back to uniform sampling."
+            )
+        else:
+            warnings.warn(f"Difficulty gate → {sorted(allowed)} ({len(allowed)} tiers, {active_count} prompts active)")
 
     def train(
         self,
@@ -1037,6 +1085,16 @@ class QGRETrainer:
             )
 
         self._dataloader = dataloader  # Store ref for difficulty gate updates
+
+        # Initialize tutorial system if configured
+        if self.config.tutorial.enabled:
+            all_prompt_ids = [str(item["prompt_id"]) for item in dataloader.items]
+            self.game_state.default_aspiration_target = self.advantage_estimator._aspiration_target
+            self.game_state.init_tutorial(
+                self.config.tutorial, all_prompt_ids,
+                dataloader_items=dataloader.items,
+            )
+
         self.setup_optimizer()
         self.optimizer.zero_grad()  # Clean slate — no stale gradients from init or resume
         cfg = self.config.training

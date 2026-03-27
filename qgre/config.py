@@ -91,6 +91,37 @@ class LabelSegmenterConfig:
 
 
 @dataclass
+class SkillConfig:
+    """Configuration for a single skill node in the tutorial DAG.
+
+    Prompts can be specified directly (prompts: [id1, id2]) or matched
+    from training data metadata (match_metadata: {system: freefall}).
+    When match_metadata is set, prompts are resolved at init time from
+    the dataloader's items based on metadata column values.
+    """
+    prompts: list[str] = field(default_factory=list)
+    match_metadata: dict[str, str] | None = None  # e.g. {system: freefall} — matches prompts by metadata column values
+    prerequisites: list[str] = field(default_factory=list)
+    mastery_threshold: float = 0.8
+    regression_threshold: float = 0.6
+    mastery_window: int = 20
+    review_probability: float = 0.15
+    score_key: str | None = None  # Quality key from RewardResult.scores to track mastery (e.g. "q_V_correct"). None = overall reward.
+
+
+_VALID_POST_MASTERY_BEHAVIORS = {"review_only", "pause", "continue_all"}
+
+
+@dataclass
+class TutorialConfig:
+    """Skill-tree tutorial system — prerequisite-gated prompt filtering."""
+    enabled: bool = False
+    skill_tree: dict[str, SkillConfig] = field(default_factory=dict)
+    post_mastery_behavior: str = "review_only"  # review_only | pause | continue_all
+    untracked_always_active: bool = True
+
+
+@dataclass
 class VPRMConfig:
     enabled: bool = False
     intermediate_dim: int = 128  # MLP hidden layer size
@@ -179,6 +210,7 @@ class QGREConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     vprm: VPRMConfig = field(default_factory=VPRMConfig)
+    tutorial: TutorialConfig = field(default_factory=TutorialConfig)
 
     @staticmethod
     def from_yaml(path: str | Path) -> QGREConfig:
@@ -244,4 +276,24 @@ class QGREConfig:
             cfg.logging = LoggingConfig(**_pick(LoggingConfig, d["logging"], "logging"))
         if "vprm" in d:
             cfg.vprm = VPRMConfig(**_pick(VPRMConfig, d["vprm"], "vprm"))
+        if "tutorial" in d:
+            tut_raw = d["tutorial"]
+            skill_tree = {}
+            for key, skill_raw in tut_raw.get("skill_tree", {}).items():
+                if isinstance(skill_raw, dict):
+                    skill_tree[key] = SkillConfig(**_pick(SkillConfig, skill_raw, f"tutorial.skill_tree.{key}"))
+                else:
+                    raise ValueError(
+                        f"tutorial.skill_tree.{key}: expected dict, got {type(skill_raw).__name__}. "
+                        f"Check YAML formatting — skill entries must be mappings."
+                    )
+            tut_top = {k: v for k, v in tut_raw.items() if k != "skill_tree"}
+            tut_fields = _pick(TutorialConfig, tut_top, "tutorial")
+            pmb = tut_fields.get("post_mastery_behavior", "review_only")
+            if pmb not in _VALID_POST_MASTERY_BEHAVIORS:
+                raise ValueError(
+                    f"tutorial.post_mastery_behavior='{pmb}' is invalid. "
+                    f"Must be one of: {sorted(_VALID_POST_MASTERY_BEHAVIORS)}"
+                )
+            cfg.tutorial = TutorialConfig(skill_tree=skill_tree, **tut_fields)
         return cfg
