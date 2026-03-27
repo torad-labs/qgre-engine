@@ -1053,7 +1053,8 @@ class QGRETrainer:
                     comp_preview = ""
                     if output.texts:
                         comp_preview = output.texts[-1].replace("\n", " ")
-                    print(f"[{self.global_step}/{cfg.total_steps}] phase={self.game_state.phase} tiers={tiers_str} reward={reward_mean:.2f} {scores_str}")
+                    critic_str = f" critic={metrics.get('critic_loss', 0):.3f}" if metrics.get('critic_loss', 0) > 0 else ""
+                    print(f"[{self.global_step}/{cfg.total_steps}] phase={self.game_state.phase} tiers={tiers_str} reward={reward_mean:.2f}{critic_str} {scores_str}")
                     if comp_preview:
                         print(f"  completion: {comp_preview}...")
                 try:
