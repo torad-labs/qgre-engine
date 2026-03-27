@@ -595,6 +595,8 @@ class QGRETrainer:
                         frontier_steps=frontier_steps,
                         frontier_amplification=self.config.algorithm.frontier_amplification,
                         min_regions=self.config.vprm.spo_fallback_min_regions,
+                        aspiration_beta=self.advantage_estimator._aspiration_beta,
+                        aspiration_target=self.advantage_estimator._aspiration_target,
                     )
 
                     if used_critic:
@@ -715,6 +717,15 @@ class QGRETrainer:
                             self.vprm_critic.sync_target_to_online()
                         elif self.global_step >= self._vprm_config.target_warmup_steps:
                             self.vprm_critic.update_target_network(tau=self._vprm_config.polyak_tau)
+                    # Divergence monitoring: MSE between online and target predictions
+                    if self.global_step % 50 == 0:
+                        with torch.no_grad():
+                            divergence = sum(
+                                (op.data - tp.data).pow(2).mean().item()
+                                for q in self.vprm_critic.quality_names
+                                for op, tp in zip(self.vprm_critic.heads[q].parameters(), self.vprm_critic.target_heads[q].parameters())
+                            )
+                            metrics["target_divergence"] = divergence
                 self.vprm_optimizer.zero_grad()
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -784,6 +795,8 @@ class QGRETrainer:
             game_state=self.game_state,
             advantage_estimator_state=self.advantage_estimator.state_dict(),
             cuda_rng_state=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+            vprm_critic_state=self.vprm_critic.state_dict_with_meta() if self.vprm_critic else None,
+            vprm_optimizer_state=self.vprm_optimizer.state_dict() if self.vprm_optimizer else None,
         )
 
     def resume(self, checkpoint_dir: str | Path) -> bool:
@@ -820,6 +833,15 @@ class QGRETrainer:
             self.game_state = checkpoint["game_state"]
         if checkpoint.get("advantage_estimator_state"):
             self.advantage_estimator.load_state_dict(checkpoint["advantage_estimator_state"])
+        # Restore VPRM critic + optimizer (if saved)
+        if checkpoint.get("vprm_critic_state") and self.config.vprm.enabled:
+            from qgre.critic import VPRMCritic
+            device = str(next(self.model.parameters()).device)
+            self.vprm_critic = VPRMCritic.from_checkpoint(checkpoint["vprm_critic_state"], device=device)
+            self.vprm_optimizer = torch.optim.Adam(self.vprm_critic.parameters(), lr=self._vprm_config.lr)
+            if checkpoint.get("vprm_optimizer_state"):
+                self.vprm_optimizer.load_state_dict(checkpoint["vprm_optimizer_state"])
+            self._vprm_initialized = True
         if checkpoint.get("rng_state") is not None:
             torch.set_rng_state(checkpoint["rng_state"])
         if checkpoint.get("cuda_rng_state") is not None and torch.cuda.is_available():

@@ -556,6 +556,8 @@ def compute_advantages_vprm(
     frontier_steps: set[int] | None = None,
     frontier_amplification: float = 2.0,
     min_regions: int = 2,
+    aspiration_beta: float = 0.0,
+    aspiration_target: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     """Compute per-token advantages using VPRM critic for a single sample.
 
@@ -602,6 +604,14 @@ def compute_advantages_vprm(
             step_advs[step_num] = sum(vals) / len(vals)
         else:
             step_advs[step_num] = 0.0
+
+    # Aspiration gap: preserve shaped reward gradient even when VPRM replaces SPO advantages
+    if aspiration_beta > 0 and aspiration_target > 0:
+        for step_num in step_nums:
+            qualities = [q for q in step_qualities[step_num] if q in active_qualities]
+            if qualities:
+                step_reward = sum(reward_result.scores.get(q, 0.0) for q in qualities) / len(qualities)
+                step_advs[step_num] += aspiration_beta * (step_reward - aspiration_target)
 
     apply_frontier_amplification(step_advs, step_nums, frontier_steps, frontier_amplification)
 

@@ -82,6 +82,8 @@ def save_checkpoint(
     advantage_estimator_state: dict | None = None,
     rng_state=None,
     cuda_rng_state=None,
+    vprm_critic_state: dict | None = None,
+    vprm_optimizer_state: dict | None = None,
 ):
     """Save full training state to a checkpoint file."""
     import torch
@@ -95,6 +97,8 @@ def save_checkpoint(
         "advantage_estimator_state": advantage_estimator_state,
         "rng_state": rng_state if rng_state is not None else torch.get_rng_state(),
         "cuda_rng_state": cuda_rng_state,
+        "vprm_critic_state": vprm_critic_state,
+        "vprm_optimizer_state": vprm_optimizer_state,
     }
 
     path = Path(path)
