@@ -245,7 +245,10 @@ def main():
             prompt_ids=list(range(len(PROMPTS))),
             raw_prompts=PROMPTS, metadata=[{} for _ in PROMPTS],
         )
-        metrics = trainer.step(batch, gen_output.token_ids, reward_results)
+        metrics = trainer.step(
+            batch, gen_output.token_ids, reward_results,
+            generation_logprobs=gen_output.logprobs,
+        )
 
         vram_now = torch.cuda.memory_allocated() / 1024**3
         vram_peak = torch.cuda.max_memory_allocated() / 1024**3

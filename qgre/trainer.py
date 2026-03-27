@@ -158,14 +158,14 @@ class QGRETrainer:
             "use_importance_sampling_correction": False,
             "truncated_importance_sampling_ratio": None,
             "token_level_loss": True,
-            "force_on_policy_ratio": True,
+            "force_on_policy_ratio": False,
             "remove_length_normalization": alg.loss_type == "dr_grpo",
             "lambda_return": alg.lambda_return,
         })
 
         # LLDS requires stored generation-time logprobs to be meaningful.
         # Without them, old_logprob == curr_logprob and all LLDS gates return zero.
-        # This flag is set to True when generation-time logprobs are wired (future work).
+        # This flag is set dynamically per step based on whether generation_logprobs is provided.
         self._has_stored_logprobs = False
 
         # Fused logprobs: chunked lm_head projection saves ~2GB by not materializing
@@ -275,6 +275,7 @@ class QGRETrainer:
         batch: PromptBatch,
         completions: list[list[int]],
         reward_results: list[RewardResult],
+        generation_logprobs: list[list[float]] | None = None,
     ) -> dict[str, float]:
         """Execute one training step given pre-generated completions and rewards.
 
@@ -287,6 +288,9 @@ class QGRETrainer:
         Returns metrics dict.
         """
         assert self.optimizer is not None, "Call setup_optimizer() first"
+
+        # LLDS activates when real generation-time logprobs are available
+        self._has_stored_logprobs = generation_logprobs is not None
 
         # Per-prompt active qualities based on each prompt's tier and that tier's quality phase
         active_qualities = []
@@ -362,6 +366,32 @@ class QGRETrainer:
         for i, adv in enumerate(token_advantages):
             padded_advs[i, :len(adv)] = adv.to(device)
 
+        # Generation-time logprobs for LLDS (when available from backend)
+        # Shape: [batch, max_comp_len] — logprob[i,t] is log P_gen(token_t | tokens_<t)
+        # These are shifted by 1 relative to token positions (logprob[t] predicts token[t]),
+        # matching the convention used in the loss function.
+        gen_logprobs_padded = None
+        if generation_logprobs is not None:
+            # Validate: logprobs must match completion lengths (generation.py should enforce,
+            # but double-check here to prevent silent LLDS corruption from 0.0 padding)
+            valid = True
+            for i, (lps, comp) in enumerate(zip(generation_logprobs, completions)):
+                if len(lps) != len(comp):
+                    import warnings
+                    warnings.warn(
+                        f"Logprobs length ({len(lps)}) != completion length ({len(comp)}) "
+                        f"for sample {i}. Disabling LLDS for this step."
+                    )
+                    valid = False
+                    break
+            if valid:
+                gen_logprobs_padded = torch.zeros(len(completions), max_comp_len, device=device)
+                for i, lps in enumerate(generation_logprobs):
+                    lp_tensor = torch.tensor(lps, dtype=torch.float32, device=device)
+                    gen_logprobs_padded[i, :len(lps)] = lp_tensor
+            else:
+                self._has_stored_logprobs = False
+
         comp_tensor = torch.zeros(len(completions), max_comp_len, dtype=torch.long, device=device)
         for i, c in enumerate(completions):
             comp_tensor[i, :len(c)] = torch.tensor(c, dtype=torch.long, device=device)
@@ -427,6 +457,8 @@ class QGRETrainer:
                 comp_attention_mask = comp_attention_mask[idx]
                 if kl_region_weights is not None:
                     kl_region_weights = kl_region_weights[idx]
+                if gen_logprobs_padded is not None:
+                    gen_logprobs_padded = gen_logprobs_padded[idx]
                 # Track original indices for VPRM region/reward lookup
                 _spo_filter_idx = idx.tolist()
             else:
@@ -541,7 +573,19 @@ class QGRETrainer:
                 mb_lp = logprobs_from_logits(mb_logits, mb_ids[:, 1:])
                 del mb_logits
 
-            mb_old_lp = mb_lp.detach()
+            # old_logprobs: generation-time logprobs for LLDS, or detached current logprobs as fallback.
+            # Generation-time logprobs are shifted: gen_logprobs[t] = log P(token[t] | token[<t]),
+            # so they align with mb_lp which is logprobs_from_logits(logits[:, :-1], ids[:, 1:]).
+            if gen_logprobs_padded is not None:
+                mb_gen_lp = gen_logprobs_padded[mb_start:mb_end, 1:]  # Shift to match mb_lp indexing
+                min_lp_len = min(mb_lp.shape[1], mb_gen_lp.shape[1])
+                mb_old_lp = mb_gen_lp[:, :min_lp_len]
+                # Pad if mb_lp is longer (shouldn't happen, but defensive)
+                if mb_lp.shape[1] > min_lp_len:
+                    pad = torch.zeros(mb_lp.shape[0], mb_lp.shape[1] - min_lp_len, device=device)
+                    mb_old_lp = torch.cat([mb_old_lp, pad], dim=1)
+            else:
+                mb_old_lp = mb_lp.detach()
 
             # VPRM critic: replace SPO advantages with critic-based advantages
             mb_critic_loss = torch.tensor(0.0, device=device)
@@ -618,7 +662,7 @@ class QGRETrainer:
             # Shift advantages and KL weights by 1 to match logprob indexing
             mb_advs_shifted = mb_advs[:, 1:]  # advantage for token being predicted
             mb_kl_shifted = kl_region_weights[mb_start:mb_end, 1:] if kl_region_weights is not None else None
-            min_len = min(mb_lp.shape[1], mb_advs_shifted.shape[1], mb_mask.shape[1])
+            min_len = min(mb_lp.shape[1], mb_old_lp.shape[1], mb_advs_shifted.shape[1], mb_mask.shape[1])
             mb_kl_weights = mb_kl_shifted[:, :min_len] if mb_kl_shifted is not None else None
             mb_loss, mb_metrics = self.loss_fn(
                 curr_logprobs=mb_lp[:, :min_len],
@@ -651,8 +695,8 @@ class QGRETrainer:
                     mb_metrics["length_penalty"] = length_penalty.item()
 
             # LLDS auxiliary loss — prevents Lazy Likelihood Displacement death spiral
-            # (arXiv:2512.04220). Only meaningful when old_logprob != curr_logprob,
-            # which requires stored generation-time logprobs (not yet implemented).
+            # (arXiv:2512.04220). Fires when generation-time logprobs are available
+            # (old_logprob ≠ curr_logprob). Three-level gate: trajectory + token + action.
             llds_coef = self.config.algorithm.llds_coef
             if llds_coef > 0 and self._has_stored_logprobs:
                 llds_loss, llds_mask = compute_llds_loss(
@@ -1063,7 +1107,10 @@ class QGRETrainer:
                 # 3. Train step (training mode)
                 if hasattr(backend, "set_training_mode"):
                     backend.set_training_mode()
-                metrics = self.step(batch, output.token_ids, reward_results)
+                metrics = self.step(
+                    batch, output.token_ids, reward_results,
+                    generation_logprobs=output.logprobs,
+                )
 
                 # 3b. Update prioritized sampling weights (SPO paper Section 3.2)
                 if hasattr(dataloader, "set_priorities"):

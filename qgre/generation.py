@@ -15,6 +15,7 @@ class GenerationOutput:
 
     token_ids: list[list[int]]   # [batch_size] × variable length
     texts: list[str]             # decoded completions
+    logprobs: list[list[float]] | None = None  # [batch_size] × [seq_len] per-token log probs from generation
 
 
 class UnslothBackend:
@@ -114,6 +115,7 @@ class UnslothBackend:
             top_k=self.generation_config.top_k if self.generation_config.top_k > 0 else -1,
             max_tokens=self.generation_config.max_tokens,
             stop_token_ids=self.generation_config.stop_token_ids,
+            logprobs=1,  # Return chosen token logprob at each position (for LLDS)
         )
 
         # Decode prompts for fast_generate (it takes text, not tensors)
@@ -132,16 +134,68 @@ class UnslothBackend:
 
         token_ids = []
         texts = []
+        all_logprobs = []
         for idx, output in enumerate(outputs):
             if not output.outputs:
                 raise RuntimeError(f"vLLM returned no outputs for prompt {idx}")
-            completion_ids = output.outputs[0].token_ids
+            completion_out = output.outputs[0]
+            completion_ids = completion_out.token_ids
             if len(completion_ids) == 0:
                 raise RuntimeError(f"vLLM returned empty completion for prompt {idx}")
             token_ids.append(list(completion_ids))
-            texts.append(output.outputs[0].text)
+            texts.append(completion_out.text)
 
-        return GenerationOutput(token_ids=token_ids, texts=texts)
+            # Extract per-token logprobs: vLLM returns list[dict[token_id, Logprob]]
+            # We need the SAMPLED token's logprob at each position (not top-1).
+            # With logprobs=1, vLLM always includes the sampled token plus up to 1 top token.
+            sample_lps = []
+            if completion_out.logprobs is not None and len(completion_out.logprobs) > 0:
+                if len(completion_out.logprobs) != len(completion_ids):
+                    import warnings
+                    warnings.warn(
+                        f"vLLM logprobs length ({len(completion_out.logprobs)}) != "
+                        f"completion length ({len(completion_ids)}) for prompt {idx}. "
+                        f"Discarding logprobs for this batch."
+                    )
+                    all_logprobs = []
+                    break
+                for t, pos_dict in enumerate(completion_out.logprobs):
+                    if not pos_dict:
+                        import warnings
+                        warnings.warn(
+                            f"vLLM returned empty logprobs at position {t} for prompt {idx}. "
+                            f"Discarding logprobs for this batch."
+                        )
+                        sample_lps = []
+                        break
+                    # Extract by the actual sampled token_id — NOT by dict iteration order.
+                    # With temperature > 0, the sampled token may differ from top-1.
+                    sampled_id = completion_ids[t]
+                    if sampled_id in pos_dict:
+                        sample_lps.append(pos_dict[sampled_id].logprob)
+                    else:
+                        # vLLM should always include sampled token with logprobs >= 1.
+                        # If missing, fall back to first entry but warn.
+                        import warnings
+                        warnings.warn(
+                            f"Sampled token {sampled_id} not in logprobs dict at position {t} "
+                            f"(keys: {list(pos_dict.keys())}). Using first entry."
+                        )
+                        sample_lps.append(next(iter(pos_dict.values())).logprob)
+            all_logprobs.append(sample_lps)
+
+        has_logprobs = all(len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
+        if not has_logprobs and any(len(lps) > 0 for lps in all_logprobs):
+            import warnings
+            warnings.warn(
+                f"Partial logprobs: {sum(1 for lps in all_logprobs if len(lps) > 0)}"
+                f"/{len(all_logprobs)} samples have logprobs. LLDS disabled for this batch."
+            )
+        return GenerationOutput(
+            token_ids=token_ids,
+            texts=texts,
+            logprobs=all_logprobs if has_logprobs else None,
+        )
 
     def save_weights(self, path: str | Path) -> None:
         """Save LoRA weights for vLLM sync."""
