@@ -671,14 +671,30 @@ class GameState:
             return 0.0
         return sum(window) / len(window)
 
+    # Minimum steps at a phase before advancing — prevents instant 1→4 skip
+    # on easy tutorial prompts. Only enforced when mastery is immediate (< cooldown steps).
+    # Once the model has spent enough steps at a phase, it advances normally.
+    phase_advance_cooldown: int = 10
+
     def check_tier_phase_advance(self, tier: str, max_phase: int) -> bool:
-        """Check if a tier's current quality phase is mastered. Advance if so."""
+        """Check if a tier's current quality phase is mastered. Advance if so.
+
+        Enforces a cooldown: if the phase started < phase_advance_cooldown steps ago,
+        delay advancement. This prevents instant phase skipping on easy prompts while
+        not delaying legitimately earned mastery.
+        """
         current_phase = self.tier_phases.get(tier, 1)
         if current_phase >= max_phase:
             return False
 
         mastery = self.get_tier_step_mastery(tier, current_phase)
         if mastery >= self.mastery_threshold:
+            # Buffer: need at least phase_advance_cooldown observations before first advance.
+            # Prevents instant 1→4 skip on easy prompts. Once the buffer fills, never blocks again.
+            window = self.tier_mastery.get(tier, {}).get(current_phase)
+            if window is not None and len(window) < self.phase_advance_cooldown:
+                return False
+
             old_phase = current_phase
             self.tier_phases[tier] = current_phase + 1
             self.phase_history.append((self.step_count, tier, old_phase, current_phase + 1))
