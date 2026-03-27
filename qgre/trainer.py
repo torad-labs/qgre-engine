@@ -976,19 +976,24 @@ class QGRETrainer:
 
         # Check tier unlock — tutorial gates tier advancement
         if self._tier_order:
-            new_tier = self.game_state.check_tier_unlock(
-                self._tier_order, self._tier_advance_phase, self._tier_advance_threshold,
-            )
-            if new_tier:
-                if self.game_state.can_tier_unlock(new_tier):
+            # Pre-check: which tier WOULD be next?
+            active_set = set(self.game_state.active_tiers)
+            candidate_tier = None
+            for t in self._tier_order:
+                if t not in active_set:
+                    candidate_tier = t
+                    break
+
+            # Only attempt unlock if tutorial allows it
+            if candidate_tier is None or self.game_state.can_tier_unlock(candidate_tier):
+                new_tier = self.game_state.check_tier_unlock(
+                    self._tier_order, self._tier_advance_phase, self._tier_advance_threshold,
+                )
+                if new_tier:
                     metrics["tier_unlocked"] = new_tier
                     import warnings
                     warnings.warn(f"Step {self.global_step}: tier '{new_tier}' unlocked")
                     self._apply_difficulty_gate()
-                else:
-                    # Tutorial says no — roll back the unlock
-                    self.game_state.active_tiers.remove(new_tier)
-                    del self.game_state.tier_phases[new_tier]
 
         # Tutorial skill tree: record per-skill mastery score
         if self.game_state.tutorial_enabled:
