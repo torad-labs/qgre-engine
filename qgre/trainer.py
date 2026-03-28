@@ -1201,21 +1201,53 @@ class QGRETrainer:
                 if self.global_step % 5 == 0:
                     tiers_str = "/".join(self.game_state.active_tiers)
                     reward_mean = metrics.get("reward/mean", 0.0)
-                    # Show ALL quality scores from last batch
-                    score_parts = []
+                    critic_val = metrics.get("critic_loss", 0)
+                    loss_val = metrics.get("loss", 0.0)
+
+                    # Header
+                    print(f"\n{'─'*100}")
+                    print(f"  Step {self.global_step}/{cfg.total_steps}  │  Phase {self.game_state.phase}  │  Tiers: {tiers_str}")
+                    print(f"  Reward: {reward_mean:.3f}  │  Loss: {loss_val:.6f}  │  Critic: {critic_val:.3f}")
+                    print(f"{'─'*100}")
+
+                    # Quality scores table
                     if reward_results:
                         last_scores = reward_results[-1].scores
-                        for qk in sorted(last_scores.keys()):
-                            score_parts.append(f"{qk.replace('q_','')}={last_scores[qk]:.1f}")
-                    scores_str = " ".join(score_parts)
-                    # Show first 150 chars of last completion
-                    comp_preview = ""
+                        # Group by category
+                        format_qs = {k: v for k, v in last_scores.items() if k in ('q_format', 'q_has_math')}
+                        physics_qs = {k: v for k, v in last_scores.items() if k in ('q_V_correct', 'q_correct_H', 'q_T_uses_p', 'q_momentum_defined')}
+                        equation_qs = {k: v for k, v in last_scores.items() if k in ('q_correct_dqdt', 'q_correct_dpdt', 'q_consistency', 'q_correct_coefficient', 'q_derivative_correct')}
+                        momentum_qs = {k: v for k, v in last_scores.items() if k in ('q_defines_momentum', 'q_T_in_momentum', 'q_H_in_momentum')}
+
+                        def _fmt_group(name, qs):
+                            if not qs:
+                                return ""
+                            parts = " ".join(f"{k.replace('q_',''):>20s}={v:.1f}" for k, v in sorted(qs.items()))
+                            return f"  {name:>10s} │ {parts}"
+
+                        for name, qs in [("Format", format_qs), ("Physics", physics_qs), ("Equations", equation_qs), ("Momentum", momentum_qs)]:
+                            line = _fmt_group(name, qs)
+                            if line:
+                                print(line)
+
+                    # Tutorial metrics
+                    if self.game_state.tutorial_enabled:
+                        tut = self.game_state.get_tutorial_metrics()
+                        active_s = tut.get('tutorial/active_skills', 0)
+                        mastered_s = tut.get('tutorial/mastered_skills', 0)
+                        locked_s = tut.get('tutorial/locked_skills', 0)
+                        pool = tut.get('tutorial/active_prompt_pool_size', 0)
+                        print(f"  {'Tutorial':>10s} │ active={active_s} mastered={mastered_s} locked={locked_s} pool={pool}")
+
+                    # Full completion (no truncation)
                     if output.texts:
-                        comp_preview = output.texts[-1].replace("\n", " ")
-                    critic_str = f" critic={metrics.get('critic_loss', 0):.3f}" if metrics.get('critic_loss', 0) > 0 else ""
-                    print(f"[{self.global_step}/{cfg.total_steps}] phase={self.game_state.phase} tiers={tiers_str} reward={reward_mean:.2f}{critic_str} {scores_str}")
-                    if comp_preview:
-                        print(f"  completion: {comp_preview}...")
+                        comp = output.texts[-1]
+                        print(f"{'─'*100}")
+                        print(f"  COMPLETION:")
+                        print(f"{'─'*100}")
+                        for line in comp.split("\n"):
+                            print(f"  {line}")
+                        print(f"{'─'*100}")
                 try:
                     log_step_metrics(
                         step=self.global_step - 1,
