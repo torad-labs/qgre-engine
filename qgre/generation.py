@@ -66,7 +66,16 @@ class UnslothBackend:
         tokenizer.pad_token_id = 151654
         model.config.pad_token_id = 151654
 
-        # Verify — fail loud, not silent
+        # Validate vision_pad exists in vocab and maps correctly
+        resolved_id = tokenizer.convert_tokens_to_ids("<|vision_pad|>")
+        assert resolved_id == 151654, \
+            f"<|vision_pad|> resolves to {resolved_id}, not 151654 — wrong model or tokenizer"
+        vocab_size = getattr(model.config, "vocab_size", None)
+        if vocab_size is not None:
+            assert 151654 < vocab_size, \
+                f"PAD token ID 151654 >= vocab_size {vocab_size} — token doesn't exist"
+
+        # Verify PAD is safe — fail loud, not silent
         assert tokenizer.pad_token_id != tokenizer.eos_token_id, \
             f"PAD ({tokenizer.pad_token_id}) == EOS ({tokenizer.eos_token_id}) — model will never learn to stop"
         assert tokenizer.pad_token_id not in self.generation_config.stop_token_ids, \

@@ -230,7 +230,13 @@ class QGRETrainer:
             print(f"Optimizer: {len(other_params)} params at lr={base_lr}, "
                   f"{len(embedding_params)} embedding params at lr={embed_lr}")
         else:
-            print(f"Optimizer: {len(other_params)} params at lr={base_lr}, no embedding params")
+            import warnings
+            warnings.warn(
+                "No embedding/lm_head params with requires_grad=True found. "
+                "If using modules_to_save=['lm_head', 'embed_tokens'], this means it failed."
+            )
+            # Remove empty param group — optimizer doesn't like empty groups
+            param_groups = [{"params": other_params, "lr": base_lr}]
 
         # AdamW8bit saves ~4x memory on optimizer states (PLAN.md line 323)
         use_8bit = False
@@ -249,6 +255,8 @@ class QGRETrainer:
         cfg = self.config.training
         main_scheduler = None
         if cfg.lr_scheduler == "cosine":
+            # eta_min = base_lr * 0.1. This means embedding group (base_lr/10) has
+            # flat LR — intentional, embeddings need stable learning rate.
             main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 self.optimizer, T_max=cfg.total_steps, eta_min=cfg.lr * 0.1,
             )

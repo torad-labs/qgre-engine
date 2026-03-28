@@ -83,7 +83,7 @@ def main():
     else:
         fails += 1
 
-    if check("Pad token is <|PAD_TOKEN|> (151669)", pad_id == 151669,
+    if check("Pad token is <|vision_pad|> (151654)", pad_id == 151654,
              f"Actual: {pad_id} ({pad_token})"):
         passes += 1
     else:
