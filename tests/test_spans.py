@@ -45,16 +45,28 @@ class TestCharToTokenMap:
     def test_empty_input(self, simple_tokenizer):
         assert build_char_to_token_map([], simple_tokenizer) == []
 
-    def test_returns_none_on_length_mismatch(self):
-        """If per-token decode doesn't match full decode, return None."""
+    def test_returns_none_on_large_length_mismatch(self):
+        """If per-token decode is way off from full decode, return None."""
         class BadTokenizer:
             def decode(self, ids, skip_special_tokens=False):
                 if len(ids) == 1:
                     return "a"
-                return "abc"  # 3 chars for 2 tokens, but per-token would be 2
+                return "a" * 20  # 20 chars vs 2 per-token — huge mismatch
         tok = BadTokenizer()
         result = build_char_to_token_map([1, 2], tok)
         assert result is None
+
+    def test_tolerates_small_length_mismatch(self):
+        """Small BPE merge boundary mismatches (1-2 chars) are tolerated."""
+        class SlightlyOffTokenizer:
+            def decode(self, ids, skip_special_tokens=False):
+                if len(ids) == 1:
+                    return "abc"
+                return "abcab"  # 5 chars, per-token would be 6 — off by 1
+        tok = SlightlyOffTokenizer()
+        result = build_char_to_token_map([1, 2], tok)
+        assert result is not None
+        assert len(result) == 5  # Truncated to full decode length
 
 
 # --- scored_spans_to_token_masks tests ---

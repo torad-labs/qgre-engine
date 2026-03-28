@@ -70,16 +70,27 @@ def build_char_to_token_map(
         full_len = per_token_len
 
     if per_token_len != full_len:
-        warnings.warn(
-            f"Span mapping: per-token decode length ({per_token_len}) != "
-            f"full decode length ({full_len}). Falling back to segmenter."
-        )
-        return None
+        # Tolerate small mismatches (BPE merge boundaries add/remove chars
+        # when tokens are decoded individually vs together)
+        mismatch = abs(per_token_len - full_len)
+        if mismatch > max(3, full_len * 0.01):
+            warnings.warn(
+                f"Span mapping: per-token decode length ({per_token_len}) != "
+                f"full decode length ({full_len}), mismatch={mismatch}. Falling back to segmenter."
+            )
+            return None
 
+    # Build char→token map, truncate or pad to match full_len
     char_to_token = []
     for i, tt in enumerate(token_texts):
         for _ in range(len(tt)):
             char_to_token.append(i)
+
+    if len(char_to_token) > full_len:
+        char_to_token = char_to_token[:full_len]
+    elif len(char_to_token) < full_len:
+        last_tok = char_to_token[-1] if char_to_token else 0
+        char_to_token.extend([last_tok] * (full_len - len(char_to_token)))
 
     return char_to_token
 
