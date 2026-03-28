@@ -51,7 +51,8 @@ def build_char_to_token_map(
                     else:
                         char_to_token[c] = last_valid
                 return char_to_token
-        except Exception:
+        except Exception as e:
+            warnings.warn(f"Span mapping Strategy 1 (offset_mapping) failed: {e}. Trying Strategy 2.")
             pass  # Fall through to Strategy 2
 
     # Strategy 2: Per-token decode (works for BPE, may fail for SentencePiece)
