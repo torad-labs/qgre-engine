@@ -136,6 +136,7 @@ class UnslothBackend:
             temperature=self.generation_config.temperature,
             top_p=self.generation_config.top_p,
             top_k=self.generation_config.top_k if self.generation_config.top_k > 0 else -1,
+            min_p=self.generation_config.min_p,
             max_tokens=self.generation_config.max_tokens,
             stop_token_ids=self.generation_config.stop_token_ids,
             logprobs=1,  # Return chosen token logprob at each position (for LLDS)

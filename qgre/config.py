@@ -39,9 +39,10 @@ class DataConfig:
 
 @dataclass
 class GenerationConfig:
-    temperature: float = 1.0
-    top_p: float = 1.0
-    top_k: int = -1
+    temperature: float = 0.7
+    top_p: float = 0.8
+    top_k: int = 20
+    min_p: float = 0.1
     max_tokens: int = 4096
     stop_token_ids: list[int] = field(default_factory=lambda: [151643, 151645])  # Qwen3: <|endoftext|> + <|im_end|>
     # LoRA dropout during generation: partially revert to base model for exploration

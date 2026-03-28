@@ -3,8 +3,8 @@
 
 model:
   path: unsloth/Qwen3-1.7B-unsloth-bnb-4bit
-  lora_rank: 8
-  lora_alpha: 16
+  lora_rank: 32
+  lora_alpha: 64
   load_in_4bit: true
   fast_inference: true
   gpu_memory_utilization: 0.35
@@ -36,11 +36,12 @@ data:
   initial_tiers: [tutorial_gravity]  # Start on freefall ONLY
 
 generation:
-  temperature: 1.2
-  top_p: 1.0
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.1
   lora_dropout_rate: 0.25
   lora_dropout_anneal_steps: 5000
-  top_k: -1
   max_tokens: 4096
   stop_token_ids: [151643, 151645]
 
