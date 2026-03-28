@@ -558,15 +558,13 @@ class GameState:
             return True
         skills_in_tier = self._tier_to_skills.get(tier_name, [])
         if not skills_in_tier:
-            warnings.warn(f"[TUTORIAL] can_tier_unlock({tier_name}): no skills mapped. "
-                         f"_tier_to_skills keys: {list(self._tier_to_skills.keys())}. Allowing.")
             return True
         for skill_key in skills_in_tier:
             node = self.skill_tree[skill_key]
             if node.status == SkillStatus.LOCKED:
-                warnings.warn(f"[TUTORIAL] can_tier_unlock({tier_name}): BLOCKED by {skill_key} (LOCKED)")
+                print(f"  │ 🔒 Tier '{tier_name}' blocked — skill '{skill_key}' is LOCKED")
                 return False
-        warnings.warn(f"[TUTORIAL] can_tier_unlock({tier_name}): ALLOWED (skills: {skills_in_tier})")
+        return True
         return True
 
     def get_aspiration_target(self, prompt_id: str) -> float:

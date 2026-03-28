@@ -991,8 +991,13 @@ class QGRETrainer:
                 )
                 if new_tier:
                     metrics["tier_unlocked"] = new_tier
-                    import warnings
-                    warnings.warn(f"Step {self.global_step}: tier '{new_tier}' unlocked")
+                    print(f"\n┌{'─'*60}┐")
+                    print(f"│{'🔓 TIER UNLOCKED':^60}│")
+                    print(f"├{'─'*60}┤")
+                    print(f"│  Step: {self.global_step:<51}│")
+                    print(f"│  Tier: {new_tier:<51}│")
+                    print(f"│  Active: {', '.join(self.game_state.active_tiers):<49}│")
+                    print(f"└{'─'*60}┘")
                     self._apply_difficulty_gate()
 
         # Tutorial skill tree: record per-skill mastery score
@@ -1067,17 +1072,17 @@ class QGRETrainer:
         if tier_weights:
             self._dataloader.set_priorities(tier_weights)
 
-        import warnings
         active_count = sum(1 for w in tier_weights.values() if w > 0) if tier_weights else 0
+        tut_count = len(tutorial_active_pids) if tutorial_active_pids else "N/A"
+        print(f"\n┌{'─'*60}┐")
+        print(f"│{'⚙ DIFFICULTY GATE':^60}│")
+        print(f"├{'─'*60}┤")
+        print(f"│  Tiers: {', '.join(sorted(allowed)):<50}│")
+        print(f"│  Active prompts: {active_count:<41}│")
+        print(f"│  Tutorial active: {str(tut_count):<40}│")
         if active_count == 0:
-            warnings.warn(
-                f"Difficulty gate: zero prompts active. "
-                f"Allowed tiers: {sorted(allowed)}. Tutorial active: "
-                f"{len(tutorial_active_pids) if tutorial_active_pids else 'N/A'}. "
-                f"Dataloader will fall back to uniform sampling."
-            )
-        else:
-            warnings.warn(f"Difficulty gate → {sorted(allowed)} ({len(allowed)} tiers, {active_count} prompts active)")
+            print(f"│  ⚠ ZERO PROMPTS — falling back to uniform{' '*17}│")
+        print(f"└{'─'*60}┘")
 
     def train(
         self,
