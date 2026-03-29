@@ -311,8 +311,14 @@ def _normalize_for_sympy(expr_str: str) -> str:
     s = re.sub(r"(\d+)\^\{\\circ\}", lambda m: _COMMON_DEGREES.get(m.group(1), m.group(1)), s)
     s = re.sub(r"(\d+)°", lambda m: _COMMON_DEGREES.get(m.group(1), m.group(1)), s)
     # Bare sin(60) etc — assume degrees for common physics angles
-    s = re.sub(r"sin\((\d+)\)", lambda m: _COMMON_DEGREES.get(m.group(1), "").join(["sin(", ")"]) if m.group(1) in _COMMON_DEGREES else f"sin({m.group(1)})", s)
-    s = re.sub(r"cos\((\d+)\)", lambda m: _COMMON_DEGREES.get(m.group(1), "").join(["cos(", ")"]) if m.group(1) in _COMMON_DEGREES else f"cos({m.group(1)})", s)
+    def _replace_trig(match, fn_name):
+        angle = match.group(1)
+        if angle in _COMMON_DEGREES:
+            return f"{fn_name}({_COMMON_DEGREES[angle]})"
+        else:
+            return match.group(0)  # Return original unchanged
+    s = re.sub(r"sin\((\d+)\)", lambda m: _replace_trig(m, "sin"), s)
+    s = re.sub(r"cos\((\d+)\)", lambda m: _replace_trig(m, "cos"), s)
     # LaTeX velocity markers → _VDOT_ (velocity form marker)
     s = re.sub(r"\\dot\{([a-zA-Z])\}", r"_VDOT_", s)
     # LaTeX \cdot → *
@@ -466,8 +472,14 @@ def _extract_constants_from_prompt(prompt: str) -> dict:
 
 
 def _try_sympify(expr_str: str) -> sp.Basic | None:
-    """Try to parse expression string into sympy. Uses _parse_math (latex2sympy + fallback)."""
-    return _parse_math(expr_str)
+    """Try to parse expression string into sympy. Uses _parse_math (latex2sympy + fallback).
+
+    Returns None if parsing fails. Callers MUST check for None before calling .subs() or other methods.
+    """
+    result = _parse_math(expr_str)
+    if result is None:
+        logger.debug("_parse_math returned None for: %r", expr_str)
+    return result
 
 
 def _remap_variables(student: sp.Basic, teacher: sp.Basic) -> sp.Basic:

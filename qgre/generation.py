@@ -72,13 +72,20 @@ class UnslothBackend:
         _arg_utils_logger.setLevel(logging.ERROR)
 
         try:
+            max_lora_rank_val = self.model_config.max_lora_rank or self.model_config.lora_rank
+            lora_rank_val = self.model_config.lora_rank
+            if lora_rank_val > max_lora_rank_val:
+                raise ValueError(
+                    f"lora_rank ({lora_rank_val}) exceeds max_lora_rank ({max_lora_rank_val}). "
+                    "vLLM will silently ignore the adapter. Increase max_lora_rank in config."
+                )
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.model_config.path,
                 max_seq_length=self.generation_config.max_tokens + self.max_prompt_length,
                 load_in_4bit=self.model_config.load_in_4bit,
                 fast_inference=self.model_config.fast_inference,
                 gpu_memory_utilization=self.model_config.gpu_memory_utilization,
-                max_lora_rank=self.model_config.max_lora_rank or self.model_config.lora_rank,
+                max_lora_rank=max_lora_rank_val,
             )
         finally:
             _llama_mod.patch_tokenizer = _orig_patch

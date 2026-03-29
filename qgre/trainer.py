@@ -186,6 +186,14 @@ class QGRETrainer:
         self.scheduler: Any = None
         self._accumulated_loss = 0.0
 
+        # Validate weight sync strategy compatibility with quantization
+        if config.model.load_in_4bit and config.model.weight_sync_strategy == "merge":
+            raise ValueError(
+                "weight_sync_strategy='merge' is incompatible with load_in_4bit=True. "
+                "MERGE creates new tensors and breaks shared memory with vLLM. "
+                "Use weight_sync_strategy='direct_copy' (default) for 4-bit training."
+            )
+
     def _init_vprm_critic(self, hidden_dim: int, device: str | torch.device):
         """Lazily initialize VPRM critic once hidden_dim is known from first forward pass."""
         if self._vprm_initialized:
@@ -982,11 +990,29 @@ class QGRETrainer:
         scheduler_loaded = False
         if checkpoint.get("scheduler_state_dict") and self.scheduler:
             if optimizer_loaded:
-                try:
-                    self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-                    scheduler_loaded = True
-                except (ValueError, KeyError):
-                    pass  # Scheduler reset if optimizer was reset
+                # Check if T_max changed (indicating new schedule)
+                if hasattr(self.scheduler, "T_max"):
+                    ckpt_T_max = checkpoint["scheduler_state_dict"].get("T_max")
+                    current_T_max = self.scheduler.T_max
+                    if ckpt_T_max is not None and ckpt_T_max != current_T_max:
+                        import warnings
+                        warnings.warn(
+                            f"Scheduler T_max changed: checkpoint={ckpt_T_max}, config={current_T_max}. "
+                            "Skipping scheduler state restore — learning rate schedule will restart. "
+                            "This is expected if you changed total_steps in config."
+                        )
+                    else:
+                        try:
+                            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                            scheduler_loaded = True
+                        except (ValueError, KeyError):
+                            pass  # Scheduler reset if state incompatible
+                else:
+                    try:
+                        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+                        scheduler_loaded = True
+                    except (ValueError, KeyError):
+                        pass
             # If optimizer wasn't loaded, scheduler starts fresh too
         if checkpoint.get("game_state"):
             self.game_state = checkpoint["game_state"]
@@ -1005,6 +1031,11 @@ class QGRETrainer:
                 self.vprm_optimizer.load_state_dict(checkpoint["vprm_optimizer_state"])
             self._vprm_initialized = True
         if checkpoint.get("rng_state") is not None:
+            import warnings
+            warnings.warn(
+                "Restoring RNG state from checkpoint. Note: this overrides config.training.seed. "
+                "If you changed the seed in config after this checkpoint, it will be ignored."
+            )
             torch.set_rng_state(checkpoint["rng_state"])
         if checkpoint.get("cuda_rng_state") is not None and torch.cuda.is_available():
             torch.cuda.set_rng_state(checkpoint["cuda_rng_state"])

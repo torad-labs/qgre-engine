@@ -57,12 +57,10 @@ class WeightLoader:
                 self._direct_ready = True
             except Exception as e:
                 import traceback
-                warnings.warn(
-                    f"prepare_vllm_lora_loading failed: {e}\n{traceback.format_exc()}"
-                    f"Falling back to LoRARequest per step (slower)."
-                )
-                # Fallback: create new LoRARequest each step (slow but correct)
-                return
+                raise RuntimeError(
+                    f"prepare_vllm_lora_loading failed — direct LoRA sync unavailable. "
+                    f"Check vLLM engine initialization.\nOriginal error: {e}\n{traceback.format_exc()}"
+                ) from e
         else:
             # Fast path: direct GPU-to-GPU tensor copy
             load_lora_directly(model)
@@ -78,11 +76,10 @@ class WeightLoader:
         """
         vllm_model = self.get_vllm_model()
         if vllm_model is None:
-            warnings.warn(
+            raise RuntimeError(
                 "vLLM engine not available for modules_to_save sync. "
-                "Will sync on next call after engine creation."
+                "Engine must be initialized before weight sync. Check generation_backend setup."
             )
-            return
 
         synced = []
         for name, tensor in weights.items():

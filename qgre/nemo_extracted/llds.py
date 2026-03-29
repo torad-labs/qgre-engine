@@ -51,7 +51,14 @@ def compute_llds_loss(
 
     # Combined gate: only penalize tokens on correct responses that are declining
     llds_mask = traj_gate * token_gate * action_gate * response_mask
+    mask_count = llds_mask.sum()
+    if mask_count == 0:
+        import logging
+        logging.getLogger(__name__).warning(
+            "LLDS mask all zeros — all tokens have negative advantage or no displacement. "
+            "No gradient signal from LLDS loss this step."
+        )
     displacement = (old_log_prob - log_prob) * llds_mask
-    loss = displacement.sum() / llds_mask.sum().clamp(min=1)
+    loss = displacement.sum() / mask_count.clamp(min=1)
 
     return loss, llds_mask

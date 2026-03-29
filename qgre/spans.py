@@ -90,7 +90,9 @@ def build_char_to_token_map(
         if mismatch > max(3, full_len * 0.01):
             warnings.warn(
                 f"Span mapping: per-token decode length ({per_token_len}) != "
-                f"full decode length ({full_len}), mismatch={mismatch}. Falling back to segmenter."
+                f"full decode length ({full_len}), mismatch={mismatch}. "
+                f"Token IDs: {token_ids[:10]}..., full text: {full_text[:50]}... "
+                "Falling back to segmenter."
             )
             return None
 
@@ -134,6 +136,13 @@ def scored_spans_to_token_masks(
             # Clamp to valid range
             cs = max(0, min(char_start, max_char - 1))
             ce = max(0, min(char_end, max_char))
+            if cs != char_start or ce != char_end:
+                import warnings
+                warnings.warn(
+                    f"Span offset clamped for quality '{quality_name}': "
+                    f"original ({char_start}, {char_end}) → clamped ({cs}, {ce}). "
+                    f"max_char={max_char}. Final tokens may lose advantage signal."
+                )
             # Map char range → token indices and set mask
             for c in range(cs, ce):
                 tok_idx = char_to_token[c]

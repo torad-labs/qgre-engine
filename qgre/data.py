@@ -83,6 +83,17 @@ class QGREDataLoader:
 
     def _prepare(self, prompts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Tokenize, filter overlong, store results."""
+        # Validate metadata_columns exist in first prompt
+        if self.metadata_columns and prompts:
+            first_row = prompts[0]
+            missing = [col for col in self.metadata_columns if col not in first_row]
+            if missing:
+                import warnings
+                warnings.warn(
+                    f"metadata_columns {missing} not found in prompt data. "
+                    f"Available columns: {list(first_row.keys())}. "
+                    "All lookups for these columns will return None."
+                )
         items = []
         for row in prompts:
             text = row[self.prompt_column]
@@ -165,6 +176,14 @@ class QGREDataLoader:
         Prompts outside the allowed set get zero priority weight.
         Called by the trainer on phase advancement to gradually introduce harder problems.
         """
+        if difficulty_column not in self.metadata_columns:
+            import warnings
+            warnings.warn(
+                f"set_difficulty_gate: difficulty_column='{difficulty_column}' "
+                f"not in metadata_columns={self.metadata_columns}. "
+                "All prompts will have empty difficulty, gate may fail. "
+                "Add difficulty_column to metadata_columns in config."
+            )
         self._difficulty_gate = (allowed_difficulties, difficulty_column)
 
     def _shuffle(self, epoch: int) -> list[dict[str, Any]]:

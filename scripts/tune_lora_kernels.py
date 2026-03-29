@@ -133,6 +133,11 @@ def tune_shrink(hidden_sizes, lora_ranks, batch_sizes, dtype) -> dict:
                 best_config = config
 
         key = f"{MAX_LORAS},{num_slices},{m},{k},{n}"
+        if best_config is None:
+            raise RuntimeError(
+                f"All benchmark configs failed for shrink M={m} K={k} N={n} slices={num_slices}. "
+                "Check CUDA errors or reduce shape sizes."
+            )
         configs[key] = best_config
         print(f"  [{done}/{total}] shrink M={m} K={k} N={n} slices={num_slices}: {best_time:.3f}ms {best_config}")
 
@@ -145,7 +150,7 @@ def tune_expand(hidden_sizes, lora_ranks, batch_sizes, add_inputs: bool, dtype) 
     total = len(batch_sizes) * len(hidden_sizes) * len(lora_ranks) * len(NUM_SLICES_LIST)
     done = 0
 
-    for m, k, n, num_slices in product(batch_sizes, lora_ranks, hidden_sizes, NUM_SLICES_LIST):
+    for m, n, k, num_slices in product(batch_sizes, hidden_sizes, lora_ranks, NUM_SLICES_LIST):
         done += 1
         best_time = float("inf")
         best_config = None
@@ -163,6 +168,11 @@ def tune_expand(hidden_sizes, lora_ranks, batch_sizes, add_inputs: bool, dtype) 
                 best_config = config
 
         key = f"{MAX_LORAS},{num_slices},{m},{k},{n}"
+        if best_config is None:
+            raise RuntimeError(
+                f"All benchmark configs failed for expand M={m} K={k} N={n} slices={num_slices}. "
+                "Check CUDA errors or reduce shape sizes."
+            )
         configs[key] = best_config
         print(f"  [{done}/{total}] expand(add={add_inputs}) M={m} K={k} N={n} slices={num_slices}: {best_time:.3f}ms {best_config}")
 

@@ -61,6 +61,8 @@ class WeightBus:
         if self.strategy == SyncStrategy.MERGE:
             exporter.merge_lora(model)
             loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
+            # MERGE modifies base weights in-place — flush vLLM KV cache to prevent stale keys/values
+            loader.flush_kv_cache()
         elif self.strategy == SyncStrategy.DIRECT_COPY:
             loader.sync_lora_direct(model, first_call=not self._initialized)
             loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))

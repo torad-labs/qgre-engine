@@ -21,7 +21,7 @@ def apply_frontier_amplification(
 
     Modifies step_advs in place.
     """
-    if frontier_steps and amplification > 0:
+    if len(frontier_steps) > 0 if frontier_steps is not None else False and amplification > 0:
         for sn in step_nums:
             if sn in frontier_steps:
                 step_advs[sn] = step_advs[sn] * (1.0 + amplification)
@@ -67,7 +67,13 @@ def broadcast_step_advantages_to_tokens(
             label_to_adv[region] = val[sample_idx] if sample_idx is not None else val
 
     seq_len = len(regions)
-    token_advs = torch.zeros(seq_len)
+    # Infer device from step_advs values (may be Tensor or float)
+    device = None
+    for val in step_advs.values():
+        if isinstance(val, torch.Tensor):
+            device = val.device
+            break
+    token_advs = torch.zeros(seq_len, device=device)
     for t, region in enumerate(regions):
         if region in label_to_adv:
             token_advs[t] = label_to_adv[region]
@@ -495,7 +501,13 @@ class QGREStepAdvantageEstimator:
         batch_advantages: list[torch.Tensor] = []
         for i in range(batch_size):
             seq_len = len(batch_token_ids[i])
-            token_advs = torch.zeros(seq_len)
+            # Get device from batch_token_masks (already on GPU)
+            device = None
+            if batch_token_masks[i]:
+                first_mask = next(iter(batch_token_masks[i].values()), None)
+                if first_mask is not None and isinstance(first_mask, torch.Tensor):
+                    device = first_mask.device
+            token_advs = torch.zeros(seq_len, device=device)
             masks = batch_token_masks[i]
 
             for step_num, quality_keys in self.step_qualities.items():
@@ -504,7 +516,7 @@ class QGREStepAdvantageEstimator:
                     continue
                 # Build UNION mask for this step — each token gets step's advantage at most once
                 # regardless of how many qualities within the step cover that token.
-                step_mask = torch.zeros(seq_len)
+                step_mask = torch.zeros(seq_len, device=device)
                 for q_name in quality_keys:
                     if q_name in masks:
                         step_mask = torch.maximum(step_mask, masks[q_name])

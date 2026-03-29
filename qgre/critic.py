@@ -200,6 +200,15 @@ class VPRMCritic(nn.Module):
             region_key = f"STEP_{step_num}"
 
             if region_key not in region_pools:
+                if not hasattr(self, "_region_warned"):
+                    self._region_warned = set()
+                if q_name not in self._region_warned:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"Critic: no {region_key} found for quality '{q_name}' — "
+                        "segmenter may not be producing expected regions, critic will have zero gradient."
+                    )
+                    self._region_warned.add(q_name)
                 advantages[q_name] = 0.0
                 continue
 
