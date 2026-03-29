@@ -408,6 +408,9 @@ class QGRETrainer:
                 if rr.scored_spans:
                     # Decode completion for offset_mapping (authoritative char→token)
                     comp_text = self.tokenizer.decode(completions[i], skip_special_tokens=False) if self.tokenizer else None
+                    # Validate: re-encoding should produce same token count as original
+                    assert len(self.tokenizer.encode(comp_text, add_special_tokens=False)) == len(completions[i]), \
+                        f"Re-encoding mismatch: {len(self.tokenizer.encode(comp_text, add_special_tokens=False))} vs {len(completions[i])}"
                     char_map = build_char_to_token_map(completions[i], self.tokenizer, completion_text=comp_text)
                     if char_map is not None:
                         masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]))
@@ -449,7 +452,7 @@ class QGRETrainer:
         # Build full sequences on model device.
         # modules_to_save offloads original_module to CPU — skip CPU params for device detection.
         device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
-        max_comp_len = max(len(c) for c in completions)
+        max_comp_len = max(len(adv) for adv in token_advantages)
 
         padded_advs = torch.zeros(len(completions), max_comp_len, device=device)
         for i, adv in enumerate(token_advantages):
@@ -837,9 +840,18 @@ class QGRETrainer:
         if (self.global_step + 1) % self.config.training.gradient_accumulation_steps == 0:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config.training.max_grad_norm)
             self.optimizer.step()
+            # Clear optimizer momentum state to prevent double-stepping on resume
+            if hasattr(self, '_resumed_mid_accumulation') and self._resumed_mid_accumulation:
+                for group in self.optimizer.param_groups:
+                    for p in group['params']:
+                        state = self.optimizer.state[p]
+                        if 'exp_avg' in state:
+                            state['exp_avg'].zero_()
+                        if 'exp_avg_sq' in state:
+                            state['exp_avg_sq'].zero_()
+                self._resumed_mid_accumulation = False
             self.optimizer.zero_grad()
             # VPRM critic optimizer steps at same cadence as policy optimizer
-            # Only step when critic actually received gradients (avoids diluting Adam moments)
             if self.vprm_critic is not None and self.vprm_optimizer is not None:
                 has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in self.vprm_critic.parameters())
                 if has_grad:
@@ -851,6 +863,7 @@ class QGRETrainer:
                             self.vprm_critic.sync_target_to_online()
                         elif self.global_step >= self._vprm_config.target_warmup_steps:
                             self.vprm_critic.update_target_network(tau=self._vprm_config.polyak_tau)
+                # Always zero VPRM optimizer regardless of has_grad
                 self.vprm_optimizer.zero_grad()
                 # Divergence monitoring — independent of has_grad (reads .data, no grad needed)
                 if self.global_step % 50 == 0:
@@ -867,9 +880,14 @@ class QGRETrainer:
                         metrics["target_divergence"] = divergence
             if self.scheduler is not None:
                 self.scheduler.step()
-            # Report accumulated loss across gradient accumulation steps
-            metrics["accumulated_loss"] = self._accumulated_loss
+            # Report accumulated loss across gradient accumulation steps (always divide by n_micro)
+            n_micro = self.config.training.gradient_accumulation_steps
+            metrics["accumulated_loss"] = self._accumulated_loss / n_micro
             self._accumulated_loss = 0.0
+        else:
+            # Track accumulated loss even for non-optimizer steps
+            n_micro = self.config.training.gradient_accumulation_steps
+            metrics["accumulated_loss"] = self._accumulated_loss / n_micro
 
         # KL-adaptive SPO learning rate (SPO paper Algorithm 1)
         spo_cfg = self.config.algorithm.spo
@@ -1021,7 +1039,7 @@ class QGRETrainer:
         # Restore VPRM critic + optimizer (if saved)
         if checkpoint.get("vprm_critic_state") and self.config.vprm.enabled:
             from qgre.critic import VPRMCritic
-            device = str(next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device))
+            device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
             self.vprm_critic = VPRMCritic.from_checkpoint(checkpoint["vprm_critic_state"], device=device)
             self.vprm_optimizer = torch.optim.Adam(
                 [p for p in self.vprm_critic.parameters() if p.requires_grad],
@@ -1042,6 +1060,11 @@ class QGRETrainer:
 
         # Re-validate fused logprobs after resume — model weights changed
         self._fused_validated = False
+
+        # Zero gradients AFTER resume to avoid clearing loaded optimizer state
+        self.optimizer.zero_grad()
+        if self.vprm_optimizer is not None:
+            self.vprm_optimizer.zero_grad()
 
         # LoRA verification on resume (PLAN.md line 487-488: mandatory step)
         try:
@@ -1260,7 +1283,7 @@ class QGRETrainer:
             )
 
         self.setup_optimizer()
-        self.optimizer.zero_grad()  # Clean slate — no stale gradients from init or resume
+        # zero_grad() moved after resume() to avoid clearing loaded optimizer state
         cfg = self.config.training
 
         # MLflow experiment setup (PILLARS.md line 128)
@@ -1329,6 +1352,10 @@ class QGRETrainer:
                     meta = batch.metadata[i] if i < len(batch.metadata) else {}
                     rr = self.reward_fn(prompt, output.texts[i], meta)
                     reward_results.append(rr)
+
+                # Validate: reward_results must match completions length after batch expansion
+                assert len(reward_results) == len(output.token_ids), \
+                    f"reward_results length ({len(reward_results)}) != completions length ({len(output.token_ids)})"
 
                 # 3. Train step (training mode)
                 if hasattr(backend, "set_training_mode"):

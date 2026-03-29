@@ -58,8 +58,10 @@ def broadcast_step_advantages_to_tokens(
                     if vs in step_advs:
                         v = step_advs[vs]
                         contribs.append(v[sample_idx] if sample_idx is not None else v)
+                # Convert all to tensors before torch.stack
                 if isinstance(contribs[0], torch.Tensor):
-                    label_to_adv[region] = torch.stack(contribs).sum()
+                    contribs_tensors = [c if isinstance(c, torch.Tensor) else torch.tensor(c, device=contribs[0].device) for c in contribs]
+                    label_to_adv[region] = torch.stack(contribs_tensors).sum()
                 else:
                     label_to_adv[region] = sum(contribs)
         elif region == "THINK" and 0 in step_advs:
@@ -356,7 +358,7 @@ class QGREStepAdvantageEstimator:
                     self._reward_mean[pid][step_num] = new_mean
                     old_var = self._reward_var[pid][step_num]
                     new_var = old_var + self._var_lr * ((r - r_mean) ** 2 - old_var)
-                    self._reward_var[pid][step_num] = new_var
+                    self._reward_var[pid][step_num] = max(0.0, new_var)
                     if new_var < self._var_threshold:
                         effective_lr = self.lr * max(new_var / self._var_threshold, self._min_var_ratio)
 
@@ -519,6 +521,7 @@ class QGREStepAdvantageEstimator:
                 step_mask = torch.zeros(seq_len, device=device)
                 for q_name in quality_keys:
                     if q_name in masks:
+                        assert masks[q_name].shape[0] == seq_len, f"Mask shape mismatch: {masks[q_name].shape[0]} vs seq_len {seq_len}"
                         step_mask = torch.maximum(step_mask, masks[q_name])
                 token_advs += step_adv * step_mask
 

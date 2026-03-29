@@ -42,7 +42,18 @@ def build_char_to_token_map(
         try:
             encoding = tokenizer(completion_text, return_offsets_mapping=True, add_special_tokens=False)
             offsets = encoding.get("offset_mapping")
+            # Validate: encoding token count must match original token_ids
             if offsets and len(offsets) == len(token_ids):
+                # Additional validation: check that decoded text matches completion_text
+                decoded_check = tokenizer.decode(token_ids, skip_special_tokens=False)
+                if decoded_check != completion_text:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Span mapping validation: decoded text != completion_text. "
+                        f"Diff length: {abs(len(decoded_check) - len(completion_text))}. "
+                        "Character spans may be inaccurate."
+                    )
                 text_len = len(completion_text)
                 char_to_token: list[int] = [-1] * text_len
                 for tok_idx, (start, end) in enumerate(offsets):
@@ -88,11 +99,13 @@ def build_char_to_token_map(
         # when tokens are decoded individually vs together)
         mismatch = abs(per_token_len - full_len)
         if mismatch > max(3, full_len * 0.01):
-            warnings.warn(
-                f"Span mapping: per-token decode length ({per_token_len}) != "
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(
+                f"Span mapping FAILED: per-token decode length ({per_token_len}) != "
                 f"full decode length ({full_len}), mismatch={mismatch}. "
-                f"Token IDs: {token_ids[:10]}..., full text: {full_text[:50]}... "
-                "Falling back to segmenter."
+                f"Token IDs sample: {token_ids[:10]}..., full text sample: {full_text[:50]}... "
+                "Falling back to segmenter. This may indicate tokenizer encoding/decoding mismatch."
             )
             return None
 

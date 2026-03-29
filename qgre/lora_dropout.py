@@ -42,8 +42,9 @@ def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], No
         # Match LoRA A matrices (input projection) — not B (output projection)
         if "lora_A" in name and param.requires_grad:
             saved.append((param, param.data.clone()))
+            # Create Bernoulli mask on same device as param.data
             mask = torch.bernoulli(
-                torch.ones_like(param.data) * (1.0 - dropout_rate)
+                torch.ones_like(param.data, device=param.data.device) * (1.0 - dropout_rate)
             )
             # NO inverted dropout scaling — we WANT to suppress LoRA magnitude.
             # Expected activation = (1-p) * original. This partially reverts to
@@ -59,6 +60,11 @@ def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], No
     def restore():
         for param, original in saved:
             param.data.copy_(original)
+            # Clear param.grad after restoring weights to avoid gradient leak
+            if param.grad is not None:
+                param.grad.zero_()
+        # Clear saved list to prevent memory leak
+        saved.clear()
 
     return restore
 

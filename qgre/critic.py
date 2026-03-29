@@ -189,6 +189,11 @@ class VPRMCritic(nn.Module):
             count = mask.sum()
             if count > 0:
                 pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=0) / count
+                # Check for NaN propagation after region pooling
+                if torch.isnan(pooled).any():
+                    import warnings
+                    warnings.warn(f"NaN detected in VPRM critic region pooling for STEP_{step_id}. Returning zero.")
+                    pooled = torch.zeros_like(pooled)
                 region_pools[f"STEP_{step_id}"] = pooled
 
         advantages: dict[str, float] = {}

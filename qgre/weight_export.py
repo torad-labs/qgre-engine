@@ -46,8 +46,8 @@ class WeightExporter:
         import warnings
 
         weights = {}
-        state_dict = model.state_dict()
-        for key, tensor in state_dict.items():
+        # Call state_dict() inside sync function to avoid stale tensor references
+        for key, tensor in model.state_dict().items():
             if "modules_to_save" not in key or "weight" not in key:
                 continue
             if "lm_head" in key:
@@ -80,9 +80,9 @@ class WeightExporter:
         Returns filtered state_dict with only .lora_A. and .lora_B. keys.
         Values are views of the live training parameters — updated by optimizer.step().
         """
-        state_dict = model.state_dict()
+        # Call state_dict() inside sync function to avoid stale tensor references
         return {
-            k: v for k, v in state_dict.items()
+            k: v for k, v in model.state_dict().items()
             if ".lora_A." in k or ".lora_B." in k
         }
 

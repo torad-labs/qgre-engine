@@ -93,6 +93,10 @@ class WeightLoader:
                     raise RuntimeError(
                         f"Shape mismatch syncing lm_head: training={tensor.shape} vs vLLM={target.shape}"
                     )
+                # Check dtype match before copy, warn if mismatch
+                if tensor.dtype != target.dtype:
+                    import warnings
+                    warnings.warn(f"lm_head dtype mismatch: training={tensor.dtype} vs vLLM={target.dtype}. Converting.")
                 target.data.copy_(tensor.to(target.dtype))
                 synced.append(name)
             elif name == "embed_tokens":
@@ -105,6 +109,10 @@ class WeightLoader:
                     raise RuntimeError(
                         f"Shape mismatch syncing embed_tokens: training={tensor.shape} vs vLLM={target.shape}"
                     )
+                # Check dtype match before copy, warn if mismatch
+                if tensor.dtype != target.dtype:
+                    import warnings
+                    warnings.warn(f"embed_tokens dtype mismatch: training={tensor.dtype} vs vLLM={target.dtype}. Converting.")
                 target.data.copy_(tensor.to(target.dtype))
                 synced.append(name)
 

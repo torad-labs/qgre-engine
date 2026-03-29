@@ -398,6 +398,7 @@ def _parse_math(expr_str: str) -> sp.Basic | None:
             # Rejects: Equality (sp.Rel), And/Or (sp.Boolean), BooleanAtom, custom types.
             # Known issue: latex2sympy returns And() for chained equalities like
             # "T = p²/2m = p²/6" which crashes .subs() (HuggingFace Math-Verify #24).
+            # Validate output before passing to fallback normalizer
             if isinstance(result, sp.Expr):
                 return result
         except Exception as exc:
@@ -603,6 +604,8 @@ def _score_terms_structurally(student: sp.Basic, teacher: sp.Basic) -> float | N
                         coeff_accuracy_sum += 0.5 * (1.0 - min(abs(1.0 - ratio), 1.0))
 
         # Score = (matched_terms / total_terms) * avg_coefficient_accuracy
+        if len(teacher_terms) == 0:
+            return None  # Avoid division by zero
         term_coverage = matched / len(teacher_terms)
         avg_coeff_acc = coeff_accuracy_sum / max(matched, 1)
 
@@ -663,32 +666,68 @@ def _score_expression(
         candidates.append(student)
 
     for candidate in candidates:
-        # Exact symbolic match — try multiple simplification strategies
+        # Exact symbolic match — try multiple simplification strategies with timeout
         for simplifier in [sp.simplify, sp.trigsimp, sp.ratsimp, sp.nsimplify]:
             try:
-                if simplifier(candidate - teacher) == 0:
-                    return 1.0
-            except Exception:
+                import signal
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Sympy simplification timeout")
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(2)  # 2 second timeout
+                try:
+                    if simplifier(candidate - teacher) == 0:
+                        signal.alarm(0)
+                        return 1.0
+                finally:
+                    signal.alarm(0)
+            except (Exception, TimeoutError):
                 continue
 
         try:
-            if sp.simplify(sp.expand(candidate) - sp.expand(teacher)) == 0:
-                return 1.0
-        except Exception:
+            import signal
+            def timeout_handler(signum, frame):
+                raise TimeoutError("Sympy simplification timeout")
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(2)
+            try:
+                if sp.simplify(sp.expand(candidate) - sp.expand(teacher)) == 0:
+                    signal.alarm(0)
+                    return 1.0
+            finally:
+                signal.alarm(0)
+        except (Exception, TimeoutError):
             pass
 
         try:
-            if sp.trigsimp(sp.expand_trig(candidate - teacher)) == 0:
-                return 1.0
-        except Exception:
+            import signal
+            def timeout_handler(signum, frame):
+                raise TimeoutError("Sympy simplification timeout")
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(2)
+            try:
+                if sp.trigsimp(sp.expand_trig(candidate - teacher)) == 0:
+                    signal.alarm(0)
+                    return 1.0
+            finally:
+                signal.alarm(0)
+        except (Exception, TimeoutError):
             pass
 
         # Sign convention check: student = -teacher is valid physics (different reference frame)
         for simplifier in [sp.simplify, sp.expand]:
             try:
-                if simplifier(candidate + teacher) == 0:
-                    return 0.8  # Correct magnitude, opposite sign — partial credit
-            except Exception:
+                import signal
+                def timeout_handler(signum, frame):
+                    raise TimeoutError("Sympy simplification timeout")
+                signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(2)
+                try:
+                    if simplifier(candidate + teacher) == 0:
+                        signal.alarm(0)
+                        return 0.8  # Correct magnitude, opposite sign — partial credit
+                finally:
+                    signal.alarm(0)
+            except (Exception, TimeoutError):
                 continue
 
     # Numerical equivalence check at two points (use remapped candidate)
@@ -1174,6 +1213,7 @@ def _score_correct_H(text: str, meta: dict) -> float:
     scores the best match against ground truth.
     """
     expected_H = meta.get("H_expr", "")
+    # Check for sentinel value "none" or empty string before processing
     if not expected_H or expected_H == "none":
         return 0.0
 
@@ -1264,6 +1304,9 @@ def _score_consistency(text: str, meta: dict) -> float:
 
     coords = meta.get("coordinates", "x")
     coord_list = [c.strip() for c in coords.split(",") if c.strip()]
+    # Return early with partial credit if coord_list is empty
+    if not coord_list:
+        return 0.2
 
     extracted_eqs = _extract_equations_block(text)
     if not extracted_eqs:
@@ -1351,16 +1394,18 @@ def _score_correct_coefficient(text: str, meta: dict) -> float:
 
                 csubs = meta.get("_constant_subs")
                 if has_dqdt:
-                    expected_parts = [e.strip() for e in meta["dqdt"].split(";") if e.strip()]
-                    part_scores = []
-                    for exp_part in expected_parts:
-                        best = max(
-                            (_score_expression(ext, exp_part, [], constant_subs=csubs) for ext in extracted_eqs),
-                            default=0.0,
-                        )
-                        part_scores.append(best)
-                    if part_scores:
-                        eq_component_scores.append(sum(part_scores) / len(part_scores))
+                    dqdt_str = meta.get("dqdt", "")
+                    if dqdt_str:
+                        expected_parts = [e.strip() for e in dqdt_str.split(";") if e.strip()]
+                        part_scores = []
+                        for exp_part in expected_parts:
+                            best = max(
+                                (_score_expression(ext, exp_part, [], constant_subs=csubs) for ext in extracted_eqs),
+                                default=0.0,
+                            )
+                            part_scores.append(best)
+                        if part_scores:
+                            eq_component_scores.append(sum(part_scores) / len(part_scores))
 
                 if has_dpdt:
                     expected_parts = [e.strip() for e in meta["dpdt"].split(";") if e.strip()]
@@ -1551,22 +1596,22 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     """
     spans: dict[str, list[tuple[int, int]]] = {}
 
-    # H = expr (Hamiltonian)
+    # H = expr (Hamiltonian) — use possessive quantifiers to prevent backtracking
     spans["q_correct_H"] = [
         (m.start(), m.end())
-        for m in re.finditer(r'H\s*=\s*[^\n]{3,}', text)
+        for m in re.finditer(r'H\s*=\s*[^\n]{3,}?', text)
     ]
 
     # V = expr (potential energy)
     spans["q_V_correct"] = [
         (m.start(), m.end())
-        for m in re.finditer(r'V\s*=\s*[^\n]{3,}', text)
+        for m in re.finditer(r'V\s*=\s*[^\n]{3,}?', text)
     ]
 
     # T = expr (kinetic energy)
     t_spans = [
         (m.start(), m.end())
-        for m in re.finditer(r'T\s*=\s*[^\n]{3,}', text)
+        for m in re.finditer(r'T\s*=\s*[^\n]{3,}?', text)
     ]
     spans["q_T_uses_p"] = t_spans
     spans["q_T_in_momentum"] = t_spans  # Same spans, different quality
@@ -1574,14 +1619,14 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     # H also scored by momentum form quality
     spans["q_H_in_momentum"] = spans["q_correct_H"]
 
-    # Equation expressions: dq/dt = ..., dp/dt = ..., \frac{dX}{dt} = ...
+    # Equation expressions: dq/dt = ..., dp/dt = ..., \frac{dX}{dt} = ... (use non-greedy quantifiers)
     eq_spans = [
         (m.start(), m.end())
-        for m in re.finditer(r'd[a-z_]+/dt\s*=\s*[^\n]{2,}', text)
+        for m in re.finditer(r'd[a-z_]+/dt\s*=\s*[^\n]{2,}?', text)
     ]
     eq_spans += [
         (m.start(), m.end())
-        for m in re.finditer(r'\\frac\{d[a-z_\\]+\}\{dt\}\s*=\s*[^\n]{2,}', text)
+        for m in re.finditer(r'\\frac\{d[a-z_\\]+\}\{dt\}\s*=\s*[^\n]{2,}?', text)
     ]
     spans["q_correct_dqdt"] = eq_spans
     spans["q_correct_dpdt"] = eq_spans
@@ -1592,10 +1637,10 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     spans["q_correct_coefficient"] = eq_spans
     spans["q_derivative_correct"] = eq_spans
 
-    # Momentum definition: p = expr
+    # Momentum definition: p = expr (use non-greedy quantifier)
     spans["q_momentum_defined"] = [
         (m.start(), m.end())
-        for m in re.finditer(r'p\s*=\s*[^\n]{3,}', text)
+        for m in re.finditer(r'p\s*=\s*[^\n]{3,}?', text)
     ]
     spans["q_defines_momentum"] = spans["q_momentum_defined"]
 
@@ -1624,7 +1669,8 @@ def hamiltonian_reward(
     Phase 3: q_correct_dqdt, q_correct_dpdt — Hamilton's equations match ground truth
     Phase 4: q_correct_H, q_consistency — full Hamiltonian + internal consistency
     """
-    meta = dict(metadata) if metadata else {}  # Shallow copy — don't mutate shared dataloader dict
+    import copy
+    meta = copy.deepcopy(metadata) if metadata else {}  # Deep copy to avoid mutation
     meta["prompt"] = prompt  # Make prompt available to scoring functions
     # Extract physical constants from prompt once — shared by all scorers
     meta["_constant_subs"] = _extract_constants_from_prompt(prompt)

@@ -65,6 +65,7 @@ class WeightBus:
             loader.flush_kv_cache()
         elif self.strategy == SyncStrategy.DIRECT_COPY:
             loader.sync_lora_direct(model, first_call=not self._initialized)
+            # Get fresh state_dict inside sync_modules_to_save to avoid stale tensor references
             loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
 
         self._initialized = True
