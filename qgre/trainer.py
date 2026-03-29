@@ -242,7 +242,7 @@ class QGRETrainer:
         # AdamW8bit saves ~4x memory on optimizer states (PLAN.md line 323)
         use_8bit = False
         try:
-            device = next(p.device for p in self.model.parameters() if p.device.type != "cpu")
+            device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
             if device.type == "cuda":
                 from bitsandbytes.optim import AdamW8bit
                 self.optimizer = AdamW8bit(param_groups)
@@ -432,7 +432,7 @@ class QGRETrainer:
 
         # Build full sequences on model device.
         # modules_to_save offloads original_module to CPU — skip CPU params for device detection.
-        device = next(p.device for p in self.model.parameters() if p.device.type != "cpu")
+        device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
         max_comp_len = max(len(c) for c in completions)
 
         padded_advs = torch.zeros(len(completions), max_comp_len, device=device)
@@ -958,7 +958,7 @@ class QGRETrainer:
         # Restore VPRM critic + optimizer (if saved)
         if checkpoint.get("vprm_critic_state") and self.config.vprm.enabled:
             from qgre.critic import VPRMCritic
-            device = str(next(p.device for p in self.model.parameters() if p.device.type != "cpu"))
+            device = str(next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device))
             self.vprm_critic = VPRMCritic.from_checkpoint(checkpoint["vprm_critic_state"], device=device)
             self.vprm_optimizer = torch.optim.Adam(
                 [p for p in self.vprm_critic.parameters() if p.requires_grad],
@@ -1169,6 +1169,10 @@ class QGRETrainer:
                 "No generation backend provided. Pass to train() or QGRETrainer constructor."
             )
 
+        # Weight Sync Bus — coordinates weight transfer between training and vLLM
+        from qgre.weight_bus import WeightBus, SyncStrategy
+        weight_bus = WeightBus(strategy=SyncStrategy(self.config.model.weight_sync_strategy))
+
         self._dataloader = dataloader  # Store ref for difficulty gate updates
 
         # Initialize tutorial system if configured
@@ -1223,14 +1227,11 @@ class QGRETrainer:
                     )
                     if current_rate > 0:
                         restore_lora = apply_lora_dropout(self.model, current_rate)
-                        # Sync noisy weights to vLLM (save AND load — save alone doesn't push to engine)
-                        lora_path = str(Path(self.config.logging.checkpoint_dir) / "lora_latest")
-                        if hasattr(backend, "save_weights") and hasattr(backend, "load_weights"):
-                            backend.save_weights(lora_path)
-                            backend.load_weights(lora_path)
+                        # Sync noisy weights to vLLM via Weight Sync Bus
+                        weight_bus.sync(backend.weight_exporter, backend.weight_loader, self.model)
 
                 try:
-                    _dev = next(p.device for p in self.model.parameters() if p.device.type != "cpu")
+                    _dev = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
                     output = backend.generate(
                         batch.input_ids.to(_dev),
                         batch.attention_mask.to(_dev),
@@ -1337,25 +1338,19 @@ class QGRETrainer:
                 if self.global_step % cfg.save_freq == 0:
                     self.save()
 
-                # 6. LoRA sync (for vLLM weight update)
-                if hasattr(backend, "save_weights") and hasattr(backend, "load_weights"):
-                    lora_path = Path(self.config.logging.checkpoint_dir) / "lora_latest"
-                    backend.save_weights(lora_path)
-                    backend.load_weights(lora_path)
+                # 6. Weight sync via Weight Sync Bus (LoRA + modules_to_save → vLLM)
+                if backend.weight_loader is not None:
+                    weight_bus.sync(backend.weight_exporter, backend.weight_loader, self.model)
 
-                    # LoRA verification: disk-hash verifier removed — incompatible with
-                    # in-memory sync (load_lora_directly + _sync_modules_to_save).
-                    # Sync correctness guaranteed by direct GPU tensor copy every step.
-
-                # 7. Periodic vLLM recreation to prevent VRAM leak (PLAN.md line 719, unsloth #3864)
+                # 7. Periodic vLLM KV cache flush to prevent VRAM leak (unsloth #3864)
                 if self.global_step > 0 and self.global_step % 50 == 0:
-                    if hasattr(backend, "recreate_engine"):
+                    if backend.weight_loader is not None:
                         try:
-                            backend.recreate_engine()
+                            backend.weight_loader.flush_kv_cache()
                         except Exception as e:
                             import warnings
                             warnings.warn(
-                                f"Step {self.global_step}: vLLM engine recreation failed: {e}. "
+                                f"Step {self.global_step}: KV cache flush failed: {e}. "
                                 f"VRAM leak may accumulate. Monitor GPU memory."
                             )
 

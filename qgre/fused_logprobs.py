@@ -49,19 +49,17 @@ def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **k
         "See Unsloth issue #3000: labels bypass UNSLOTH_RETURN_HIDDEN_STATES."
     )
 
-    # Get lm_head module — works on any HF CausalLM
-    # With modules_to_save, PEFT wraps lm_head in ModulesToSaveWrapper.
-    # Unwrap to get the actual nn.Linear inside.
-    lm_head = None
-    try:
-        lm_head = model.get_output_embeddings()
-        # Unwrap PEFT ModulesToSaveWrapper → get the active adapter's nn.Linear
-        if hasattr(lm_head, "modules_to_save"):
-            lm_head = lm_head.modules_to_save["default"]
-        if not isinstance(lm_head, nn.Linear):
-            lm_head = None
-    except AttributeError:
-        lm_head = None  # Model doesn't implement get_output_embeddings
+    # Get lm_head module — uses WeightExporter for PEFT ModulesToSaveWrapper unwrapping
+    from qgre.weight_export import WeightExporter
+    lm_head = WeightExporter().get_lm_head(model)
+    if lm_head is None:
+        # Fallback: try direct access without unwrapping
+        try:
+            lm_head = model.get_output_embeddings()
+            if not isinstance(lm_head, nn.Linear):
+                lm_head = None
+        except AttributeError:
+            lm_head = None  # Model doesn't implement get_output_embeddings
 
     if lm_head is None:
         return None, None

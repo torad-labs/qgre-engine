@@ -8,6 +8,8 @@ model:
   load_in_4bit: true
   fast_inference: true
   gpu_memory_utilization: 0.35
+  pad_token: "<|fim_pad|>"      # Must NOT be EOS, stop token, or vision-reserved
+  pad_token_id: 151662          # Qwen3 fim_pad — vision_pad blocked by Unsloth for text models
 
 data:
   train_files:

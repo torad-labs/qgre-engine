@@ -7,6 +7,9 @@ from typing import Any
 import torch
 
 from qgre.config import GenerationConfig, ModelConfig
+from qgre.weight_bus import SyncStrategy
+from qgre.weight_export import WeightExporter
+from qgre.weight_load import WeightLoader
 
 # Modules trained as full weights alongside LoRA (not low-rank decomposed)
 MODULES_TO_SAVE = ["lm_head", "embed_tokens"]
@@ -34,10 +37,9 @@ class UnslothBackend:
         self.max_prompt_length = max_prompt_length
         self.model = None
         self.tokenizer = None
-        self._lora_path: str | None = None
-        self._lora_request = None  # PatchedLoRARequest for vLLM LoRA sync (set once, reused)
-        self._lora_direct_ready: bool = False  # True after prepare_vllm_lora_loading sets up GPU mappings
-        self._pending_mts_sync: bool = False  # True when _sync_modules_to_save deferred (lazy vLLM init)
+        self.weight_exporter = WeightExporter()
+        self.weight_loader: WeightLoader | None = None  # Created after model load
+        self._sync_strategy = SyncStrategy(model_config.weight_sync_strategy)
 
     def load(self) -> tuple[Any, Any]:
         """Load model and tokenizer. Returns (model, tokenizer)."""
@@ -50,6 +52,7 @@ class UnslothBackend:
             fast_inference=self.model_config.fast_inference,
             gpu_memory_utilization=self.model_config.gpu_memory_utilization,
             max_lora_rank=self.model_config.max_lora_rank or self.model_config.lora_rank,
+            fix_tokenizer=False,  # We configure tokenizer from our config, not Unsloth defaults
         )
 
         model = FastLanguageModel.get_peft_model(
@@ -84,21 +87,27 @@ class UnslothBackend:
             )
             model.config.tie_word_embeddings = False
 
-        # PAD=vision_pad (151654). If PAD=EOS, loss masks EOS → model never stops.
-        tokenizer.pad_token = "<|vision_pad|>"
-        tokenizer.pad_token_id = 151654
-        model.config.pad_token_id = 151654
+        # Configure tokenizer from YAML config — single source of truth for all models.
+        # fix_tokenizer=False above prevents Unsloth from overriding with <|PAD_TOKEN|>.
+        pad_token = self.model_config.pad_token
+        pad_token_id = self.model_config.pad_token_id
+        if not pad_token or pad_token_id < 0:
+            raise ValueError(
+                "model.pad_token and model.pad_token_id must be set in YAML config. "
+                "Qwen3 example: pad_token='<|fim_pad|>', pad_token_id=151662"
+            )
+        tokenizer.pad_token = pad_token
+        tokenizer.pad_token_id = pad_token_id
+        model.config.pad_token_id = pad_token_id
 
-        # Validate vision_pad exists in vocab and maps correctly
-        resolved_id = tokenizer.convert_tokens_to_ids("<|vision_pad|>")
-        assert resolved_id == 151654, \
-            f"<|vision_pad|> resolves to {resolved_id}, not 151654 — wrong model or tokenizer"
+        # Validate PAD token
+        resolved_id = tokenizer.convert_tokens_to_ids(pad_token)
+        assert resolved_id == pad_token_id, \
+            f"{pad_token!r} resolves to {resolved_id}, not {pad_token_id} — wrong model or tokenizer"
         vocab_size = getattr(model.config, "vocab_size", None)
         if vocab_size is not None:
-            assert 151654 < vocab_size, \
-                f"PAD token ID 151654 >= vocab_size {vocab_size} — token doesn't exist"
-
-        # Verify PAD is safe — fail loud, not silent
+            assert pad_token_id < vocab_size, \
+                f"PAD token ID {pad_token_id} >= vocab_size {vocab_size} — token doesn't exist"
         assert tokenizer.pad_token_id != tokenizer.eos_token_id, \
             f"PAD ({tokenizer.pad_token_id}) == EOS ({tokenizer.eos_token_id}) — model will never learn to stop"
         assert tokenizer.pad_token_id not in self.generation_config.stop_token_ids, \
@@ -108,18 +117,10 @@ class UnslothBackend:
               f"EOS={tokenizer.eos_token!r} (ID:{tokenizer.eos_token_id}), "
               f"Stop tokens: {self.generation_config.stop_token_ids}")
 
-        # Verify chat template renders correctly
-        test_messages = [{"role": "user", "content": "test"}]
-        test_rendered = tokenizer.apply_chat_template(
-            test_messages, tokenize=False, add_generation_prompt=True
-        )
-        assert "<|im_start|>" in test_rendered, \
-            f"Chat template broken — missing <|im_start|>. Got: {test_rendered!r}"
-        print(f"Chat template: OK — {test_rendered!r}")
-
         self.model = model
         self.tokenizer = tokenizer
         self._FastLanguageModel = FastLanguageModel
+        self.weight_loader = WeightLoader(model)
 
         # Patch vLLM max_logprobs: Unsloth sets max_logprobs=0 by default,
         # but LLDS needs logprobs=1. Find the vLLM engine and set max_logprobs.
@@ -194,24 +195,12 @@ class UnslothBackend:
             text = self.tokenizer.decode(tokens, skip_special_tokens=False)
             prompts.append(text)
 
+        lora_req = self.weight_loader.lora_request if self.weight_loader else None
         outputs = self.model.fast_generate(
             prompts,
             sampling_params=sampling_params,
-            lora_request=self._lora_request,
+            lora_request=lora_req,
         )
-
-        # Sync deferred after fast_generate — engine is now guaranteed to exist.
-        if self._pending_mts_sync:
-            import warnings
-            warnings.warn(
-                "WARNING: The preceding generate call used MISMATCHED weights — "
-                "LoRA weights were updated (new checkpoint) but lm_head/embed_tokens "
-                "were NOT yet synced (modules_to_save sync deferred due to lazy vLLM init "
-                "after recreate_engine). Reward signals from this batch may be anomalous. "
-                "Syncing modules_to_save now for all subsequent calls.",
-                stacklevel=2,
-            )
-            self._sync_modules_to_save()
 
         token_ids = []
         texts = []
@@ -278,180 +267,8 @@ class UnslothBackend:
             logprobs=all_logprobs if has_logprobs else None,
         )
 
-    def save_weights(self, path: str | Path) -> None:
-        """Ensure adapter_config.json exists for load_lora bootstrap. No heavy disk I/O.
-
-        load_weights uses load_lora(load_tensors=True) which reads weights from model
-        state_dict in memory — it only needs adapter_config.json on disk for LoRA metadata.
-        Full disk saves (safetensors) happen in trainer.save() for checkpoints only.
-        """
-        if self.model is None:
-            raise RuntimeError("Cannot save weights: model not loaded. Call load() first.")
-        p = Path(path)
-        p.mkdir(parents=True, exist_ok=True)
-        self._lora_path = str(p)
-
-    def load_weights(self, path: str | Path) -> None:
-        """Sync trained weights to vLLM — direct GPU copy, no adapter churn.
-
-        First call: register adapter once via load_lora + prepare direct copy mappings.
-        Subsequent calls: load_lora_directly copies updated LoRA A/B tensors into
-        vLLM's internal buffers in microseconds (no LoRARequest, no LRU eviction).
-
-        modules_to_save (lm_head/embed_tokens): direct tensor copy to vLLM base model.
-        """
-        if self.model is None:
-            raise RuntimeError("Cannot load weights: model not loaded. Call load() first.")
-        p = Path(path)
-        p.mkdir(parents=True, exist_ok=True)
-
-        from unsloth_zoo.vllm_utils import prepare_vllm_lora_loading, load_lora_directly
-
-        if not self._lora_direct_ready:
-            # First call: register adapter with vLLM, set up direct copy mappings
-            self._lora_request = self.model.load_lora(str(p), load_tensors=True)
-            try:
-                # prepare_vllm_lora_loading expects the PeftModel with vllm_engine attribute.
-                # It accesses model.model.model.layers for LoRA params and
-                # model.vllm_engine for vLLM's internal LoRA tensors.
-                prepare_vllm_lora_loading(self.model)
-                self._lora_direct_ready = True
-            except Exception as e:
-                # Log full traceback for debugging
-                import traceback, warnings
-                warnings.warn(
-                    f"prepare_vllm_lora_loading failed: {e}\n{traceback.format_exc()}"
-                    f"Falling back to LoRARequest per step (slower)."
-                )
-        else:
-            # Fast path: direct GPU-to-GPU tensor copy (~microseconds vs ~9s)
-            load_lora_directly(self.model)
-
-        # Sync modules_to_save (lm_head, embed_tokens) via direct copy
-        self._sync_modules_to_save()
-
-        self._lora_path = str(p)
-
-    def _sync_modules_to_save(self) -> None:
-        """Copy trained lm_head/embed_tokens directly into vLLM's base model.
-
-        vLLM's LoRA system only handles lora_A/lora_B tensors. modules_to_save
-        (full-weight copies of lm_head/embed_tokens) are silently ignored.
-        We bypass this by writing directly to vLLM's model weights.
-        """
-        vllm_model = self._get_vllm_model()
-        if vllm_model is None:
-            import warnings
-            warnings.warn(
-                "vLLM engine not available for modules_to_save sync. "
-                "Will sync on next load_weights call after engine creation."
-            )
-            self._pending_mts_sync = True
-            return
-
-        self._pending_mts_sync = False
-        state_dict = self.model.state_dict()
-        synced = []
-        for key, tensor in state_dict.items():
-            if "modules_to_save" not in key or "weight" not in key:
-                continue
-            if "lm_head" in key:
-                try:
-                    target = vllm_model.lm_head.weight
-                except AttributeError:
-                    import warnings
-                    warnings.warn("lm_head not found in vLLM model — skipping lm_head sync")
-                    continue
-                if tensor.shape != target.shape:
-                    raise RuntimeError(
-                        f"Shape mismatch syncing lm_head: training={tensor.shape} vs vLLM={target.shape}"
-                    )
-                target.data.copy_(tensor.to(target.dtype))
-                synced.append("lm_head")
-            elif "embed_tokens" in key:
-                try:
-                    target = vllm_model.model.embed_tokens.weight
-                except AttributeError:
-                    import warnings
-                    warnings.warn("embed_tokens not found in vLLM model — skipping embed_tokens sync")
-                    continue
-                if tensor.shape != target.shape:
-                    raise RuntimeError(
-                        f"Shape mismatch syncing embed_tokens: training={tensor.shape} vs vLLM={target.shape}"
-                    )
-                target.data.copy_(tensor.to(target.dtype))
-                synced.append("embed_tokens")
-
-        if MODULES_TO_SAVE and not synced:
-            raise RuntimeError(
-                f"modules_to_save sync failed: expected to sync {MODULES_TO_SAVE} but found none in state_dict. "
-                "lm_head/embed_tokens were NOT updated in vLLM."
-            )
-
-        if synced:
-            torch.cuda.synchronize()
-
-    def _get_vllm_model(self):
-        """Get the vLLM internal model for direct weight access.
-
-        Traverses Unsloth's model structure: PeftModel → base model → vllm_engine.
-        Returns None if engine not yet created (lazy init after recreate_engine).
-        """
-        for obj in [self.model, getattr(self.model, "model", None)]:
-            engine = getattr(obj, "vllm_engine", None) if obj is not None else None
-            if engine is not None:
-                try:
-                    return engine.llm_engine.model_executor.driver_worker.model_runner.model
-                except AttributeError:
-                    continue
-        return None
-
-    def recreate_engine(self) -> None:
-        """Flush vLLM KV cache and scheduler to reclaim VRAM without destroying the engine.
-
-        Previous approach (del vllm_engine + destroy_model_parallel) deadlocked because:
-        - fast_generate holds a bound ref to vllm_engine.generate, keeping engine alive
-        - del model.vllm_engine hides it from _get_vllm_model → modules_to_save can't sync
-        - destroy_model_parallel nukes NCCL state the still-alive engine needs → deadlock
-
-        Fix: keep engine intact, flush KV cache pages via scheduler + gpu_cache_clear.
-        This reclaims the actual leaked memory (KV pages) without touching NCCL.
-        Ref: unsloth #3864 / ms-swift #8233.
-        """
-        import gc
-
-        engine = getattr(self.model, 'vllm_engine', None) or getattr(getattr(self.model, 'model', None), 'vllm_engine', None)
-        if engine is None:
-            return
-
-        # Flush KV cache blocks held by the scheduler (the actual VRAM leak source).
-        # vLLM's LLMEngine exposes the scheduler which tracks block allocations.
-        try:
-            llm_engine = engine.llm_engine
-            # Free all KV cache blocks via scheduler reset
-            for scheduler in getattr(llm_engine, 'scheduler', [llm_engine.scheduler]) if hasattr(llm_engine, 'scheduler') else []:
-                if hasattr(scheduler, 'free_finished_seqs'):
-                    scheduler.free_finished_seqs()
-                if hasattr(scheduler, 'block_manager'):
-                    bm = scheduler.block_manager
-                    if hasattr(bm, 'gpu_allocator') and hasattr(bm.gpu_allocator, 'free_all'):
-                        bm.gpu_allocator.free_all()
-        except Exception:
-            pass
-
-        # Clear the GPU KV cache tensors directly if accessible
-        try:
-            worker = engine.llm_engine.model_executor.driver_worker
-            if hasattr(worker, 'gpu_cache'):
-                for layer_cache in worker.gpu_cache:
-                    if isinstance(layer_cache, torch.Tensor):
-                        layer_cache.zero_()
-                    elif isinstance(layer_cache, (list, tuple)):
-                        for t in layer_cache:
-                            if isinstance(t, torch.Tensor):
-                                t.zero_()
-        except Exception:
-            pass
-
-        gc.collect()
-        torch.cuda.empty_cache()
+    # Weight sync methods moved to Weight Sync Bus:
+    # - WeightExporter (qgre/weight_export.py)
+    # - WeightBus (qgre/weight_bus.py)
+    # - WeightLoader (qgre/weight_load.py)
+    # Trainer calls weight_bus.sync() instead of backend.save_weights/load_weights.

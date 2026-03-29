@@ -16,6 +16,9 @@ class ModelConfig:
     fast_inference: bool = True
     gpu_memory_utilization: float = 0.35  # Colocate: leaves ~65% VRAM for training (Leeroopedia heuristic)
     max_lora_rank: int = 0  # 0 = auto (max(64, lora_rank * 2)); vLLM rejects adapters with rank > this
+    weight_sync_strategy: str = "direct_copy"  # "direct_copy" (4-bit) or "merge" (full-precision deployment)
+    pad_token: str = ""  # Required — set per-model in YAML. Must NOT be EOS, stop token, or vision-reserved.
+    pad_token_id: int = -1  # Required — set per-model in YAML.
 
 
 @dataclass
