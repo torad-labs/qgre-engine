@@ -116,7 +116,7 @@ tutorial:
 
     spring_only:
       match_metadata: {system: spring}
-      prerequisites: []
+      prerequisites: [freefall]  # Must master freefall before spring
       mastery_threshold: 0.85
       regression_threshold: 0.65
       mastery_window: 20

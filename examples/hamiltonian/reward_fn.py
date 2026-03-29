@@ -35,6 +35,243 @@ from qgre.types import RewardResult
 
 logger = logging.getLogger("qgre.hamiltonian_reward")
 
+
+# ─── Structured Output Parser (regex-free extraction) ─────────────────────────
+
+class StructuredOutputParser:
+    """Line-based parser for Hamiltonian structured output.
+
+    Parses the expected format:
+        COORDINATES: q = x
+        MOMENTUM: p = 2*dx/dt
+        KINETIC: T = p²/4
+        POTENTIAL: V = 2*x²
+        HAMILTONIAN: H = p²/4 + 2*x²
+        EQUATIONS:
+          dq/dt = p/2
+          dp/dt = -4*x
+
+    Uses exact string matching instead of regex for label detection.
+    More robust and predictable than regex-based extraction.
+    """
+
+    # Canonical labels and their aliases (case-insensitive)
+    LABELS = {
+        "COORDINATES": {"coordinates", "coordinate", "generalized coordinate", "coords"},
+        "MOMENTUM": {"momentum", "conjugate momentum", "momenta"},
+        "KINETIC": {"kinetic", "kinetic energy", "t"},
+        "POTENTIAL": {"potential", "potential energy", "v"},
+        "HAMILTONIAN": {"hamiltonian", "h"},
+        "EQUATIONS": {"equations", "equations of motion", "hamilton's equations", "eom"},
+    }
+
+    def __init__(self, text: str):
+        self.text = text
+        self.lines = text.split('\n')
+        self._cache: dict[str, str | None] = {}
+        self._equations_cache: list[str] | None = None
+        self._all_expressions_cache: dict[str, list[str]] | None = None
+
+    def _clean_line(self, line: str) -> str:
+        """Strip markdown artifacts from a line."""
+        s = line.strip()
+        # Strip markdown bold/italic markers
+        while s.startswith('*') or s.startswith('#'):
+            s = s.lstrip('*#').strip()
+        while s.endswith('*'):
+            s = s.rstrip('*').strip()
+        # Strip LaTeX delimiters
+        if s.startswith('$'):
+            s = s[1:].strip()
+        if s.endswith('$'):
+            s = s[:-1].strip()
+        return s
+
+    def _extract_expression(self, content: str) -> str:
+        """Extract the mathematical expression from content after label."""
+        s = content.strip()
+        # Strip leading variable name and = (e.g., "T = p²/4" → "p²/4")
+        if '=' in s:
+            parts = s.split('=', 1)
+            rhs = parts[-1].strip()
+            # Check if RHS looks like math (not prose)
+            prose_words = {'the', 'is', 'was', 'from', 'and', 'for', 'with', 'where', 'since', 'given', 'that', 'this'}
+            words = rhs.lower().split()
+            if not any(w in prose_words for w in words[:3]):  # Check first 3 words
+                return self._clean_expression(rhs)
+        return self._clean_expression(s)
+
+    def _clean_expression(self, expr: str) -> str:
+        """Clean trailing artifacts from expression."""
+        s = expr.strip()
+        # Strip trailing markdown/LaTeX artifacts
+        while s and s[-1] in '*$\\':
+            s = s[:-1].strip()
+        # Strip trailing LaTeX line break
+        if s.endswith('\\\\'):
+            s = s[:-2].strip()
+        return s
+
+    def _match_label(self, line: str) -> tuple[str, str] | None:
+        """Check if line starts with a known label. Returns (canonical_label, rest_of_line) or None."""
+        cleaned = self._clean_line(line).lower()
+
+        for canonical, aliases in self.LABELS.items():
+            all_names = {canonical.lower()} | aliases
+            for name in all_names:
+                # Check for "LABEL:" or "LABEL :" pattern
+                if cleaned.startswith(name):
+                    rest = cleaned[len(name):].lstrip()
+                    if rest.startswith(':') or rest.startswith('='):
+                        content = rest[1:].strip()
+                        return (canonical, content)
+                    # Also match if there's content directly after (no colon)
+                    if rest and rest[0] in '=':
+                        return (canonical, rest)
+        return None
+
+    def get_labeled(self, label: str) -> str | None:
+        """Get the expression for a labeled section. Returns the LAST match."""
+        if label in self._cache:
+            return self._cache[label]
+
+        result = None
+        canonical = label.upper()
+
+        for line in self.lines:
+            match = self._match_label(line)
+            if match and match[0] == canonical:
+                expr = self._extract_expression(match[1])
+                if expr:  # Take last non-empty match
+                    result = expr
+
+        self._cache[label] = result
+        return result
+
+    def get_equations(self) -> list[str]:
+        """Get all equation expressions (dq/dt = ..., dp/dt = ...)."""
+        if self._equations_cache is not None:
+            return self._equations_cache
+
+        equations = []
+        in_equations_section = False
+
+        for line in self.lines:
+            match = self._match_label(line)
+            if match:
+                if match[0] == "EQUATIONS":
+                    in_equations_section = True
+                    # Check if there's content on the same line
+                    if match[1]:
+                        equations.append(self._clean_expression(match[1]))
+                else:
+                    in_equations_section = False
+                continue
+
+            # In EQUATIONS section, look for indented equations
+            if in_equations_section:
+                cleaned = self._clean_line(line)
+                if cleaned and '=' in cleaned:
+                    # Check for derivative patterns: dq/dt, dp/dt, \frac{dq}{dt}
+                    lower = cleaned.lower()
+                    if 'd' in lower and ('dt' in lower or '/dt' in lower or '{dt}' in lower):
+                        equations.append(self._clean_expression(cleaned))
+
+        # Also scan entire text for derivative expressions outside EQUATIONS section
+        # But skip lines that are labeled (those are other sections, not equations)
+        for line in self.lines:
+            # Skip if this line has a label
+            if self._match_label(line):
+                continue
+            cleaned = self._clean_line(line)
+            lower = cleaned.lower()
+            # Match dX/dt = ... or \frac{dX}{dt} = ... (actual derivative equations)
+            # Must start with d or \frac{d to be a Hamilton equation
+            if '=' in cleaned:
+                # Check for dq/dt or dp/dt pattern at start of expression
+                if lower.startswith('d') and '/dt' in lower:
+                    expr = self._clean_expression(cleaned)
+                    if expr not in equations:
+                        equations.append(expr)
+                # Check for LaTeX fraction derivative
+                elif '\\frac{d' in cleaned.lower() or 'frac{d' in lower:
+                    expr = self._clean_expression(cleaned)
+                    if expr not in equations:
+                        equations.append(expr)
+
+        self._equations_cache = equations
+        return equations
+
+    def get_all_expressions(self) -> dict[str, list[str]]:
+        """Get all 'VAR = expr' patterns, grouped by variable name.
+
+        Also captures derivative expressions like dq/dt = ..., dp/dt = ...
+        which get keyed as 'dq/dt', 'dp/dt', etc.
+        """
+        if self._all_expressions_cache is not None:
+            return self._all_expressions_cache
+
+        results: dict[str, list[str]] = {}
+
+        for line in self.lines:
+            cleaned = self._clean_line(line)
+            if '=' not in cleaned:
+                continue
+
+            # Split on first =
+            parts = cleaned.split('=', 1)
+            if len(parts) != 2:
+                continue
+
+            lhs = parts[0].strip()
+            rhs = parts[1].strip()
+
+            # Skip if RHS looks like prose
+            prose_words = {'the', 'is', 'was', 'from', 'and', 'for', 'with', 'where', 'since', 'given'}
+            rhs_words = rhs.lower().split()
+            if any(w in prose_words for w in rhs_words[:3]):
+                continue
+
+            # Skip empty or very short expressions
+            if len(rhs) < 1:
+                continue
+
+            # Check for derivative expressions: dq/dt, dp/dt, \frac{dq}{dt}
+            lower_lhs = lhs.lower()
+            if '/dt' in lower_lhs or '{dt}' in lower_lhs:
+                # Normalize derivative key to "dX/dt" format
+                # Handle various patterns
+                for var in ['q', 'p', 'x', 'y', 'r', 's', 'theta', 'p_theta', 'p_r']:
+                    if f'd{var}' in lower_lhs or var in lower_lhs:
+                        key = f"d{var}/dt"
+                        expr = self._clean_expression(rhs)
+                        if expr:
+                            results.setdefault(key, []).append(expr)
+                        break
+                continue
+
+            # Extract variable name (last word/symbol before =)
+            # Handle cases like "T", "p", "H = ...", "KINETIC: T = ..."
+            var_parts = lhs.split()
+            if var_parts:
+                var = var_parts[-1].strip('*:$')
+                # Filter to single letters or known physics variables
+                if len(var) <= 3 or var.lower() in {'theta', 'omega', 'alpha', 'p_theta', 'p_x', 'p_y'}:
+                    expr = self._clean_expression(rhs)
+                    if expr:
+                        results.setdefault(var, []).append(expr)
+
+        self._all_expressions_cache = results
+        return results
+
+
+# ─── Parser factory (for consistent usage) ────────────────────────────────────
+
+def parse_structured_output(text: str) -> StructuredOutputParser:
+    """Create a parser for structured Hamiltonian output."""
+    return StructuredOutputParser(text)
+
+
 # Common physics degree → radian mappings (shared by parser and normalizer)
 _COMMON_DEGREES = {"30": "pi/6", "45": "pi/4", "60": "pi/3", "90": "pi/2"}
 _COMMON_DEGREES_LATEX = {"30": r"\frac{\pi}{6}", "45": r"\frac{\pi}{4}", "60": r"\frac{\pi}{3}", "90": r"\frac{\pi}{2}"}
@@ -546,43 +783,12 @@ _LABEL_ALIASES = HAMILTONIAN_LABEL_ALIASES
 def _extract_labeled(text: str, label: str) -> str | None:
     """Extract the value after a labeled line like 'KINETIC: T = ...'
 
+    Uses the StructuredOutputParser for robust line-based extraction.
     Takes the LAST match — the model writes derivation headers early
-    (### 2. **Kinetic Energy**) and structured labels at the end
-    (**KINETIC:** T = p²/6). We want the final labeled answer.
-
-    Also matches bold markdown headers: **Kinetic Energy:** T = ...
+    and structured labels at the end. We want the final labeled answer.
     """
-    # Build alias patterns for this label
-    aliases = _LABEL_ALIASES.get(label.upper(), [label.lower()])
-    all_labels = [label] + aliases
-
-    patterns = []
-    for lbl in all_labels:
-        esc = re.escape(lbl)
-        patterns.extend([
-            rf"\*{{0,3}}{esc}\*{{0,3}}[:\s]+[A-Za-z_]*\s*=\s*([^\n]+)",  # **KINETIC:** T = ... or KINETIC: T = ...
-            rf"\*{{0,3}}{esc}\*{{0,3}}[:\s]+\$?\s*([^\n]+)",              # **Kinetic Energy:** $ T = p²/6 $
-        ])
-
-    for pat in patterns:
-        matches = list(re.finditer(pat, text, re.IGNORECASE))
-        if matches:
-            expr = matches[-1].group(1).strip()  # Last match
-            # Strip trailing LaTeX/markdown artifacts: **, $, \
-            expr = re.sub(r"[\*$\\]+$", "", expr).strip()
-            # Strip leading $ from LaTeX inline
-            expr = re.sub(r"^\$\s*", "", expr).strip()
-            # Take the last = if there are multiple (e.g. "T = p²/(2m) = p²/6")
-            # But only if the part after = looks like a math expression, not prose
-            parts = expr.rsplit("=", 1)
-            if len(parts) > 1:
-                rhs = parts[-1].strip()
-                # If RHS looks like prose (contains common words), use the full expr instead
-                if re.search(r"\b(the|was|is|from|and|for|with|where|since|given)\b", rhs, re.IGNORECASE):
-                    return expr  # Full expression, not the prose after last =
-                return rhs
-            return expr
-    return None
+    parser = parse_structured_output(text)
+    return parser.get_labeled(label)
 
 
 # ─── Section-agnostic expression finder ──────────────────────────────────────
@@ -590,50 +796,12 @@ def _extract_labeled(text: str, label: str) -> str | None:
 def _find_all_expressions(text: str) -> dict[str, list[str]]:
     """Extract ALL 'X = expr' patterns from the text, grouped by variable name.
 
+    Uses the StructuredOutputParser for robust line-based extraction.
     Returns dict mapping variable letter (T, V, H, p, q, etc.) to list of
-    expression strings found. Takes the RAW text from each match — no label
-    matching, no section detection. Finds math wherever it appears.
+    expression strings found.
     """
-    results: dict[str, list[str]] = {}
-
-    # Strip LaTeX display delimiters so we can find expressions inside $$ blocks
-    cleaned = text
-    cleaned = re.sub(r"\$\$\s*", " ", cleaned)
-    cleaned = re.sub(r"\$", " ", cleaned)
-
-    # Pattern: letter(s) = expression (on same line or after = )
-    for m in re.finditer(r'([A-Za-z_][A-Za-z_0-9]*)\s*=\s*([^\n,;]{3,})', cleaned):
-        var = m.group(1).strip()
-        expr = m.group(2).strip()
-        # Strip trailing markdown/LaTeX artifacts
-        expr = re.sub(r"[\*$\\]+$", "", expr).strip()
-        # Skip prose (has common English words)
-        if re.search(r"\b(the|was|is|from|and|for|with|where|since|given|that|this)\b", expr, re.IGNORECASE):
-            continue
-        # Skip very short or empty
-        if len(expr) < 1:
-            continue
-        results.setdefault(var, []).append(expr)
-
-    # Also find dX/dt = expr patterns (for Hamilton's equations)
-    for m in re.finditer(r'd([a-z_]+)/dt\s*=\s*([^\n,;]{2,})', cleaned):
-        var = f"d{m.group(1)}/dt"
-        expr = m.group(2).strip()
-        expr = re.sub(r"[\*$\\]+$", "", expr).strip()
-        if len(expr) < 1:
-            continue
-        results.setdefault(var, []).append(expr)
-
-    # LaTeX fraction derivatives: \frac{dq}{dt} = expr
-    # Pre-convert \theta → theta so \frac{d\theta}{dt} is matchable
-    text_greek = re.sub(r"\\(theta|omega|alpha|beta|gamma|delta|pi)\b", r"\1", text)
-    for m in re.finditer(r'\\frac\{d([a-z_]+)\}\{dt\}\s*=\s*([^\n,;]{2,})', text_greek):
-        var = f"d{m.group(1)}/dt"
-        expr = m.group(2).strip()
-        expr = re.sub(r"[\*$\\]+$", "", expr).strip()
-        results.setdefault(var, []).append(expr)
-
-    return results
+    parser = parse_structured_output(text)
+    return parser.get_all_expressions()
 
 
 def _best_match(
@@ -661,64 +829,42 @@ def _best_match(
 
 
 def _extract_equations_block(text: str) -> list[str]:
-    """Extract equations from EQUATIONS: block or scattered patterns.
+    """Extract RHS of Hamilton's equations from EQUATIONS: block.
 
-    Handles multiple model output formats:
-    - Indented: '  dq/dt = p/3'
-    - Bulleted: '- dq/dt = p/3'
-    - LaTeX: '$ \\frac{dq}{dt} = p $'
-    - Mixed: '- $ \\frac{dp}{dt} = -6x $'
+    Uses the StructuredOutputParser for robust extraction.
+    Returns the RIGHT-HAND SIDE only (e.g., "p/2" not "dq/dt = p/2").
     """
-    results = []
+    parser = parse_structured_output(text)
+    equations = parser.get_equations()
 
-    # Try EQUATIONS: block — grab everything after the label until next section or end
-    block_m = re.search(r"EQUATIONS[:\s]*\n((?:[\s\-*$]+[^\n]+\n?)+)", text, re.IGNORECASE)
-    if block_m:
-        block_text = block_m.group(1)
-        # Convert LaTeX trig/Greek to plain names FIRST (before frac processing)
-        # so \frac{d\theta}{dt} becomes \frac{dtheta}{dt} which the derivative regex can match
-        block_text = re.sub(r"\\(sin|cos|tan|exp|log|ln|sqrt)\b", r"\1", block_text)
-        block_text = re.sub(r"\\(theta|omega|alpha|beta|gamma|delta|pi)\b", r"\1", block_text)
-        # Now normalize LaTeX fractions (Greek letters already converted)
-        block_text = re.sub(r"\\frac\{d([a-z_]+)\}\{dt\}", r"d\1/dt", block_text)
-        block_text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", block_text)
-        block_text = re.sub(r"\\(cdot|left|right|text\{[^}]*\}|,|;|quad|qquad|displaystyle)", "", block_text)
-        block_text = re.sub(r"\\[a-zA-Z]+", "", block_text)  # Strip remaining unknown LaTeX
-        block_text = re.sub(r"[$*]", "", block_text)
-        for line in block_text.strip().split("\n"):
-            line = line.strip().lstrip("-").strip()
-            eq_m = re.search(r"=\s*([^\n;]+)", line)
-            if eq_m:
-                results.append(eq_m.group(1).strip())
-        if results:
-            return results
-
-    # Fallback: scattered equation patterns (also handle LaTeX)
-    # Normalize LaTeX in full text for fallback
-    # Convert Greek/trig FIRST so \frac{d\theta}{dt} → \frac{dtheta}{dt}
-    norm_text = re.sub(r"\\(sin|cos|tan|exp|log|ln|sqrt)\b", r"\1", text)
-    norm_text = re.sub(r"\\(theta|omega|alpha|beta|gamma|delta|pi)\b", r"\1", norm_text)
-    norm_text = re.sub(r"\\frac\{d([a-z_]+)\}\{dt\}", r"d\1/dt", norm_text)
-    norm_text = re.sub(r"\\frac\{([^}]+)\}\{([^}]+)\}", r"(\1)/(\2)", norm_text)
-    norm_text = re.sub(r"\\[a-zA-Z]+", "", norm_text)
-    norm_text = re.sub(r"[$*]", "", norm_text)
-    for pat in [r"d[a-z_]+/dt\s*=\s*([^\n;,]+)", r"[∂d]H/[∂d][a-z_]+\s*=\s*([^\n;,]+)"]:
-        for m in re.finditer(pat, norm_text):
-            results.append(m.group(1).strip())
-    return results
+    # Extract RHS from each equation
+    rhs_list = []
+    for eq in equations:
+        if '=' in eq:
+            rhs = eq.split('=', 1)[-1].strip()
+            if rhs:
+                rhs_list.append(rhs)
+        else:
+            # If no =, assume it's already the RHS
+            rhs_list.append(eq)
+    return rhs_list
 
 
 def _extract_H(text: str) -> str | None:
     """Extract Hamiltonian expression."""
-    result = _extract_labeled(text, "HAMILTONIAN")
+    parser = parse_structured_output(text)
+
+    # Try labeled extraction first
+    result = parser.get_labeled("HAMILTONIAN")
     if result:
         return result
-    # Fallback: H = ... anywhere
-    m = re.search(r"H\s*=\s*([^\n;]+)", text)
-    if m:
-        expr = m.group(1).strip()
-        parts = expr.rsplit("=", 1)
-        return parts[-1].strip() if len(parts) > 1 else expr
+
+    # Fallback: find H in all expressions
+    all_exprs = parser.get_all_expressions()
+    h_candidates = all_exprs.get("H", [])
+    if h_candidates:
+        return h_candidates[-1]  # Return last match
+
     return None
 
 
@@ -735,18 +881,19 @@ def _extract_numbers_from_prompt(prompt: str) -> set[str]:
 
 def _score_format(text: str) -> float:
     """q_format: structured response with labeled sections."""
+    parser = parse_structured_output(text)
+
+    # Count how many expected labels are present
     labels_found = 0
     for label in ["COORDINATES", "MOMENTUM", "KINETIC", "POTENTIAL", "HAMILTONIAN", "EQUATIONS"]:
-        aliases = _LABEL_ALIASES.get(label, [label.lower()])
-        for lbl in [label] + aliases:
-            if re.search(rf"\*{{0,3}}{re.escape(lbl)}\*{{0,3}}\s*:", text, re.IGNORECASE):
-                labels_found += 1
-                break
+        if parser.get_labeled(label) is not None:
+            labels_found += 1
 
     if labels_found >= 5:
         return 1.0
     if labels_found >= 3:
         return 0.7
+
     # Fallback: check for basic physics content
     has_math = any(s in text for s in ["=", "H ", "T ", "V "])
     has_length = len(text.strip()) > 100
@@ -767,24 +914,35 @@ def _score_has_math(text: str) -> float:
 
 def _score_momentum_defined(text: str) -> float:
     """q_momentum_defined: MOMENTUM section defines p in terms of q̇."""
-    # Check for MOMENTUM: label with content (use last match via _extract_labeled)
-    momentum_str = _extract_labeled(text, "MOMENTUM")
-    has_label = momentum_str is not None
+    parser = parse_structured_output(text)
 
-    if has_label and momentum_str:
-        has_numbers = bool(re.search(r"\d", momentum_str))
-        has_expression = bool(re.search(r"[a-z\u0370-\u03FF\u0300-\u036F*/+\-]", momentum_str))
+    # Check for MOMENTUM: label with content
+    momentum_str = parser.get_labeled("MOMENTUM")
+
+    if momentum_str:
+        # Check if expression has numbers and variables
+        has_numbers = any(c.isdigit() for c in momentum_str)
+        has_expression = any(c.isalpha() or c in '*/+-' for c in momentum_str)
         if has_numbers and has_expression:
             return 1.0
         if has_expression:
             return 0.7
         return 0.5
 
-    # Fallback: check for momentum definition anywhere
-    if re.search(r"p\s*=\s*m\s*[*·]?\s*[a-zθ]|p\s*=\s*\d+\s*[*·]?\s*d[a-z]", text, re.IGNORECASE):
-        return 0.5
-    if re.search(r"conjugate\s+momentum|p\s*=\s*\d", text, re.IGNORECASE):
+    # Fallback: check for momentum definition in all expressions
+    all_exprs = parser.get_all_expressions()
+    p_candidates = all_exprs.get("p", [])
+    if p_candidates:
+        # Check if any p = ... expression contains mass * velocity pattern
+        for expr in p_candidates:
+            lower = expr.lower()
+            if 'd' in lower or any(c.isdigit() for c in expr):
+                return 0.5
+
+    # Check for "conjugate momentum" text
+    if "conjugate momentum" in text.lower():
         return 0.3
+
     return 0.0
 
 
@@ -1415,8 +1573,11 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     ]
     spans["q_correct_dqdt"] = eq_spans
     spans["q_correct_dpdt"] = eq_spans
-    spans["q_consistency"] = eq_spans + spans["q_correct_H"]  # Equations + H
-    spans["q_correct_coefficient"] = eq_spans + spans["q_correct_H"]
+    # Consistency/coefficient qualities only target equations — avoid bleeding onto H tokens
+    # which have their own step (q_correct_H). The model should learn to make equations
+    # consistent with H, not vice versa.
+    spans["q_consistency"] = eq_spans
+    spans["q_correct_coefficient"] = eq_spans
     spans["q_derivative_correct"] = eq_spans
 
     # Momentum definition: p = expr

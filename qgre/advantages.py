@@ -502,10 +502,13 @@ class QGREStepAdvantageEstimator:
                 step_adv = step_advs[step_num][i].item()
                 if abs(step_adv) < 1e-10:
                     continue
-                # Apply this step's advantage to all tokens covered by ANY of its qualities' spans
+                # Build UNION mask for this step — each token gets step's advantage at most once
+                # regardless of how many qualities within the step cover that token.
+                step_mask = torch.zeros(seq_len)
                 for q_name in quality_keys:
                     if q_name in masks:
-                        token_advs += step_adv * masks[q_name]
+                        step_mask = torch.maximum(step_mask, masks[q_name])
+                token_advs += step_adv * step_mask
 
             batch_advantages.append(token_advs)
 
