@@ -409,13 +409,21 @@ class QGRETrainer:
                     # Decode completion for offset_mapping (authoritative char→token)
                     comp_text = self.tokenizer.decode(completions[i], skip_special_tokens=False) if self.tokenizer else None
                     # Validate: re-encoding should produce same token count as original
-                    assert len(self.tokenizer.encode(comp_text, add_special_tokens=False)) == len(completions[i]), \
-                        f"Re-encoding mismatch: {len(self.tokenizer.encode(comp_text, add_special_tokens=False))} vs {len(completions[i])}"
-                    char_map = build_char_to_token_map(completions[i], self.tokenizer, completion_text=comp_text)
-                    if char_map is not None:
-                        masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]))
+                    # Some tokenizers have encode/decode asymmetry — warn and fall back to segmenter
+                    re_encoded_len = len(self.tokenizer.encode(comp_text, add_special_tokens=False))
+                    if re_encoded_len != len(completions[i]):
+                        import logging
+                        logging.getLogger(__name__).warning(
+                            f"Tokenizer encode/decode asymmetry: re-encoded {re_encoded_len} tokens "
+                            f"vs original {len(completions[i])}. Falling back to segmenter for sample {i}."
+                        )
+                        masks = {}
                     else:
-                        masks = {}  # Fallback: empty masks → zero advantages (segmenter fallback below)
+                        char_map = build_char_to_token_map(completions[i], self.tokenizer, completion_text=comp_text)
+                        if char_map is not None:
+                            masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]))
+                        else:
+                            masks = {}  # Fallback: empty masks → zero advantages (segmenter fallback below)
                 else:
                     masks = {}
                 batch_token_masks.append(masks)

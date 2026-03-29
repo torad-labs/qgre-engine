@@ -21,9 +21,46 @@ from __future__ import annotations
 import json
 import logging
 import re
+import signal
+from contextlib import contextmanager
 from pathlib import Path
 
 import sympy as sp
+
+
+# ─── Timeout utility for sympy operations ─────────────────────────────────────
+
+class SympyTimeoutError(Exception):
+    """Raised when sympy operation exceeds time limit."""
+    pass
+
+
+@contextmanager
+def sympy_timeout(seconds: int = 2):
+    """Context manager for timing out sympy operations.
+
+    Uses SIGALRM — only works on Unix, not in threaded contexts.
+    Falls back to no timeout on Windows or if signal is unavailable.
+
+    Usage:
+        with sympy_timeout(2):
+            result = sp.simplify(expr)
+    """
+    if not hasattr(signal, 'SIGALRM'):
+        # Windows or signal not available — no timeout
+        yield
+        return
+
+    def handler(signum, frame):
+        raise SympyTimeoutError(f"Sympy operation timed out after {seconds}s")
+
+    old_handler = signal.signal(signal.SIGALRM, handler)
+    signal.alarm(seconds)
+    try:
+        yield
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old_handler)
 
 try:
     from latex2sympy2_extended import latex2sympy as _latex2sympy
@@ -669,65 +706,33 @@ def _score_expression(
         # Exact symbolic match — try multiple simplification strategies with timeout
         for simplifier in [sp.simplify, sp.trigsimp, sp.ratsimp, sp.nsimplify]:
             try:
-                import signal
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("Sympy simplification timeout")
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(2)  # 2 second timeout
-                try:
+                with sympy_timeout(2):
                     if simplifier(candidate - teacher) == 0:
-                        signal.alarm(0)
                         return 1.0
-                finally:
-                    signal.alarm(0)
-            except (Exception, TimeoutError):
+            except (Exception, SympyTimeoutError):
                 continue
 
         try:
-            import signal
-            def timeout_handler(signum, frame):
-                raise TimeoutError("Sympy simplification timeout")
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(2)
-            try:
+            with sympy_timeout(2):
                 if sp.simplify(sp.expand(candidate) - sp.expand(teacher)) == 0:
-                    signal.alarm(0)
                     return 1.0
-            finally:
-                signal.alarm(0)
-        except (Exception, TimeoutError):
+        except (Exception, SympyTimeoutError):
             pass
 
         try:
-            import signal
-            def timeout_handler(signum, frame):
-                raise TimeoutError("Sympy simplification timeout")
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(2)
-            try:
+            with sympy_timeout(2):
                 if sp.trigsimp(sp.expand_trig(candidate - teacher)) == 0:
-                    signal.alarm(0)
                     return 1.0
-            finally:
-                signal.alarm(0)
-        except (Exception, TimeoutError):
+        except (Exception, SympyTimeoutError):
             pass
 
         # Sign convention check: student = -teacher is valid physics (different reference frame)
         for simplifier in [sp.simplify, sp.expand]:
             try:
-                import signal
-                def timeout_handler(signum, frame):
-                    raise TimeoutError("Sympy simplification timeout")
-                signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(2)
-                try:
+                with sympy_timeout(2):
                     if simplifier(candidate + teacher) == 0:
-                        signal.alarm(0)
                         return 0.8  # Correct magnitude, opposite sign — partial credit
-                finally:
-                    signal.alarm(0)
-            except (Exception, TimeoutError):
+            except (Exception, SympyTimeoutError):
                 continue
 
     # Numerical equivalence check at two points (use remapped candidate)
@@ -1596,22 +1601,22 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     """
     spans: dict[str, list[tuple[int, int]]] = {}
 
-    # H = expr (Hamiltonian) — use possessive quantifiers to prevent backtracking
+    # H = expr (Hamiltonian) — greedy match to end of line captures full expression
     spans["q_correct_H"] = [
         (m.start(), m.end())
-        for m in re.finditer(r'H\s*=\s*[^\n]{3,}?', text)
+        for m in re.finditer(r'H\s*=\s*[^\n]{3,}', text)
     ]
 
     # V = expr (potential energy)
     spans["q_V_correct"] = [
         (m.start(), m.end())
-        for m in re.finditer(r'V\s*=\s*[^\n]{3,}?', text)
+        for m in re.finditer(r'V\s*=\s*[^\n]{3,}', text)
     ]
 
     # T = expr (kinetic energy)
     t_spans = [
         (m.start(), m.end())
-        for m in re.finditer(r'T\s*=\s*[^\n]{3,}?', text)
+        for m in re.finditer(r'T\s*=\s*[^\n]{3,}', text)
     ]
     spans["q_T_uses_p"] = t_spans
     spans["q_T_in_momentum"] = t_spans  # Same spans, different quality
@@ -1619,14 +1624,14 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     # H also scored by momentum form quality
     spans["q_H_in_momentum"] = spans["q_correct_H"]
 
-    # Equation expressions: dq/dt = ..., dp/dt = ..., \frac{dX}{dt} = ... (use non-greedy quantifiers)
+    # Equation expressions: dq/dt = ..., dp/dt = ..., \frac{dX}{dt} = ...
     eq_spans = [
         (m.start(), m.end())
-        for m in re.finditer(r'd[a-z_]+/dt\s*=\s*[^\n]{2,}?', text)
+        for m in re.finditer(r'd[a-z_]+/dt\s*=\s*[^\n]{2,}', text)
     ]
     eq_spans += [
         (m.start(), m.end())
-        for m in re.finditer(r'\\frac\{d[a-z_\\]+\}\{dt\}\s*=\s*[^\n]{2,}?', text)
+        for m in re.finditer(r'\\frac\{d[a-z_\\]+\}\{dt\}\s*=\s*[^\n]{2,}', text)
     ]
     spans["q_correct_dqdt"] = eq_spans
     spans["q_correct_dpdt"] = eq_spans
@@ -1637,10 +1642,10 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     spans["q_correct_coefficient"] = eq_spans
     spans["q_derivative_correct"] = eq_spans
 
-    # Momentum definition: p = expr (use non-greedy quantifier)
+    # Momentum definition: p = expr
     spans["q_momentum_defined"] = [
         (m.start(), m.end())
-        for m in re.finditer(r'p\s*=\s*[^\n]{3,}?', text)
+        for m in re.finditer(r'p\s*=\s*[^\n]{3,}', text)
     ]
     spans["q_defines_momentum"] = spans["q_momentum_defined"]
 

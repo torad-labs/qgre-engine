@@ -21,7 +21,7 @@ def apply_frontier_amplification(
 
     Modifies step_advs in place.
     """
-    if len(frontier_steps) > 0 if frontier_steps is not None else False and amplification > 0:
+    if frontier_steps and amplification > 0:
         for sn in step_nums:
             if sn in frontier_steps:
                 step_advs[sn] = step_advs[sn] * (1.0 + amplification)
@@ -358,6 +358,12 @@ class QGREStepAdvantageEstimator:
                     self._reward_mean[pid][step_num] = new_mean
                     old_var = self._reward_var[pid][step_num]
                     new_var = old_var + self._var_lr * ((r - r_mean) ** 2 - old_var)
+                    if new_var < 0:
+                        # Negative variance indicates numerical instability in EMA — log and clamp
+                        warnings.warn(
+                            f"Negative variance {new_var:.6f} for prompt {pid} step {step_num}. "
+                            f"old_var={old_var:.6f}, r={r:.4f}, r_mean={r_mean:.4f}. Clamping to 0."
+                        )
                     self._reward_var[pid][step_num] = max(0.0, new_var)
                     if new_var < self._var_threshold:
                         effective_lr = self.lr * max(new_var / self._var_threshold, self._min_var_ratio)
