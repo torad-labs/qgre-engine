@@ -20,6 +20,8 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 
+from qgre.types import TrainingContext
+
 
 class QualityMLP(nn.Module):
     """Small MLP that predicts a single quality score from pooled hidden states."""
@@ -124,6 +126,7 @@ class VPRMCritic(nn.Module):
         self,
         hidden_states: torch.Tensor,
         regions: list[str],
+        ctx: TrainingContext,
         use_target: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Predict baselines for each quality from region-pooled hidden states.
@@ -131,6 +134,7 @@ class VPRMCritic(nn.Module):
         Args:
             hidden_states: [seq_len, hidden_dim] — DETACHED from training graph
             regions: [seq_len] — region label per token (from segmenter)
+            ctx: TrainingContext — provides device and dtype for tensor operations
             use_target: if True, use slow-moving target heads for stable predictions
 
         Returns:
@@ -150,7 +154,7 @@ class VPRMCritic(nn.Module):
                     region_ids_list.append(-1)
             else:
                 region_ids_list.append(-1)
-        region_ids = torch.tensor(region_ids_list, device=hidden_states.device)
+        region_ids = torch.tensor(region_ids_list, device=ctx.device)
         region_pools: dict[str, torch.Tensor] = {}
         for step_id in step_ids_present:
             mask = (region_ids == step_id).float()
@@ -167,7 +171,8 @@ class VPRMCritic(nn.Module):
             region_step = self._quality_to_region[q_name]
             region_key = f"STEP_{region_step}"
             if region_key in region_pools:
-                pooled = region_pools[region_key].unsqueeze(0)  # [1, hidden_dim]
+                # C04-NUMERICAL: Cast pooled hidden states to ctx.dtype before MLP
+                pooled = region_pools[region_key].to(dtype=ctx.dtype).unsqueeze(0)  # [1, hidden_dim]
                 out = heads[q_name](pooled)
                 predictions[q_name] = out.squeeze() if out.numel() == 1 else out.squeeze(0).squeeze(0)
             else:
@@ -190,6 +195,7 @@ class VPRMCritic(nn.Module):
         hidden_states: torch.Tensor,
         regions: list[str],
         actual_rewards: dict[str, float],
+        ctx: TrainingContext,
     ) -> tuple[dict[str, float], dict[str, torch.Tensor]]:
         """Compute per-quality advantages and critic losses.
 
@@ -197,6 +203,7 @@ class VPRMCritic(nn.Module):
             hidden_states: [seq_len, hidden_dim] — DETACHED
             regions: [seq_len] — from segmenter
             actual_rewards: quality_name → actual reward score
+            ctx: TrainingContext — provides device and dtype for tensor operations
 
         Returns:
             (advantages, critic_losses):
@@ -207,9 +214,10 @@ class VPRMCritic(nn.Module):
         step_ids_present = sorted({
             int(r.split("_")[1]) for r in regions if r.startswith("STEP_")
         })
+        # C01-DEVICE: Use ctx.device for tensor creation
         region_ids = torch.tensor(
             [int(r.split("_")[1]) if r.startswith("STEP_") else -1 for r in regions],
-            device=hidden_states.device,
+            device=ctx.device,
         )
         region_pools: dict[str, torch.Tensor] = {}
         for step_id in step_ids_present:
@@ -255,7 +263,8 @@ class VPRMCritic(nn.Module):
                 advantages[q_name] = 0.0
                 continue
 
-            pooled = region_pools[region_key].unsqueeze(0)
+            # C04-NUMERICAL: Cast pooled hidden states to ctx.dtype before MLP
+            pooled = region_pools[region_key].to(dtype=ctx.dtype).unsqueeze(0)
 
             # Target prediction for stable advantage
             target_pred = self.target_heads[q_name](pooled).squeeze(0).squeeze(0)
@@ -280,7 +289,8 @@ class VPRMCritic(nn.Module):
                     warnings.warn(f"Critic head '{q_name}' has requires_grad=False — no loss recorded, critic will not learn")
                     self._no_grad_warned.add(q_name)
             if online_pred.requires_grad:
-                reward_target = torch.tensor(actual, device=online_pred.device, dtype=online_pred.dtype)
+                # C01-DEVICE: Use ctx.device for tensor creation
+                reward_target = torch.tensor(actual, device=ctx.device, dtype=online_pred.dtype)
                 critic_losses[q_name] = (online_pred - reward_target) ** 2
 
         return advantages, critic_losses
@@ -290,6 +300,7 @@ class VPRMCritic(nn.Module):
         batch_hidden_states: list[torch.Tensor],
         batch_regions: list[list[str]],
         batch_rewards: list[dict[str, float]],
+        ctx: TrainingContext,
         spo_fallback_mask: list[bool] | None = None,
     ) -> tuple[list[dict[str, float]], torch.Tensor]:
         """Batch version: compute advantages and total critic loss.
@@ -298,13 +309,13 @@ class VPRMCritic(nn.Module):
             batch_hidden_states: list of [seq_len, hidden_dim] tensors (DETACHED)
             batch_regions: list of region label lists
             batch_rewards: list of quality_name → actual reward dicts
+            ctx: TrainingContext — provides device and dtype for tensor operations
             spo_fallback_mask: per-sample bool — True means skip critic, use SPO
 
         Returns:
             (batch_advantages, total_critic_loss)
         """
         batch_advantages: list[dict[str, float]] = []
-        device = batch_hidden_states[0].device if batch_hidden_states else "cpu"
         all_losses: list[torch.Tensor] = []
 
         for i, (hs, regions, rewards) in enumerate(
@@ -314,14 +325,15 @@ class VPRMCritic(nn.Module):
                 batch_advantages.append({q: 0.0 for q in self.quality_names})
                 continue
 
-            advs, losses = self.compute_advantages(hs, regions, rewards)
+            advs, losses = self.compute_advantages(hs, regions, rewards, ctx)
             batch_advantages.append(advs)
             all_losses.extend(losses.values())
 
         if all_losses:
             total_loss = torch.stack(all_losses).mean()
         else:
-            total_loss = torch.tensor(0.0, device=device)
+            # C01-DEVICE: Use ctx.device for tensor creation
+            total_loss = torch.tensor(0.0, device=ctx.device)
 
         return batch_advantages, total_loss
 

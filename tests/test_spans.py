@@ -4,7 +4,7 @@ import torch
 import pytest
 
 from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
-from qgre.types import RewardResult
+from qgre.types import RewardResult, TrainingContext
 
 
 # --- Mock tokenizer for testing ---
@@ -28,6 +28,12 @@ def simple_tokenizer():
     """Tokenizer where each character is one token."""
     vocab = {chr(i): i for i in range(32, 127)}  # ASCII printable
     return MockTokenizer(vocab)
+
+
+@pytest.fixture
+def training_ctx():
+    """Minimal TrainingContext for testing."""
+    return TrainingContext(device=torch.device("cpu"))
 
 
 # --- build_char_to_token_map tests ---
@@ -72,14 +78,14 @@ class TestCharToTokenMap:
 # --- scored_spans_to_token_masks tests ---
 
 class TestScoredSpansToTokenMasks:
-    def test_single_span(self, simple_tokenizer):
+    def test_single_span(self, simple_tokenizer, training_ctx):
         text = "V = kx + mgx"
         token_ids = simple_tokenizer.encode(text)
         char_map = build_char_to_token_map(token_ids, simple_tokenizer)
         assert char_map is not None
 
         spans = {"q_V_correct": [(0, 6)]}  # "V = kx"
-        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids))
+        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids), training_ctx)
 
         assert "q_V_correct" in masks
         assert masks["q_V_correct"].shape == (len(token_ids),)
@@ -87,41 +93,41 @@ class TestScoredSpansToTokenMasks:
         assert masks["q_V_correct"][:6].sum() == 6.0
         assert masks["q_V_correct"][6:].sum() == 0.0
 
-    def test_multiple_spans_same_quality(self, simple_tokenizer):
+    def test_multiple_spans_same_quality(self, simple_tokenizer, training_ctx):
         text = "H = a, then H = b"
         token_ids = simple_tokenizer.encode(text)
         char_map = build_char_to_token_map(token_ids, simple_tokenizer)
 
         # Two H expressions
         spans = {"q_correct_H": [(0, 5), (12, 18)]}  # "H = a" and " H = b"
-        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids))
+        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids), training_ctx)
 
         mask = masks["q_correct_H"]
         assert mask[0:5].sum() == 5.0  # First span
         assert mask[12:18].sum() >= 5.0  # Second span (boundary token may vary)
         assert mask[5:12].sum() == 0.0  # Gap between
 
-    def test_full_completion_span(self, simple_tokenizer):
+    def test_full_completion_span(self, simple_tokenizer, training_ctx):
         text = "full text here"
         token_ids = simple_tokenizer.encode(text)
         char_map = build_char_to_token_map(token_ids, simple_tokenizer)
 
         spans = {"q_format": [(0, len(text))]}
-        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids))
+        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids), training_ctx)
 
         # All tokens should be 1.0
         assert masks["q_format"].sum() == len(token_ids)
 
-    def test_empty_spans(self, simple_tokenizer):
+    def test_empty_spans(self, simple_tokenizer, training_ctx):
         text = "test"
         token_ids = simple_tokenizer.encode(text)
         char_map = build_char_to_token_map(token_ids, simple_tokenizer)
 
         spans = {"q_correct_H": []}
-        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids))
+        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids), training_ctx)
         assert masks["q_correct_H"].sum() == 0.0
 
-    def test_overlapping_qualities(self, simple_tokenizer):
+    def test_overlapping_qualities(self, simple_tokenizer, training_ctx):
         text = "H = T + V"
         token_ids = simple_tokenizer.encode(text)
         char_map = build_char_to_token_map(token_ids, simple_tokenizer)
@@ -130,7 +136,7 @@ class TestScoredSpansToTokenMasks:
             "q_correct_H": [(0, 9)],  # Whole expression
             "q_T_uses_p": [(4, 5)],   # Just "T"
         }
-        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids))
+        masks = scored_spans_to_token_masks(spans, char_map, len(token_ids), training_ctx)
 
         # Token 4 ("T") should be in BOTH masks
         assert masks["q_correct_H"][4] == 1.0

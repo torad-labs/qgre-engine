@@ -21,7 +21,7 @@ from qgre.nemo_extracted.llds import compute_llds_loss
 from qgre.nemo_extracted.logits import logprobs_from_logits
 from qgre.nemo_extracted.loss_functions import ClippedPGLossFn
 from qgre.segments import Segmenter, uniform_segmenter
-from qgre.types import GameState, RewardResult
+from qgre.types import CHECKPOINT_SCHEMA_VERSION, GameState, RewardResult, TrainingContext
 
 
 class GenerationBackend(Protocol):
@@ -216,6 +216,11 @@ class QGRETrainer:
         self._log_attention = config.training.log_attention_patterns
         self._attention_log_freq = config.training.attention_log_freq
         self._attention_log = []  # Per-step attention statistics
+
+        # Training context — device, dtype, step counter (created once, reused across training)
+        # Device inference: use model's device or fallback to cuda
+        _device = next((p.device for p in model.parameters() if p.device.type != "cpu"), torch.device("cuda"))
+        self.ctx = TrainingContext.from_config(config, device=str(_device))
 
     @property
     def completion_logger(self):
@@ -441,7 +446,7 @@ class QGRETrainer:
                     # Build char→token map directly from original token_ids (no re-encoding)
                     char_map = build_char_to_token_map(completions[i], self.tokenizer)
                     if char_map is not None:
-                        masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]))
+                        masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]), self.ctx)
                     else:
                         import logging
                         logging.getLogger(__name__).error(
@@ -481,6 +486,7 @@ class QGRETrainer:
                     group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
                     frontier_steps=frontier_steps,
                     batch_contexts=batch_contexts,
+                    ctx=self.ctx,
                 )
                 # Still run segmenter for VPRM critic (needs STEP_N regions for hidden-state pooling)
                 # and KL region weights
@@ -497,6 +503,7 @@ class QGRETrainer:
                 group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
                 frontier_steps=frontier_steps,
                 batch_contexts=batch_contexts,
+                ctx=self.ctx,
             )
 
         # Build full sequences on model device.
@@ -613,6 +620,7 @@ class QGRETrainer:
                         phase=self.game_state.phase,
                     )
                 self.global_step += 1
+                self.ctx.step = self.global_step
                 return metrics
             if useful.sum() >= 2 and useful.sum() < len(completions):
                 idx = useful.nonzero(as_tuple=True)[0]
@@ -823,6 +831,7 @@ class QGRETrainer:
                         min_regions=self.config.vprm.spo_fallback_min_regions,
                         aspiration_beta=self.advantage_estimator._aspiration_beta * batch_contexts[orig_i].aspiration_warmup if orig_i < len(batch_contexts) else 0.0,
                         aspiration_target=batch_contexts[orig_i].aspiration_target if orig_i < len(batch_contexts) else 0.8,
+                        ctx=self.ctx,
                     )
 
                     if used_critic:
@@ -1205,6 +1214,7 @@ class QGRETrainer:
                 phase=self.game_state.phase,
             )
         self.global_step += 1
+        self.ctx.step = self.global_step
         return metrics
 
     def save(self, path: str | Path | None = None):
@@ -1225,6 +1235,7 @@ class QGRETrainer:
             vprm_optimizer_state=self.vprm_optimizer.state_dict() if self.vprm_optimizer else None,
             accumulated_loss=self._accumulated_loss,  # TRN-R2-1: Save accumulation state
             dataloader_state=self._dataloader.state_dict() if self._dataloader else None,
+            training_context=self.ctx.to_dict(),
         )
 
     def resume(self, checkpoint_dir: str | Path) -> bool:
@@ -1377,6 +1388,15 @@ class QGRETrainer:
         # DI1: Store dataloader state for restore in train() when dataloader is available
         self._pending_dataloader_state = checkpoint.get("dataloader_state")
         self._accumulation_count = 0  # Reset count on resume (loss already accumulated)
+
+        # Restore training context (device, dtype, step)
+        if checkpoint.get("training_context"):
+            self.ctx = TrainingContext.from_dict(checkpoint["training_context"])
+        else:
+            # Fallback: reconstruct from global_step if not in checkpoint (backward compat)
+            _device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), torch.device("cuda"))
+            self.ctx = TrainingContext.from_config(self.config, device=str(_device))
+            self.ctx.step = self.global_step
 
         # TRN-R2-5: Set _resumed_mid_accumulation flag when resuming mid-accumulation
         n_accum = self.config.training.gradient_accumulation_steps
@@ -1708,6 +1728,7 @@ class QGRETrainer:
                         # Sync noisy weights to vLLM via Weight Sync Bus
                         weight_bus.sync(
                             backend.weight_exporter, backend.weight_loader, self.model,
+                            ctx=self.ctx,
                             modules_to_save=self.config.model.modules_to_save,
                         )
 
@@ -1721,6 +1742,7 @@ class QGRETrainer:
                 ):
                     weight_bus.sync(
                         backend.weight_exporter, backend.weight_loader, self.model,
+                        ctx=self.ctx,
                         modules_to_save=self.config.model.modules_to_save,
                     )
                     self._needs_weight_sync = False
@@ -1885,6 +1907,7 @@ class QGRETrainer:
                 if backend.weight_loader is not None and generation_succeeded:
                     weight_bus.sync(
                         backend.weight_exporter, backend.weight_loader, self.model,
+                        ctx=self.ctx,
                         modules_to_save=self.config.model.modules_to_save,
                     )
 

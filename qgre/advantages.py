@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import warnings
 from collections import defaultdict
 from typing import Callable
@@ -9,7 +10,9 @@ import torch
 
 from qgre.segments import Segmenter, segmenter_region_count, uniform_segmenter
 from qgre.spans import REPETITION_MARKER
-from qgre.types import PromptContext, RewardResult
+from qgre.types import PromptContext, RewardResult, TrainingContext
+
+_logger = logging.getLogger(__name__)
 
 # Penalty multiplier for repeated spans (applied to abs(q_adv))
 # 1.5 means repeating gives -1.5 * |q_adv| regardless of sign
@@ -64,7 +67,7 @@ def broadcast_step_advantages_to_tokens(
     regions: list[str],
     region_extra_steps: dict[int, list[int]],
     sample_idx: int | None = None,
-    device: str | torch.device | None = None,
+    ctx: TrainingContext | None = None,
 ) -> torch.Tensor:
     """Broadcast per-step advantages to per-token by region label.
 
@@ -76,7 +79,7 @@ def broadcast_step_advantages_to_tokens(
         regions: per-token region labels from segmenter
         region_extra_steps: region_step → [virtual steps mapped to it]
         sample_idx: when step_advs values are batch tensors, index into them
-        device: Target device for output tensor (default: infer from step_advs or use cuda/cpu)
+        ctx: TrainingContext for device and dtype
     """
     # Pre-build label → advantage value map from unique regions (O(n_labels) string ops)
     # then do O(seq_len) dict lookups instead of per-token string parsing
@@ -103,7 +106,7 @@ def broadcast_step_advantages_to_tokens(
                     ]
                     label_to_adv[region] = torch.stack(contribs_tensors).sum()
                 else:
-                    ref_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    ref_device = ctx.device if ctx is not None else "cpu"
                     contribs_tensors = [
                         c if isinstance(c, torch.Tensor) else torch.tensor(c, device=ref_device)
                         for c in contribs
@@ -114,15 +117,27 @@ def broadcast_step_advantages_to_tokens(
             label_to_adv[region] = val[sample_idx] if sample_idx is not None else val
 
     seq_len = len(regions)
-    # Infer device from step_advs values (may be Tensor or float)
-    inferred_device = None
-    for val in step_advs.values():
-        if isinstance(val, torch.Tensor):
-            inferred_device = val.device
-            break
+    # Use ctx.device if available, otherwise infer from step_advs tensors
+    device = ctx.device if ctx is not None else None
     if device is None:
-        device = inferred_device if inferred_device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
-    token_advs = torch.zeros(seq_len, device=device)
+        for val in step_advs.values():
+            if isinstance(val, torch.Tensor):
+                device = val.device
+                break
+        if device is None:
+            device = "cpu"
+
+    # C05-SHAPE: Validate ctx.device matches input tensor device before ops
+    if ctx is not None:
+        for val in step_advs.values():
+            if isinstance(val, torch.Tensor) and val.device != ctx.device:
+                raise ValueError(
+                    f"C05-SHAPE: Input tensor device {val.device} does not match ctx.device {ctx.device}"
+                )
+
+    # C04-NUMERICAL: Use ctx.dtype for advantage tensor creation
+    dtype = ctx.dtype if ctx is not None else torch.float32
+    token_advs = torch.zeros(seq_len, device=device, dtype=dtype)
     for t, region in enumerate(regions):
         if region in label_to_adv:
             token_advs[t] = label_to_adv[region]
@@ -315,6 +330,7 @@ class QGREStepAdvantageEstimator:
         group_size: int | None = None,
         frontier_steps: set[int] | None = None,
         batch_contexts: list[PromptContext] | None = None,
+        ctx: TrainingContext | None = None,
     ) -> tuple[list[torch.Tensor], list[list[str]]]:
         """Compute per-token advantages via segment → step rewards → SPO/GRPO → GDPO → broadcast.
 
@@ -394,7 +410,7 @@ class QGREStepAdvantageEstimator:
         batch_advantages: list[torch.Tensor] = []
         for i in range(batch_size):
             token_advs = broadcast_step_advantages_to_tokens(
-                step_advs, all_regions[i], self._region_extra_steps, sample_idx=i,
+                step_advs, all_regions[i], self._region_extra_steps, sample_idx=i, ctx=ctx,
             )
             batch_advantages.append(token_advs)
 
@@ -689,6 +705,7 @@ class QGREStepAdvantageEstimator:
         group_size: int | None = None,
         frontier_steps: set[int] | None = None,
         batch_contexts: list[PromptContext] | None = None,
+        ctx: TrainingContext | None = None,
     ) -> tuple[list[torch.Tensor], dict[str, dict[str, float]]]:
         """Compute per-token advantages using PER-QUALITY span-based token masks.
 
@@ -773,15 +790,26 @@ class QGREStepAdvantageEstimator:
 
         for i in range(batch_size):
             seq_len = len(batch_token_ids[i])
-            # A2-1: Use CUDA if available, then check masks for device override
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            if batch_token_masks[i]:
+            # Use ctx.device if available, otherwise infer from batch_token_masks
+            device = ctx.device if ctx is not None else "cpu"
+            if ctx is None and batch_token_masks[i]:
                 first_mask = next(iter(batch_token_masks[i].values()), None)
                 if first_mask is not None and isinstance(first_mask, torch.Tensor):
                     device = first_mask.device
 
-            token_advs = torch.zeros(seq_len, device=device)
-            overlap_count = torch.zeros(seq_len, device=device)
+            # C05-SHAPE: Validate ctx.device matches input tensor device before ops
+            if ctx is not None and batch_token_masks[i]:
+                first_mask = next(iter(batch_token_masks[i].values()), None)
+                if first_mask is not None and isinstance(first_mask, torch.Tensor):
+                    if first_mask.device != ctx.device:
+                        raise ValueError(
+                            f"C05-SHAPE: Input mask device {first_mask.device} does not match ctx.device {ctx.device}"
+                        )
+
+            # C04-NUMERICAL: Use ctx.dtype for advantage tensor creation
+            dtype = ctx.dtype if ctx is not None else torch.float32
+            token_advs = torch.zeros(seq_len, device=device, dtype=dtype)
+            overlap_count = torch.zeros(seq_len, device=device, dtype=dtype)
             masks = batch_token_masks[i]
 
             # RL3-008: Track skipped qualities and raise if all skipped due to SHAPE MISMATCH
@@ -904,6 +932,7 @@ def compute_advantages_vprm(
     min_regions: int = 2,
     aspiration_beta: float = 0.0,
     aspiration_target: float = 0.0,
+    ctx: "TrainingContext | None" = None,
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     """Compute per-token advantages using VPRM critic for a single sample.
 
@@ -914,7 +943,17 @@ def compute_advantages_vprm(
         - used_critic: True if critic was used, False if SPO fallback
     """
     seq_len = hidden_states.shape[0]
-    device = hidden_states.device
+    # C01-DEVICE: Use ctx.device when available, fallback to hidden_states.device
+    # This prevents device mismatch when hidden_states is on different device than ctx
+    device = ctx.device if ctx is not None else hidden_states.device
+
+    # C05-SHAPE: Validate hidden_states device matches ctx.device when ctx provided
+    if ctx is not None and hidden_states.device != ctx.device:
+        warnings.warn(
+            f"C05-SHAPE: hidden_states on {hidden_states.device} but ctx.device={ctx.device}. "
+            "Moving to ctx.device. Check upstream tensor placement."
+        )
+        hidden_states = hidden_states.to(ctx.device)
 
     # Check if enough regions for critic — else SPO fallback
     n_regions = segmenter_region_count(regions)
@@ -940,7 +979,7 @@ def compute_advantages_vprm(
 
     # Compute advantages via critic (hidden states must be DETACHED)
     advs_dict, critic_losses = critic.compute_advantages(
-        hidden_states.detach(), regions, actual_rewards,
+        hidden_states.detach(), regions, actual_rewards, ctx=ctx,
     )
 
     # Build reverse map: region_step → [virtual steps that map to it]
@@ -1001,7 +1040,7 @@ def compute_advantages_vprm(
 
     # Broadcast to tokens
     token_advantages = broadcast_step_advantages_to_tokens(
-        step_advs, regions, region_extra_steps,
+        step_advs, regions, region_extra_steps, ctx=ctx,
     ).to(device)
 
     # Total critic loss

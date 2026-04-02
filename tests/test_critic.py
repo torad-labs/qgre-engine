@@ -5,6 +5,7 @@ import pytest
 
 from qgre.critic import VPRMCritic, QualityMLP
 from qgre.config import QGREConfig, VPRMConfig
+from qgre.types import TrainingContext
 
 
 # --- Fixtures ---
@@ -17,6 +18,12 @@ STEP_QUALITIES = {
 }
 
 HIDDEN_DIM = 256  # Small for fast tests
+
+
+@pytest.fixture
+def ctx():
+    """TrainingContext for tests — CPU device."""
+    return TrainingContext(device=torch.device("cpu"), dtype=torch.float32, step=0)
 
 
 @pytest.fixture
@@ -84,30 +91,30 @@ class TestCriticConstruction:
 # --- Forward pass tests ---
 
 class TestCriticForward:
-    def test_returns_prediction_per_quality(self, critic, sample_hidden_states, sample_regions):
-        preds = critic(sample_hidden_states, sample_regions)
+    def test_returns_prediction_per_quality(self, critic, sample_hidden_states, sample_regions, ctx):
+        preds = critic(sample_hidden_states, sample_regions, ctx=ctx)
         assert set(preds.keys()) == set(critic.quality_names)
 
-    def test_predictions_are_scalar(self, critic, sample_hidden_states, sample_regions):
-        preds = critic(sample_hidden_states, sample_regions)
+    def test_predictions_are_scalar(self, critic, sample_hidden_states, sample_regions, ctx):
+        preds = critic(sample_hidden_states, sample_regions, ctx=ctx)
         for v in preds.values():
             assert v.dim() == 0  # scalar
 
-    def test_missing_region_returns_none(self, critic):
+    def test_missing_region_returns_none(self, critic, ctx):
         """When a quality's region is missing, prediction should be None (AE5)."""
         hs = torch.randn(50, HIDDEN_DIM)
         regions = ["STEP_1"] * 50  # Only STEP_1, missing 2-4
-        preds = critic(hs, regions)
+        preds = critic(hs, regions, ctx=ctx)
         # Qualities mapped to STEP_2, 3, 4 should get None (missing region)
         assert preds["q_momentum_defined"] is None
         assert preds["q_correct_H"] is None
         # STEP_1 qualities should produce predictions (may be zero by chance at init)
 
-    def test_think_and_other_regions_ignored(self, critic):
+    def test_think_and_other_regions_ignored(self, critic, ctx):
         """THINK and OTHER regions should not affect predictions."""
         hs = torch.randn(60, HIDDEN_DIM)
         regions = ["THINK"] * 10 + ["STEP_1"] * 20 + ["OTHER"] * 10 + ["STEP_2"] * 20
-        preds = critic(hs, regions)
+        preds = critic(hs, regions, ctx=ctx)
         # Should still produce predictions for STEP_1 and STEP_2
         assert "q_format" in preds
         assert "q_momentum_defined" in preds
@@ -116,49 +123,49 @@ class TestCriticForward:
 # --- Advantage computation tests ---
 
 class TestCriticAdvantages:
-    def test_advantage_shape(self, critic, sample_hidden_states, sample_regions):
+    def test_advantage_shape(self, critic, sample_hidden_states, sample_regions, ctx):
         rewards = {q: 0.8 for q in critic.quality_names}
-        advs, losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards)
+        advs, losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards, ctx=ctx)
         assert set(advs.keys()) == set(critic.quality_names)
         assert all(isinstance(v, float) for v in advs.values())
         assert all(isinstance(v, torch.Tensor) for v in losses.values())
 
-    def test_advantage_clipping(self, critic, sample_hidden_states, sample_regions):
+    def test_advantage_clipping(self, critic, sample_hidden_states, sample_regions, ctx):
         """Advantages should be clipped to [-clip, +clip]."""
         # Use extreme reward to trigger clipping
         rewards = {q: 100.0 for q in critic.quality_names}
-        advs, _ = critic.compute_advantages(sample_hidden_states, sample_regions, rewards)
+        advs, _ = critic.compute_advantages(sample_hidden_states, sample_regions, rewards, ctx=ctx)
         for q, adv in advs.items():
             assert abs(adv) <= critic.clip_advantage + 0.01
 
-    def test_critic_loss_is_mse(self, critic, sample_hidden_states, sample_regions):
+    def test_critic_loss_is_mse(self, critic, sample_hidden_states, sample_regions, ctx):
         """Critic loss should be MSE between prediction and actual reward."""
         rewards = {"q_format": 0.9, "q_has_math": 0.5}
-        _, losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards)
+        _, losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards, ctx=ctx)
         # Loss for each quality should be non-negative
         for loss in losses.values():
             assert loss.item() >= 0.0
 
-    def test_critic_loss_decreases_with_training(self, critic, sample_hidden_states, sample_regions):
+    def test_critic_loss_decreases_with_training(self, critic, sample_hidden_states, sample_regions, ctx):
         """Critic loss should decrease after gradient updates."""
         torch.manual_seed(42)
         rewards = {q: 0.7 for q in critic.quality_names}
         optimizer = torch.optim.Adam(critic.parameters(), lr=1e-3)
 
         # Measure initial loss
-        _, initial_losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards)
+        _, initial_losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards, ctx=ctx)
         initial_total = sum(l.item() for l in initial_losses.values())
 
         # Train for a few steps
         for _ in range(50):
-            _, losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards)
+            _, losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards, ctx=ctx)
             total = sum(losses.values())
             total.backward()
             optimizer.step()
             optimizer.zero_grad()
 
         # Measure final loss
-        _, final_losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards)
+        _, final_losses = critic.compute_advantages(sample_hidden_states, sample_regions, rewards, ctx=ctx)
         final_total = sum(l.item() for l in final_losses.values())
 
         assert final_total < initial_total, f"Critic loss should decrease: {initial_total:.4f} → {final_total:.4f}"
@@ -167,20 +174,20 @@ class TestCriticAdvantages:
 # --- Batch computation tests ---
 
 class TestBatchAdvantages:
-    def test_batch_returns_correct_count(self, critic, sample_hidden_states, sample_regions):
+    def test_batch_returns_correct_count(self, critic, sample_hidden_states, sample_regions, ctx):
         batch_hs = [sample_hidden_states] * 4
         batch_regions = [sample_regions] * 4
         batch_rewards = [{q: 0.5 for q in critic.quality_names}] * 4
-        advs, loss = critic.compute_batch_advantages(batch_hs, batch_regions, batch_rewards)
+        advs, loss = critic.compute_batch_advantages(batch_hs, batch_regions, batch_rewards, ctx=ctx)
         assert len(advs) == 4
 
-    def test_spo_fallback_mask(self, critic, sample_hidden_states, sample_regions):
+    def test_spo_fallback_mask(self, critic, sample_hidden_states, sample_regions, ctx):
         """SPO fallback mask should zero out advantages for masked samples."""
         batch_hs = [sample_hidden_states] * 3
         batch_regions = [sample_regions] * 3
         batch_rewards = [{q: 0.5 for q in critic.quality_names}] * 3
         fallback = [False, True, False]  # Sample 1 uses SPO fallback
-        advs, _ = critic.compute_batch_advantages(batch_hs, batch_regions, batch_rewards, fallback)
+        advs, _ = critic.compute_batch_advantages(batch_hs, batch_regions, batch_rewards, ctx=ctx, spo_fallback_mask=fallback)
         # Sample 1 should have all-zero advantages
         assert all(v == 0.0 for v in advs[1].values())
         # Samples 0 and 2 should have critic-computed advantages (may be zero by chance)
@@ -189,12 +196,12 @@ class TestBatchAdvantages:
 # --- Checkpoint / state dict tests ---
 
 class TestCriticCheckpoint:
-    def test_state_dict_roundtrip(self, critic, sample_hidden_states, sample_regions):
+    def test_state_dict_roundtrip(self, critic, sample_hidden_states, sample_regions, ctx):
         """Save and restore should produce identical predictions."""
-        preds_before = critic(sample_hidden_states, sample_regions)
+        preds_before = critic(sample_hidden_states, sample_regions, ctx=ctx)
         state = critic.state_dict_with_meta()
         restored = VPRMCritic.from_checkpoint(state)
-        preds_after = restored(sample_hidden_states, sample_regions)
+        preds_after = restored(sample_hidden_states, sample_regions, ctx=ctx)
         for q in critic.quality_names:
             assert torch.allclose(preds_before[q], preds_after[q])
 
@@ -239,7 +246,7 @@ vprm:
 # --- Integration with advantages.py ---
 
 class TestVPRMAdvantagesIntegration:
-    def test_compute_advantages_vprm(self, critic, sample_hidden_states, sample_regions):
+    def test_compute_advantages_vprm(self, critic, sample_hidden_states, sample_regions, ctx):
         """Test the standalone compute_advantages_vprm function."""
         from qgre.advantages import compute_advantages_vprm
         from qgre.types import RewardResult
@@ -256,13 +263,14 @@ class TestVPRMAdvantagesIntegration:
             reward_result=rewards,
             step_qualities=STEP_QUALITIES,
             active_qualities=list(critic.quality_names),
+            ctx=ctx,
         )
 
         assert advs.shape == (100,)
         assert used is True
         assert loss.item() >= 0.0
 
-    def test_spo_fallback_when_single_region(self, critic):
+    def test_spo_fallback_when_single_region(self, critic, ctx):
         """When only 1 region exists, should fall back to SPO."""
         from qgre.advantages import compute_advantages_vprm
         from qgre.types import RewardResult
@@ -279,6 +287,7 @@ class TestVPRMAdvantagesIntegration:
             step_qualities=STEP_QUALITIES,
             active_qualities=["q_format"],
             min_regions=2,
+            ctx=ctx,
         )
 
         assert used is False

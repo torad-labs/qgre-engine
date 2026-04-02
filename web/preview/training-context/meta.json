@@ -1,0 +1,13 @@
+{
+  "title": "TrainingContext",
+  "slug": "training-context",
+  "type": "study",
+  "subtitle": "Centralized device/dtype context to eliminate 18+ bug classes from independent tensor placement decisions",
+  "date": "2026-04-02",
+  "status": "draft",
+  "audio": false,
+  "reef": null,
+  "source": "feature-crystallize product",
+  "derivatives": [],
+  "connections": []
+}

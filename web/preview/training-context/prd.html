@@ -1,0 +1,709 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Implementation Plan — TrainingContext</title>
+    <style>
+:root {
+    --bg: #fafaf8;
+    --card: #ffffff;
+    --card-border: #e4e2dc;
+    --text: #1a1a1a;
+    --text-muted: #6b6b6b;
+    --accent: #0e8a7e;
+    --accent-dim: #b4dfda;
+    --amber: #c47a10;
+    --amber-dim: #f5e6c8;
+    --red-soft: #b84040;
+    --red-soft-dim: #e8c4c4;
+    --indigo: #4a5dbd;
+    --indigo-dim: #d8daf0;
+    --survived: #eaf5f3;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+}
+
+.container {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+.hero {
+    padding: 80px 0 48px;
+    border-bottom: 1px solid var(--card-border);
+}
+.hero-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    color: var(--accent);
+}
+.hero h1 {
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    margin-bottom: 14px;
+}
+.hero .subtitle {
+    font-size: 18px;
+    color: var(--text-muted);
+    max-width: 580px;
+}
+
+section {
+    padding: 56px 0;
+    border-bottom: 1px solid var(--card-border);
+}
+section:last-of-type { border-bottom: none; }
+.section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+section h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    letter-spacing: -0.3px;
+}
+section h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 36px;
+    margin-bottom: 16px;
+    color: var(--text);
+}
+section p { color: var(--text); margin-bottom: 16px; }
+section p.muted { color: var(--text-muted); font-size: 15px; }
+
+.nav-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 32px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+.nav-back:hover { color: var(--text); }
+.nav-back .arrow { font-size: 16px; }
+
+.page-footer {
+    padding: 40px 0 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.idea-card {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 28px 32px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.idea-card p {
+    font-size: 17px;
+    line-height: 1.7;
+    margin-bottom: 0;
+}
+.idea-card em { font-style: normal; font-weight: 600; color: var(--accent); }
+
+.code-block {
+    background: #1e1e1e;
+    border-radius: 10px;
+    padding: 24px 28px;
+    margin: 20px 0;
+    overflow-x: auto;
+}
+.code-block pre {
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    color: #d4d4d4;
+    margin: 0;
+}
+.code-block .keyword { color: #569cd6; }
+.code-block .type { color: #4ec9b0; }
+.code-block .string { color: #ce9178; }
+.code-block .comment { color: #6a9955; }
+.code-block .decorator { color: #dcdcaa; }
+
+.components-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-top: 20px;
+}
+.component-card {
+    padding: 16px 18px;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.component-card.new { border-left: 3px solid var(--accent); }
+.component-card.modify { border-left: 3px solid var(--amber); }
+.component-tag {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+.component-tag.new { color: var(--accent); }
+.component-tag.modify { color: var(--amber); }
+.component-card h4 { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+.component-card p { font-size: 13px; color: var(--text-muted); margin: 0; line-height: 1.45; }
+
+.flow-diagram {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 28px 32px;
+    margin: 20px 0;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.8;
+    color: var(--text);
+    overflow-x: auto;
+}
+.flow-diagram .arrow { color: var(--accent); }
+.flow-diagram .node { color: var(--text); font-weight: 600; }
+.flow-diagram .branch { color: var(--text-muted); }
+
+.sequence-list {
+    list-style: none;
+    margin-top: 20px;
+    counter-reset: seq;
+}
+.sequence-list li {
+    position: relative;
+    padding: 20px 24px 20px 64px;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.sequence-list li::before {
+    counter-increment: seq;
+    content: counter(seq);
+    position: absolute;
+    left: 20px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    color: white;
+    border-radius: 50%;
+    font-size: 13px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.sequence-list li h4 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+.sequence-list li p { font-size: 14px; color: var(--text-muted); margin: 0; }
+.sequence-list li .deps { font-size: 12px; color: var(--amber); margin-top: 8px; }
+
+.quality-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 8px;
+}
+.quality-row {
+    display: grid;
+    grid-template-columns: 140px 1fr 44px;
+    align-items: center;
+    gap: 16px;
+}
+.quality-label { font-size: 14px; font-weight: 500; color: var(--text); }
+.quality-bar-track {
+    height: 8px;
+    background: var(--card);
+    border-radius: 100px;
+    overflow: hidden;
+    border: 1px solid var(--card-border);
+}
+.quality-bar-fill {
+    height: 100%;
+    border-radius: 100px;
+    transition: width 1.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.quality-bar-fill.strong { background: var(--accent); }
+.quality-bar-fill.good { background: #3a9e94; }
+.quality-bar-fill.adequate { background: var(--amber); }
+.quality-bar-fill.weak { background: var(--red-soft); }
+.quality-score {
+    font-size: 14px;
+    font-weight: 600;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.quality-score.strong { color: var(--accent); }
+.quality-score.good { color: #3a9e94; }
+.quality-score.adequate { color: var(--amber); }
+.quality-score.weak { color: var(--red-soft); }
+
+.decision-points {
+    margin-top: 20px;
+}
+.decision-item {
+    padding: 18px 22px;
+    background: var(--amber-dim);
+    border: 1px solid var(--amber);
+    border-radius: 10px;
+    margin-bottom: 12px;
+}
+.decision-item h4 { font-size: 14px; font-weight: 600; color: var(--amber); margin-bottom: 6px; }
+.decision-item p { font-size: 14px; color: var(--text); margin: 0; line-height: 1.5; }
+
+.antibody-critical {
+    margin-top: 28px;
+    padding: 32px 36px;
+    background: var(--card);
+    border: 2px solid var(--accent-dim);
+    border-radius: 12px;
+    box-shadow: 0 4px 16px rgba(14, 138, 126, 0.1);
+}
+.antibody-critical .ab-label {
+    font-size: 11px;
+    font-weight: 800;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 16px;
+}
+.antibody-critical h3 { font-size: 20px; font-weight: 700; margin: 0 0 16px; color: var(--text); }
+
+.antibody-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+.antibody-row {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 0;
+    background: var(--survived);
+    border: 1px solid var(--accent-dim);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.ab-failure-side { padding: 16px 20px; background: #f5eaea; }
+.ab-prevention-side { padding: 16px 20px; background: var(--survived); }
+.ab-failure-label, .ab-prevention-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+.ab-failure-label { color: var(--red-soft); }
+.ab-prevention-label { color: var(--accent); }
+.ab-failure-side p, .ab-prevention-side p { font-size: 14px; margin: 0; line-height: 1.5; }
+.ab-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    color: var(--accent);
+    font-size: 16px;
+    background: var(--card);
+}
+
+.surprise-card {
+    padding: 22px;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    position: relative;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+    margin-top: 20px;
+}
+.surprise-card::before {
+    content: "!";
+    position: absolute;
+    top: -10px;
+    left: 18px;
+    background: var(--amber);
+    color: #fff;
+    font-size: 11px;
+    font-weight: 800;
+    padding: 2px 10px;
+    border-radius: 100px;
+}
+.surprise-card h4 {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 8px;
+    color: var(--text);
+    line-height: 1.35;
+}
+.surprise-card p {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin: 0;
+    line-height: 1.55;
+}
+
+@media (max-width: 640px) {
+    .hero h1 { font-size: 28px; }
+    .hero { padding: 48px 0 36px; }
+    section { padding: 40px 0; }
+    .components-grid { grid-template-columns: 1fr; }
+    .quality-row { grid-template-columns: 110px 1fr 40px; }
+    .antibody-row { grid-template-columns: 1fr; }
+    .ab-arrow {
+        width: 100%;
+        height: 32px;
+        transform: rotate(90deg);
+    }
+}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="hero">
+            <div class="hero-label">Implementation Plan</div>
+            <h1>What to Build</h1>
+            <p class="subtitle">Architecture, components, data flow, and build sequence for the TrainingContext feature.</p>
+        </header>
+
+        <section>
+            <div class="section-label">Core Type</div>
+            <h2>TrainingContext Dataclass</h2>
+
+            <div class="idea-card">
+                <p>A simple dataclass with <em>device</em>, <em>dtype</em>, <em>step</em>, and <em>checkpoint_schema_version</em>. Created once by QGRETrainer, passed explicitly to all tensor-creating components. No ambient state, no thread-locals, no magic.</p>
+            </div>
+
+            <div class="code-block">
+<pre><span class="decorator">@dataclass</span>
+<span class="keyword">class</span> <span class="type">TrainingContext</span>:
+    device: torch.device
+    dtype: torch.dtype = torch.float32
+    step: <span class="type">int</span> = 0
+    checkpoint_schema_version: <span class="type">int</span> = 1
+
+    <span class="decorator">@classmethod</span>
+    <span class="keyword">def</span> from_config(cls, config: <span class="type">QGREConfig</span>, device: <span class="type">str</span> = <span class="string">"cuda"</span>) -> <span class="string">"TrainingContext"</span>:
+        <span class="keyword">return</span> cls(
+            device=torch.device(device),
+            dtype=getattr(torch, config.dtype, torch.float32),
+            step=0,
+            checkpoint_schema_version=CHECKPOINT_SCHEMA_VERSION,
+        )
+
+    <span class="keyword">def</span> to_dict(self) -> <span class="type">dict</span>:
+        <span class="comment"># For checkpoint serialization</span>
+        <span class="keyword">return</span> {<span class="string">"device"</span>: str(self.device), <span class="string">"dtype"</span>: str(self.dtype), ...}
+
+    <span class="decorator">@classmethod</span>
+    <span class="keyword">def</span> from_dict(cls, d: <span class="type">dict</span>) -> <span class="string">"TrainingContext"</span>:
+        <span class="comment"># For checkpoint restore with validation</span>
+        ...</pre>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Components</div>
+            <h2>Files to Create and Modify</h2>
+
+            <div class="components-grid">
+                <div class="component-card new">
+                    <div class="component-tag new">New</div>
+                    <h4>qgre/types.py</h4>
+                    <p>Add TrainingContext dataclass + CHECKPOINT_SCHEMA_VERSION constant</p>
+                </div>
+                <div class="component-card modify">
+                    <div class="component-tag modify">Modify</div>
+                    <h4>qgre/trainer.py</h4>
+                    <p>Create ctx in __init__, pass to components, serialize in checkpoint</p>
+                </div>
+                <div class="component-card modify">
+                    <div class="component-tag modify">Modify</div>
+                    <h4>qgre/advantages.py</h4>
+                    <p>Receive ctx, use ctx.device instead of torch.cuda.is_available()</p>
+                </div>
+                <div class="component-card modify">
+                    <div class="component-tag modify">Modify</div>
+                    <h4>qgre/critic.py</h4>
+                    <p>Receive ctx, use ctx.device and ctx.dtype for tensor creation</p>
+                </div>
+                <div class="component-card modify">
+                    <div class="component-tag modify">Modify</div>
+                    <h4>qgre/spans.py</h4>
+                    <p>Receive ctx for mask tensor creation</p>
+                </div>
+                <div class="component-card modify">
+                    <div class="component-tag modify">Modify</div>
+                    <h4>qgre/checkpoint.py</h4>
+                    <p>Serialize schema_version, validate on restore</p>
+                </div>
+                <div class="component-card modify">
+                    <div class="component-tag modify">Modify</div>
+                    <h4>qgre/weight_load.py</h4>
+                    <p>Receive ctx for dtype consistency</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Data Flow</div>
+            <h2>How Context Propagates</h2>
+
+            <div class="flow-diagram">
+<span class="node">QGREConfig</span>
+    <span class="arrow">↓</span>
+<span class="node">TrainingContext.from_config(config)</span>
+    <span class="arrow">↓</span>
+<span class="node">QGRETrainer.__init__</span> stores <span class="node">self.ctx</span>
+    <span class="arrow">↓</span>
+    <span class="branch">├→</span> <span class="node">QGREStepAdvantageEstimator(ctx=self.ctx)</span>
+    <span class="branch">├→</span> <span class="node">VPRMCritic(ctx=self.ctx)</span>
+    <span class="branch">├→</span> <span class="node">WeightBus(ctx=self.ctx)</span>
+    <span class="branch">└→</span> Each training step: <span class="node">ctx.step += 1</span>
+          <span class="arrow">↓</span>
+          <span class="branch">└→</span> <span class="node">checkpoint.save</span> includes <span class="node">ctx.to_dict()</span>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Build Sequence</div>
+            <h2>Implementation Order</h2>
+
+            <ol class="sequence-list">
+                <li>
+                    <h4>Foundation: qgre/types.py</h4>
+                    <p>Add TrainingContext dataclass + CHECKPOINT_SCHEMA_VERSION constant. No dependencies.</p>
+                </li>
+                <li>
+                    <h4>Core: qgre/trainer.py</h4>
+                    <p>Create self.ctx in __init__, update ctx.step each training step, pass to components.</p>
+                    <div class="deps">Depends on: Phase 1</div>
+                </li>
+                <li>
+                    <h4>Consumers (parallel)</h4>
+                    <p>Update advantages.py, critic.py, spans.py, weight_load.py to receive and use ctx.</p>
+                    <div class="deps">Depends on: Phase 2</div>
+                </li>
+                <li>
+                    <h4>Persistence: qgre/checkpoint.py</h4>
+                    <p>Serialize ctx.to_dict() in checkpoint, validate schema_version on restore.</p>
+                    <div class="deps">Depends on: Phases 1-2</div>
+                </li>
+                <li>
+                    <h4>Cleanup</h4>
+                    <p>Remove all torch.cuda.is_available() device inference scattered throughout codebase.</p>
+                    <div class="deps">Depends on: Phases 3-4</div>
+                </li>
+            </ol>
+        </section>
+
+        <section>
+            <div class="section-label">Open Decisions</div>
+            <h2>What Still Needs Evidence</h2>
+            <p class="muted">These elements are flagged as uncertain — decide during implementation based on real usage patterns.</p>
+
+            <div class="decision-points">
+                <div class="decision-item">
+                    <h4>Helper Methods (uncertainty: 0.5)</h4>
+                    <p>Should we add ctx.zeros(shape), ctx.tensor(data) convenience wrappers? Start minimal with ctx.device only. Add helpers when 3+ call sites repeat the same pattern.</p>
+                </div>
+                <div class="decision-item">
+                    <h4>Schema Migration (uncertainty: 0.4)</h4>
+                    <p>What happens when schema_version mismatches on checkpoint restore? Options: raise error, auto-migrate, warn and continue. Recommend: raise clear error with migration instructions.</p>
+                </div>
+                <div class="decision-item">
+                    <h4>Step Mutability (uncertainty: 0.3)</h4>
+                    <p>Mutate ctx.step in-place or create new ctx per step? Either works. Recommend: mutate in-place for simplicity.</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Quality Profile</div>
+            <h2>Measurement Results</h2>
+
+            <div class="quality-grid">
+                <div class="quality-row">
+                    <span class="quality-label">Resonance</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 90%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.90</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">Diffusion</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 80%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.80</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">Gradient</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 85%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.85</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">Annealing</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 70%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.70</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">Entropy</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 80%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.80</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">Phase Transition</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 75%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.75</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">Antibody</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 95%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.95</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">Fascia</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 90%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.90</span>
+                </div>
+                <div class="quality-row">
+                    <span class="quality-label">KL Divergence</span>
+                    <div class="quality-bar-track">
+                        <div class="quality-bar-fill strong" style="width: 85%;"></div>
+                    </div>
+                    <span class="quality-score strong">0.85</span>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Immune Memory</div>
+            <h2>Patterns Deposited</h2>
+
+            <div class="antibody-critical">
+                <div class="ab-label">Immunity Built</div>
+                <h3>Training Pulls Overridden</h3>
+
+                <div class="antibody-grid">
+                    <div class="antibody-row">
+                        <div class="ab-failure-side">
+                            <div class="ab-failure-label">Training pull</div>
+                            <p>Thread-local ambient context</p>
+                        </div>
+                        <div class="ab-arrow">&rarr;</div>
+                        <div class="ab-prevention-side">
+                            <div class="ab-prevention-label">Evidence choice</div>
+                            <p>Explicit parameter passing</p>
+                        </div>
+                    </div>
+                    <div class="antibody-row">
+                        <div class="ab-failure-side">
+                            <div class="ab-failure-label">Training pull</div>
+                            <p>Protocol/interface hierarchy</p>
+                        </div>
+                        <div class="ab-arrow">&rarr;</div>
+                        <div class="ab-prevention-side">
+                            <div class="ab-prevention-label">Evidence choice</div>
+                            <p>Simple dataclass</p>
+                        </div>
+                    </div>
+                    <div class="antibody-row">
+                        <div class="ab-failure-side">
+                            <div class="ab-failure-label">Training pull</div>
+                            <p>Full helper API surface</p>
+                        </div>
+                        <div class="ab-arrow">&rarr;</div>
+                        <div class="ab-prevention-side">
+                            <div class="ab-prevention-label">Evidence choice</div>
+                            <p>Minimal ctx.device only</p>
+                        </div>
+                    </div>
+                    <div class="antibody-row">
+                        <div class="ab-failure-side">
+                            <div class="ab-failure-label">Training pull</div>
+                            <p>Singleton instance pattern</p>
+                        </div>
+                        <div class="ab-arrow">&rarr;</div>
+                        <div class="ab-prevention-side">
+                            <div class="ab-prevention-label">Evidence choice</div>
+                            <p>Factory + explicit ownership</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Emergence</div>
+            <h2>What Surprised Us</h2>
+
+            <div class="surprise-card">
+                <h4>The strength of the ambient context pull</h4>
+                <p>Thread-local "elegant" patterns felt obviously right until the evidence from 43 hardening bugs made clear: invisible state is the enemy. The explicit, slightly-verbose parameter passing that felt like "boilerplate" is actually the architectural choice that prevents entire bug classes.</p>
+            </div>
+        </section>
+
+        <a href="index.html" class="nav-back">
+            <span class="arrow">&larr;</span>
+            Back to overview
+        </a>
+
+        <footer class="page-footer">
+            Generated by feature-crystallize skill &middot; 2026-04-02
+        </footer>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const bars = document.querySelectorAll('.quality-bar-fill');
+            setTimeout(() => {
+                bars.forEach(bar => {
+                    const width = bar.style.width;
+                    bar.style.width = '0';
+                    requestAnimationFrame(() => {
+                        bar.style.width = width;
+                    });
+                });
+            }, 100);
+        });
+    </script>
+</body>
+</html>

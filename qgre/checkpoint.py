@@ -4,7 +4,7 @@ import re
 from collections import defaultdict, deque
 from pathlib import Path
 
-from qgre.types import QUALITY_WINDOW_SIZE, GameState
+from qgre.types import CHECKPOINT_SCHEMA_VERSION, QUALITY_WINDOW_SIZE, GameState
 
 
 def gamestate_to_dict(gs: GameState) -> dict:
@@ -131,11 +131,13 @@ def save_checkpoint(
     vprm_optimizer_state: dict | None = None,
     accumulated_loss: float = 0.0,
     dataloader_state: dict | None = None,
+    training_context: dict | None = None,
 ):
     """Save full training state to a checkpoint file."""
     import torch
 
     checkpoint = {
+        "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "global_step": global_step,
         "model_state_dict": model_state_dict,
         "optimizer_state_dict": optimizer_state_dict,
@@ -148,6 +150,7 @@ def save_checkpoint(
         "vprm_optimizer_state": vprm_optimizer_state,
         "accumulated_loss": accumulated_loss,
         "dataloader_state": dataloader_state,
+        "training_context": training_context,
     }
 
     path = Path(path)
@@ -185,13 +188,47 @@ def load_checkpoint(path: str | Path) -> dict:
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint file not found: {path}")
         checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+
+        # C06-SCHEMA: Validate schema_version
+        checkpoint_schema = checkpoint.get("schema_version")
+        if checkpoint_schema is None:
+            raise ValueError(
+                f"Checkpoint {path} missing schema_version. "
+                f"Cannot restore from checkpoint without version metadata. "
+                f"Expected schema_version={CHECKPOINT_SCHEMA_VERSION}"
+            )
+
+        # C07-TYPE: Explicit type coercion with validation
+        try:
+            checkpoint_schema = int(checkpoint_schema)
+        except (ValueError, TypeError) as e:
+            raise TypeError(
+                f"Checkpoint {path} has invalid schema_version type: {type(checkpoint_schema).__name__}. "
+                f"Expected int. Cannot safely restore checkpoint. Error: {e}"
+            ) from e
+
+        if checkpoint_schema != CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError(
+                f"Checkpoint schema version mismatch: checkpoint has version {checkpoint_schema}, "
+                f"but current code expects version {CHECKPOINT_SCHEMA_VERSION}. "
+                f"Cannot restore from incompatible checkpoint. "
+                f"Checkpoint path: {path}"
+            )
+
         # Validate required keys (but allow None values — trainer will check)
         required_keys = ["global_step"]
         for key in required_keys:
             if key not in checkpoint:
                 raise ValueError(f"Checkpoint missing required key: {key}")
-        if not isinstance(checkpoint["global_step"], int):
-            raise ValueError(f"Invalid type for global_step: {type(checkpoint['global_step'])}")
+
+        # C07-TYPE: Explicit type coercion for global_step
+        try:
+            checkpoint["global_step"] = int(checkpoint["global_step"])
+        except (ValueError, TypeError) as e:
+            raise TypeError(
+                f"Checkpoint {path} has invalid global_step type: {type(checkpoint['global_step']).__name__}. "
+                f"Expected int. Error: {e}"
+            ) from e
 
         # CP2-002: Wrap gamestate_from_dict in try-except with informative error
         if checkpoint.get("game_state") is not None:
@@ -227,13 +264,48 @@ def load_checkpoint(path: str | Path) -> dict:
                 prev_path = max(candidates, key=lambda x: x[0])[1]
                 warnings.warn(f"Loading previous checkpoint: {prev_path}")
                 checkpoint = torch.load(prev_path, map_location="cpu", weights_only=False)
+
+                # C06-SCHEMA: Validate schema_version for fallback checkpoint
+                checkpoint_schema = checkpoint.get("schema_version")
+                if checkpoint_schema is None:
+                    raise ValueError(
+                        f"Fallback checkpoint {prev_path} missing schema_version. "
+                        f"Cannot restore from checkpoint without version metadata. "
+                        f"Expected schema_version={CHECKPOINT_SCHEMA_VERSION}"
+                    )
+
+                # C07-TYPE: Explicit type coercion with validation
+                try:
+                    checkpoint_schema = int(checkpoint_schema)
+                except (ValueError, TypeError) as e:
+                    raise TypeError(
+                        f"Fallback checkpoint {prev_path} has invalid schema_version type: {type(checkpoint_schema).__name__}. "
+                        f"Expected int. Cannot safely restore checkpoint. Error: {e}"
+                    ) from e
+
+                if checkpoint_schema != CHECKPOINT_SCHEMA_VERSION:
+                    raise ValueError(
+                        f"Fallback checkpoint schema version mismatch: checkpoint has version {checkpoint_schema}, "
+                        f"but current code expects version {CHECKPOINT_SCHEMA_VERSION}. "
+                        f"Cannot restore from incompatible checkpoint. "
+                        f"Checkpoint path: {prev_path}"
+                    )
+
                 # C2-4: Validate fallback checkpoint
                 required_keys = ["global_step"]
                 for key in required_keys:
                     if key not in checkpoint:
                         raise ValueError(f"Fallback checkpoint missing required key: {key}")
-                if not isinstance(checkpoint["global_step"], int):
-                    raise ValueError(f"Invalid type for global_step in fallback: {type(checkpoint['global_step'])}")
+
+                # C07-TYPE: Explicit type coercion for global_step
+                try:
+                    checkpoint["global_step"] = int(checkpoint["global_step"])
+                except (ValueError, TypeError) as e:
+                    raise TypeError(
+                        f"Fallback checkpoint {prev_path} has invalid global_step type: {type(checkpoint['global_step']).__name__}. "
+                        f"Expected int. Error: {e}"
+                    ) from e
+
                 if checkpoint.get("game_state") is not None:
                     try:
                         checkpoint["game_state"] = gamestate_from_dict(checkpoint["game_state"])

@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boundaries — TrainingContext</title>
+    <style>
+:root {
+    --bg: #fafaf8;
+    --card: #ffffff;
+    --card-border: #e4e2dc;
+    --text: #1a1a1a;
+    --text-muted: #6b6b6b;
+    --accent: #0e8a7e;
+    --accent-dim: #b4dfda;
+    --amber: #c47a10;
+    --amber-dim: #f5e6c8;
+    --red-soft: #b84040;
+    --red-soft-dim: #e8c4c4;
+    --indigo: #4a5dbd;
+    --indigo-dim: #d8daf0;
+    --survived: #eaf5f3;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+}
+
+.container {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+.hero {
+    padding: 80px 0 48px;
+    border-bottom: 1px solid var(--card-border);
+}
+.hero-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    color: var(--red-soft);
+}
+.hero h1 {
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    margin-bottom: 14px;
+}
+.hero .subtitle {
+    font-size: 18px;
+    color: var(--text-muted);
+    max-width: 580px;
+}
+
+section {
+    padding: 56px 0;
+    border-bottom: 1px solid var(--card-border);
+}
+section:last-of-type { border-bottom: none; }
+.section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+section h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    letter-spacing: -0.3px;
+}
+section h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 36px;
+    margin-bottom: 16px;
+    color: var(--text);
+}
+section p { color: var(--text); margin-bottom: 16px; }
+section p.muted { color: var(--text-muted); font-size: 15px; }
+
+.nav-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 32px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+.nav-back:hover { color: var(--text); }
+.nav-back .arrow { font-size: 16px; }
+
+.page-footer {
+    padding: 40px 0 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.assumptions-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+.assumption-card {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 0;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.assumed, .found { padding: 22px 24px; }
+.assumed { background: #fdf6f6; }
+.found { background: #f2faf9; }
+.assumed-label, .found-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+.assumed-label { color: var(--red-soft); }
+.found-label { color: var(--accent); }
+.assumed p {
+    color: var(--text-muted);
+    text-decoration: line-through;
+    text-decoration-color: rgba(196, 92, 92, 0.4);
+    font-size: 15px;
+    margin: 0;
+}
+.found p { color: var(--text); font-size: 15px; margin: 0; }
+.arrow-divider {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 48px;
+    color: var(--card-border);
+    font-size: 18px;
+    background: var(--card);
+}
+
+.findings-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 20px;
+}
+.finding-item {
+    padding: 22px 26px;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-left: 3px solid var(--red-soft);
+    border-radius: 0 10px 10px 0;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+.finding-item h4 {
+    font-size: 15px;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--red-soft);
+}
+.finding-item p {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin: 0;
+    line-height: 1.55;
+}
+
+.root-cause-card {
+    margin-top: 28px;
+    padding: 32px 36px;
+    border-left: 5px solid var(--red-soft);
+    border-radius: 0 12px 12px 0;
+    background: #fdf6f6;
+    border: 2px solid var(--red-soft-dim);
+}
+.root-cause-card .rc-label {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+    color: var(--red-soft);
+}
+.root-cause-card h3 { font-size: 20px; font-weight: 700; margin: 0 0 14px; color: var(--text); }
+.root-cause-card p { font-size: 16px; color: var(--text); margin: 0 0 12px; line-height: 1.65; }
+.root-cause-card p:last-child { margin-bottom: 0; }
+
+@media (max-width: 640px) {
+    .hero h1 { font-size: 28px; }
+    .hero { padding: 48px 0 36px; }
+    section { padding: 40px 0; }
+    .assumption-card {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto auto auto;
+    }
+    .arrow-divider {
+        width: 100%;
+        height: 32px;
+        font-size: 14px;
+        transform: rotate(90deg);
+    }
+}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="hero">
+            <div class="hero-label">Boundaries</div>
+            <h1>What Not to Do</h1>
+            <p class="subtitle">Assumptions overturned, anti-patterns identified, and training pulls that were resisted during crystallization.</p>
+        </header>
+
+        <section>
+            <div class="section-label">Assumptions Overturned</div>
+            <h2>What We Thought vs What Evidence Showed</h2>
+            <p class="muted">Each assumption below was the training default — the first thing that felt right. Evidence pointed elsewhere.</p>
+
+            <div class="assumptions-grid">
+                <div class="assumption-card">
+                    <div class="assumed">
+                        <div class="assumed-label">We assumed</div>
+                        <p>Thread-local ambient context is elegant and safe — functions call get_current_context() invisibly</p>
+                    </div>
+                    <div class="arrow-divider">&rarr;</div>
+                    <div class="found">
+                        <div class="found-label">Evidence showed</div>
+                        <p>Invisible state caused 18+ bugs. Explicit parameter passing makes dependencies visible and errors obvious.</p>
+                    </div>
+                </div>
+
+                <div class="assumption-card">
+                    <div class="assumed">
+                        <div class="assumed-label">We assumed</div>
+                        <p>A proper type hierarchy with HasContext protocol and inheritance is needed</p>
+                    </div>
+                    <div class="arrow-divider">&rarr;</div>
+                    <div class="found">
+                        <div class="found-label">Evidence showed</div>
+                        <p>Simple dataclass is sufficient. Composition over inheritance. No ceremony without value.</p>
+                    </div>
+                </div>
+
+                <div class="assumption-card">
+                    <div class="assumed">
+                        <div class="assumed-label">We assumed</div>
+                        <p>Wrap everything in convenient helpers: ctx.zeros(), ctx.tensor(), ctx.randn(), etc.</p>
+                    </div>
+                    <div class="arrow-divider">&rarr;</div>
+                    <div class="found">
+                        <div class="found-label">Evidence showed</div>
+                        <p>API surface has maintenance cost. Start minimal with ctx.device only. Add helpers when patterns emerge.</p>
+                    </div>
+                </div>
+
+                <div class="assumption-card">
+                    <div class="assumed">
+                        <div class="assumed-label">We assumed</div>
+                        <p>TrainingContext.instance() singleton — one global context is simple</p>
+                    </div>
+                    <div class="arrow-divider">&rarr;</div>
+                    <div class="found">
+                        <div class="found-label">Evidence showed</div>
+                        <p>Explicit ownership via factory method aids debugging. Trainer creates and owns the context.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Anti-Patterns</div>
+            <h2>What to Avoid</h2>
+            <p class="muted">Patterns that feel right but cause the exact problems we're trying to solve.</p>
+
+            <div class="findings-grid">
+                <div class="finding-item">
+                    <h4>Invisible State</h4>
+                    <p>Any pattern where tensor device/dtype is inferred rather than explicit. This includes thread-locals, module-level globals, and "smart" defaults that guess based on other tensors. If you can't see where the device comes from by reading the function signature, it's invisible state.</p>
+                </div>
+
+                <div class="finding-item">
+                    <h4>Distributed Device Inference</h4>
+                    <p>N independent decisions that must all agree: <code>torch.cuda.is_available()</code> checks scattered throughout the codebase. Each one is a potential disagreement. Replace with single source of truth.</p>
+                </div>
+
+                <div class="finding-item">
+                    <h4>Ad-hoc Type Coercion on Checkpoint Restore</h4>
+                    <p>Scattered <code>int()</code>, <code>float()</code>, and <code>.get()</code> calls for checkpoint fields. Each is a potential silent corruption. Schema versioning with explicit validation is the fix.</p>
+                </div>
+
+                <div class="finding-item">
+                    <h4>Premature Convenience Wrappers</h4>
+                    <p>Adding <code>ctx.zeros()</code>, <code>ctx.tensor()</code>, <code>ctx.randn()</code>, <code>ctx.ones()</code> before usage patterns emerge. Each wrapper is API surface that must be maintained. Start with <code>ctx.device</code> and <code>ctx.dtype</code> — add helpers only when 3+ call sites repeat the same pattern.</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Root Cause</div>
+            <h2>Why These Bugs Existed</h2>
+
+            <div class="root-cause-card">
+                <div class="rc-label">Architectural Weakness</div>
+                <h3>No Centralized Device/Dtype Context</h3>
+                <p>Each component independently infers tensor placement, creating N independent decisions that must all agree. When components are written by different people at different times, they make different assumptions. Some check <code>torch.cuda.is_available()</code>, some infer from input tensors, some have hardcoded defaults.</p>
+                <p>The result: 18+ bugs across 3 hardening rounds, all variations of "tensor ended up on wrong device" or "checkpoint field had wrong type after restore."</p>
+            </div>
+        </section>
+
+        <a href="index.html" class="nav-back">
+            <span class="arrow">&larr;</span>
+            Back to overview
+        </a>
+
+        <footer class="page-footer">
+            Generated by feature-crystallize skill &middot; 2026-04-02
+        </footer>
+    </div>
+</body>
+</html>

@@ -9,7 +9,97 @@ from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from enum import Enum
 
+import torch
+
 logger = logging.getLogger(__name__)
+
+
+CHECKPOINT_SCHEMA_VERSION: int = 1
+
+
+@dataclass
+class TrainingContext:
+    """Training context — device, dtype, step counter, and checkpoint schema version.
+
+    Passed explicitly through the pipeline (no thread-local/global state).
+    Provides device/dtype for tensor construction and tracks training progress.
+    """
+
+    device: torch.device
+    dtype: torch.dtype = torch.float32
+    step: int = 0
+    checkpoint_schema_version: int = CHECKPOINT_SCHEMA_VERSION
+
+    @classmethod
+    def from_config(cls, config, device: str = "cuda") -> TrainingContext:
+        """Factory method to construct TrainingContext from QGREConfig.
+
+        Args:
+            config: QGREConfig instance (unused in v1, reserved for future dtype config)
+            device: Device string ("cuda", "cpu", etc.)
+
+        Returns:
+            TrainingContext instance
+
+        Raises:
+            ValueError: If device string is invalid or unavailable
+        """
+        try:
+            device_obj = torch.device(device)
+        except RuntimeError as e:
+            raise ValueError(f"Invalid device string '{device}': {e}") from e
+
+        return cls(
+            device=device_obj,
+            dtype=torch.float32,
+            step=0,
+            checkpoint_schema_version=CHECKPOINT_SCHEMA_VERSION,
+        )
+
+    def to_dict(self) -> dict:
+        """Serialize to dict. Device is converted to string for JSON compatibility."""
+        return {
+            "device": str(self.device),
+            "dtype": str(self.dtype),
+            "step": self.step,
+            "checkpoint_schema_version": self.checkpoint_schema_version,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> TrainingContext:
+        """Deserialize from dict. Device string is converted back to torch.device.
+
+        Raises:
+            ValueError: If required keys are missing or device/dtype strings are invalid
+        """
+        # Validate required keys
+        required_keys = ["device", "dtype", "step"]
+        missing_keys = [key for key in required_keys if key not in d]
+        if missing_keys:
+            raise ValueError(f"Missing required keys in TrainingContext dict: {missing_keys}")
+
+        # Parse dtype string (e.g. "torch.float32" → torch.float32)
+        dtype_str = d["dtype"]
+        if dtype_str.startswith("torch."):
+            try:
+                dtype = getattr(torch, dtype_str.split(".", 1)[1])
+            except AttributeError as e:
+                raise ValueError(f"Invalid dtype string '{dtype_str}': {e}") from e
+        else:
+            raise ValueError(f"Invalid dtype string '{dtype_str}': expected 'torch.<dtype>' format")
+
+        # Validate device string
+        try:
+            device = torch.device(d["device"])
+        except RuntimeError as e:
+            raise ValueError(f"Invalid device string '{d['device']}': {e}") from e
+
+        return cls(
+            device=device,
+            dtype=dtype,
+            step=d["step"],
+            checkpoint_schema_version=d.get("checkpoint_schema_version", CHECKPOINT_SCHEMA_VERSION),
+        )
 
 
 class SkillStatus(Enum):

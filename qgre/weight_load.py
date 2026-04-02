@@ -16,6 +16,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from qgre.types import TrainingContext
+
 try:
     from qgre.lora_dropout import apply_lora_dropout
 except ImportError:
@@ -40,7 +42,7 @@ class WeightLoader:
         """The LoRARequest for vLLM fast_generate (set after first direct sync)."""
         return self._lora_request
 
-    def sync_lora_direct(self, model: nn.Module, first_call: bool = False) -> None:
+    def sync_lora_direct(self, model: nn.Module, ctx: TrainingContext, first_call: bool = False) -> None:
         """Copy LoRA A/B tensors directly into vLLM's stacked buffers.
 
         First call: registers adapter via load_lora + sets up GPU copy mappings.
@@ -48,6 +50,7 @@ class WeightLoader:
 
         Args:
             model: The PeftModel with trained LoRA weights
+            ctx: Training context for dtype/device validation
             first_call: True on first invocation (sets up mappings)
         """
         from unsloth_zoo.vllm_utils import prepare_vllm_lora_loading, load_lora_directly
@@ -87,7 +90,7 @@ class WeightLoader:
             # Fast path: direct GPU-to-GPU tensor copy
             load_lora_directly(model)
 
-    def sync_modules_to_save(self, weights: dict[str, torch.Tensor]) -> None:
+    def sync_modules_to_save(self, weights: dict[str, torch.Tensor], ctx: TrainingContext) -> None:
         """Copy lm_head/embed_tokens into vLLM's base model.
 
         vLLM's LoRA system ignores modules_to_save by design (vLLM PR #14978).
@@ -95,6 +98,7 @@ class WeightLoader:
 
         Args:
             weights: dict mapping "lm_head" / "embed_tokens" to weight tensors
+            ctx: Training context for dtype/device validation
         """
         vllm_model = self.get_vllm_model()
         if vllm_model is None:
@@ -122,6 +126,20 @@ class WeightLoader:
         synced = []
         try:
             for name, tensor in weights.items():
+                # C08-DTYPE: Validate tensor dtype matches ctx.dtype
+                if tensor.dtype != ctx.dtype:
+                    warnings.warn(
+                        f"C08-DTYPE: {name} weight dtype mismatch: tensor={tensor.dtype} vs ctx.dtype={ctx.dtype}. "
+                        "Converting to ctx.dtype."
+                    )
+
+                # C09-DEVICE: Validate tensor is on ctx.device before GPU copy
+                if tensor.device != ctx.device:
+                    raise RuntimeError(
+                        f"C09-DEVICE: {name} weight device mismatch: tensor on {tensor.device}, expected {ctx.device}. "
+                        "Weights must be on ctx.device before GPU-to-GPU copy."
+                    )
+
                 if name == "lm_head":
                     try:
                         target = vllm_model.lm_head.weight

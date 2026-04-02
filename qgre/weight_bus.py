@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     import torch.nn as nn
+    from qgre.types import TrainingContext
     from qgre.weight_export import WeightExporter
     from qgre.weight_load import WeightLoader
 
@@ -45,6 +46,7 @@ class WeightBus:
         exporter: WeightExporter,
         loader: WeightLoader,
         model: nn.Module,
+        ctx: "TrainingContext",
         modules_to_save: list[str] | None = None,
     ) -> None:
         """Push updated weights from training model to inference engine.
@@ -56,18 +58,19 @@ class WeightBus:
             exporter: WeightExporter instance
             loader: WeightLoader instance
             model: PEFT-wrapped training model
+            ctx: TrainingContext for device/dtype validation
             modules_to_save: Expected modules (e.g., ["lm_head"]). Warns if missing.
         """
         try:
             if self.strategy == SyncStrategy.MERGE:
                 exporter.merge_lora(model)
-                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
+                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save), ctx)
                 # MERGE modifies base weights in-place — flush vLLM KV cache to prevent stale keys/values
                 loader.flush_kv_cache()
             elif self.strategy == SyncStrategy.DIRECT_COPY:
-                loader.sync_lora_direct(model, first_call=not self._initialized)
+                loader.sync_lora_direct(model, ctx, first_call=not self._initialized)
                 # Get fresh state_dict inside sync_modules_to_save to avoid stale tensor references
-                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
+                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save), ctx)
 
             # Only set initialized=True after successful sync
             self._initialized = True

@@ -14,6 +14,8 @@ from typing import Any
 
 import torch
 
+from qgre.types import TrainingContext
+
 # Marker value for repeated spans. In spans.py, we use this as a marker.
 # The actual sign-aware penalty is applied in advantages.py.
 REPETITION_MARKER = -1.0
@@ -131,7 +133,7 @@ def build_char_to_token_map(
         if char_to_token[c] >= 0:
             last_valid = char_to_token[c]
         else:
-            char_to_token[c] = min(last_valid, seq_len - 1)
+            char_to_token[c] = min(last_valid, len(token_ids) - 1)
 
     return char_to_token
 
@@ -140,6 +142,7 @@ def scored_spans_to_token_masks(
     scored_spans: dict[str, list[tuple[int, int]]],
     char_to_token: list[int],
     seq_len: int,
+    ctx: TrainingContext,
     _clamped_count: list[int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Convert character-based scored_spans to per-token boolean masks.
@@ -148,6 +151,7 @@ def scored_spans_to_token_masks(
         scored_spans: quality_name → [(char_start, char_end), ...]
         char_to_token: char_idx → token_idx mapping (from build_char_to_token_map)
         seq_len: number of tokens in the completion
+        ctx: TrainingContext for device placement
         _clamped_count: Optional list to track clamped span count (mutable int workaround)
 
     Returns:
@@ -162,7 +166,7 @@ def scored_spans_to_token_masks(
     max_char = len(char_to_token)
 
     for quality_name, spans in scored_spans.items():
-        mask = torch.zeros(seq_len)
+        mask = torch.zeros(seq_len, device=ctx.device)
         # Reward FIRST span for each quality — later repetitions get penalized
         # The original answer is typically the correct one; repeats are noise
         # First span gets +1.0, later spans get REPETITION_MARKER penalty

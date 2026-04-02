@@ -3,10 +3,17 @@
 import torch
 import pytest
 from qgre.critic import VPRMCritic
+from qgre.types import TrainingContext
 
 
 STEP_QUALITIES = {1: ["q_format"], 5: ["q_correct_H"]}
 HIDDEN_DIM = 64
+
+
+@pytest.fixture
+def ctx():
+    """TrainingContext for tests — CPU device."""
+    return TrainingContext(device=torch.device("cpu"), dtype=torch.float32, step=0)
 
 
 @pytest.fixture
@@ -72,12 +79,12 @@ class TestSyncTargetToOnline:
 
 
 class TestTargetForAdvantages:
-    def test_target_predictions_stable_after_online_update(self, critic):
+    def test_target_predictions_stable_after_online_update(self, critic, ctx):
         hs = torch.randn(50, HIDDEN_DIM)
         regions = ["STEP_1"] * 25 + ["STEP_5"] * 25
 
         # Get target predictions before
-        preds_before = critic.forward(hs, regions, use_target=True)
+        preds_before = critic.forward(hs, regions, ctx=ctx, use_target=True)
         val_before = preds_before["q_format"].item()
 
         # Train online heads (simulate optimizer step)
@@ -86,17 +93,17 @@ class TestTargetForAdvantages:
 
         # Target predictions should barely change (tau=0.01)
         critic.update_target_network(tau=0.01)
-        preds_after = critic.forward(hs, regions, use_target=True)
+        preds_after = critic.forward(hs, regions, ctx=ctx, use_target=True)
         val_after = preds_after["q_format"].item()
 
         assert abs(val_after - val_before) < 0.1, "Target should move slowly"
 
-    def test_online_loss_not_from_target(self, critic):
+    def test_online_loss_not_from_target(self, critic, ctx):
         hs = torch.randn(50, HIDDEN_DIM)
         regions = ["STEP_1"] * 25 + ["STEP_5"] * 25
         rewards = {"q_format": 0.9, "q_correct_H": 0.4}
 
-        advs, losses = critic.compute_advantages(hs, regions, rewards)
+        advs, losses = critic.compute_advantages(hs, regions, rewards, ctx=ctx)
 
         # Losses should have requires_grad (from online heads)
         for loss in losses.values():
