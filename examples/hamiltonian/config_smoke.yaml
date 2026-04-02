@@ -1,0 +1,106 @@
+# Smoke test config — 50 steps only
+# Based on examples/hamiltonian/config.yaml
+
+model:
+  path: unsloth/Qwen3-1.7B-unsloth-bnb-4bit
+  lora_rank: 32
+  lora_alpha: 64
+  load_in_4bit: true
+  fast_inference: true
+  gpu_memory_utilization: 0.35
+  pad_token: "<|fim_pad|>"      # Must NOT be EOS, stop token, or vision-reserved
+  pad_token_id: 151662          # Qwen3 fim_pad — vision_pad blocked by Unsloth for text models
+  lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  modules_to_save: [lm_head]
+
+data:
+  train_files:
+    - examples/hamiltonian/data/train.parquet
+  max_prompt_length: 1024
+  train_batch_size: 4
+  prompt_column: prompt
+  system_prompt_column: system_prompt
+  metadata_columns:
+    - ground_truth
+    - H_expr
+    - T_expr
+    - V_expr
+    - dqdt
+    - dpdt
+    - coordinates
+    - difficulty
+    - system
+  difficulty_column: difficulty
+  tier_order: [tier1, tier2, tier3]
+  tier_advance_quality_phase: 4
+  tier_advance_threshold: 0.80
+  initial_tiers: [tier1]  # Start on tier1 (harder than tutorials)
+
+generation:
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.1
+  lora_dropout_rate: 0.0  # Disabled for smoke test (faster)
+  lora_dropout_anneal_steps: 0
+  max_tokens: 1024  # Shorter for probe (faster)
+  repetition_penalty: 1.0  # Disabled
+  stop_token_ids: [151643, 151645]
+
+algorithm:
+  mode: spo
+  spo:
+    lr: 0.01
+    n: 1
+    kl_adaptive: false
+  clip_ratio_low: 0.2
+  clip_ratio_high: 0.28
+  llds_coef: 0.05
+  loss_type: dr_grpo
+  segmenter: hamiltonian
+  length_penalty_coef: 0.005
+  length_penalty_threshold: 0.6
+  advantage_scale: 0.1  # 10x compression for gradient measurement
+
+  step_qualities:
+    1: [q_format, q_has_math]
+    2: [q_momentum_defined]
+    3: [q_T_uses_p]
+    4: [q_V_correct]
+    5: [q_correct_H]
+    6: [q_correct_dqdt, q_correct_dpdt, q_consistency]
+    7: [q_defines_momentum]
+    8: [q_T_in_momentum, q_H_in_momentum]
+    9: [q_correct_coefficient, q_derivative_correct]
+
+  step_region_map:
+    7: 2
+    8: 3
+    9: 6
+
+training:
+  total_steps: 25  # GRADIENT PROBE: 25 steps for measurement
+  lr: 5.0e-6
+  warmup_steps: 5
+  lr_scheduler: cosine
+  save_freq: 9999  # No checkpoints during probe
+  gradient_accumulation_steps: 1
+  mastery_threshold: 0.8
+  stagnation_timeout: 50
+  gradient_probe_steps: 25  # Capture lm_head weight deltas for all steps
+
+vprm:
+  enabled: true
+  intermediate_dim: 128
+  lr: 0.0001
+  clip_advantage: 5.0
+  spo_fallback_min_regions: 2
+
+tutorial:
+  enabled: false  # Disabled for smoke test
+
+logging:
+  mlflow_experiment: hamiltonian-smoke-test
+  completion_dir: output/hamiltonian-smoke/completions
+  checkpoint_dir: output/hamiltonian-smoke/checkpoints
+  grad_log_freq: 10
