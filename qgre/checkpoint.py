@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import re
+import warnings
 from collections import defaultdict, deque
+from dataclasses import asdict
 from pathlib import Path
 
-from qgre.types import CHECKPOINT_SCHEMA_VERSION, QUALITY_WINDOW_SIZE, GameState
+from qgre.types import (
+    CHECKPOINT_SCHEMA_VERSION,
+    QUALITY_WINDOW_SIZE,
+    AdvantageEstimatorState,
+    CheckpointState,
+    DataLoaderState,
+    GameState,
+    TrainerState,
+    WeightLoaderState,
+)
 
 
 def gamestate_to_dict(gs: GameState) -> dict:
@@ -133,25 +144,59 @@ def save_checkpoint(
     dataloader_state: dict | None = None,
     training_context: dict | None = None,
 ):
-    """Save full training state to a checkpoint file."""
+    """Save full training state to a checkpoint file using CheckpointState.
+
+    Builds CheckpointState from component states and serializes via dataclasses.asdict().
+    GameState is serialized via gamestate_to_dict for nested collections (deque).
+    """
     import torch
 
-    checkpoint = {
-        "schema_version": CHECKPOINT_SCHEMA_VERSION,
-        "global_step": global_step,
-        "model_state_dict": model_state_dict,
-        "optimizer_state_dict": optimizer_state_dict,
-        "scheduler_state_dict": scheduler_state_dict,
-        "game_state": gamestate_to_dict(game_state) if game_state else None,
-        "advantage_estimator_state": advantage_estimator_state,
-        "rng_state": rng_state if rng_state is not None else torch.get_rng_state(),
-        "cuda_rng_state": cuda_rng_state,
-        "vprm_critic_state": vprm_critic_state,
-        "vprm_optimizer_state": vprm_optimizer_state,
-        "accumulated_loss": accumulated_loss,
-        "dataloader_state": dataloader_state,
-        "training_context": training_context,
-    }
+    # Build TrainerState
+    trainer = TrainerState(
+        global_step=global_step,
+        accumulated_loss=accumulated_loss,
+        rng_state=rng_state if rng_state is not None else torch.get_rng_state(),
+        cuda_rng_state=cuda_rng_state,
+    )
+
+    # Build AdvantageEstimatorState
+    advantage_estimator = None
+    if advantage_estimator_state is not None:
+        advantage_estimator = AdvantageEstimatorState(state_dict=advantage_estimator_state)
+
+    # Build DataLoaderState
+    dataloader = None
+    if dataloader_state is not None:
+        dataloader = DataLoaderState(state_dict=dataloader_state)
+
+    # Build WeightLoaderState
+    weight_loader = None
+    if vprm_critic_state is not None or vprm_optimizer_state is not None:
+        weight_loader = WeightLoaderState(
+            vprm_critic_state=vprm_critic_state,
+            vprm_optimizer_state=vprm_optimizer_state,
+        )
+
+    # Build CheckpointState
+    checkpoint_state = CheckpointState(
+        schema_version=CHECKPOINT_SCHEMA_VERSION,
+        trainer=trainer,
+        game_state=game_state,  # Will be serialized below
+        model_state_dict=model_state_dict,
+        optimizer_state_dict=optimizer_state_dict,
+        scheduler_state_dict=scheduler_state_dict,
+        advantage_estimator=advantage_estimator,
+        dataloader=dataloader,
+        weight_loader=weight_loader,
+        training_context=training_context,
+    )
+
+    # Serialize to dict using dataclasses.asdict()
+    checkpoint = asdict(checkpoint_state)
+
+    # Special handling for GameState: convert deques to serializable format
+    if game_state is not None:
+        checkpoint["game_state"] = gamestate_to_dict(game_state)
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -173,82 +218,108 @@ def save_checkpoint(
         raise RuntimeError(f"Failed to save checkpoint to {path}: {e}") from e
 
 
-def load_checkpoint(path: str | Path) -> dict:
-    """Load checkpoint from file. Returns raw dict — caller restores state.
+def load_checkpoint(path: str | Path) -> CheckpointState:
+    """Load checkpoint from file. Returns CheckpointState with validation.
 
     Attempts to load from the specified path. If loading fails (corrupted checkpoint),
     tries loading from the previous checkpoint in the directory.
+
+    GameState deserialization happens here via gamestate_from_dict, then the
+    deserialized GameState is passed to CheckpointState.from_dict().
     """
     import torch
-    import warnings
     from pathlib import Path
 
     path = Path(path)
-    try:
-        if not path.exists():
-            raise FileNotFoundError(f"Checkpoint file not found: {path}")
-        checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+
+    def _load_and_validate(checkpoint_path: Path) -> CheckpointState:
+        """Load, validate, and deserialize checkpoint from path."""
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+
+        raw_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
         # C06-SCHEMA: Validate schema_version
-        checkpoint_schema = checkpoint.get("schema_version")
+        checkpoint_schema = raw_checkpoint.get("schema_version")
         if checkpoint_schema is None:
-            raise ValueError(
-                f"Checkpoint {path} missing schema_version. "
-                f"Cannot restore from checkpoint without version metadata. "
-                f"Expected schema_version={CHECKPOINT_SCHEMA_VERSION}"
+            warnings.warn(
+                f"Checkpoint {checkpoint_path} missing schema_version. "
+                f"Migrating to schema version {CHECKPOINT_SCHEMA_VERSION}.",
+                UserWarning
             )
+            checkpoint_schema = CHECKPOINT_SCHEMA_VERSION
+            raw_checkpoint["schema_version"] = checkpoint_schema
 
         # C07-TYPE: Explicit type coercion with validation
         try:
             checkpoint_schema = int(checkpoint_schema)
         except (ValueError, TypeError) as e:
             raise TypeError(
-                f"Checkpoint {path} has invalid schema_version type: {type(checkpoint_schema).__name__}. "
+                f"Checkpoint {checkpoint_path} has invalid schema_version type: {type(checkpoint_schema).__name__}. "
                 f"Expected int. Cannot safely restore checkpoint. Error: {e}"
             ) from e
 
         if checkpoint_schema != CHECKPOINT_SCHEMA_VERSION:
-            raise ValueError(
+            warnings.warn(
                 f"Checkpoint schema version mismatch: checkpoint has version {checkpoint_schema}, "
                 f"but current code expects version {CHECKPOINT_SCHEMA_VERSION}. "
-                f"Cannot restore from incompatible checkpoint. "
-                f"Checkpoint path: {path}"
+                f"Attempting migration. Checkpoint path: {checkpoint_path}",
+                UserWarning
             )
 
-        # Validate required keys (but allow None values — trainer will check)
-        required_keys = ["global_step"]
-        for key in required_keys:
-            if key not in checkpoint:
-                raise ValueError(f"Checkpoint missing required key: {key}")
+        # Validate required keys
+        # New format: global_step is nested in trainer dict
+        # Old format: global_step is at top level
+        has_global_step = (
+            "global_step" in raw_checkpoint or
+            ("trainer" in raw_checkpoint and isinstance(raw_checkpoint["trainer"], dict) and "global_step" in raw_checkpoint["trainer"])
+        )
+        if not has_global_step:
+            raise ValueError(f"Checkpoint missing required key: global_step (neither top-level nor in trainer)")
 
-        # C07-TYPE: Explicit type coercion for global_step
-        try:
-            checkpoint["global_step"] = int(checkpoint["global_step"])
-        except (ValueError, TypeError) as e:
-            raise TypeError(
-                f"Checkpoint {path} has invalid global_step type: {type(checkpoint['global_step']).__name__}. "
-                f"Expected int. Error: {e}"
-            ) from e
+        # C07-TYPE: Explicit type coercion for global_step (old format only)
+        # New format handles this in from_dict()
+        if "global_step" in raw_checkpoint:
+            try:
+                raw_checkpoint["global_step"] = int(raw_checkpoint["global_step"])
+            except (ValueError, TypeError) as e:
+                raise TypeError(
+                    f"Checkpoint {checkpoint_path} has invalid global_step type: {type(raw_checkpoint['global_step']).__name__}. "
+                    f"Expected int. Error: {e}"
+                ) from e
 
         # CP2-002: Wrap gamestate_from_dict in try-except with informative error
-        if checkpoint.get("game_state") is not None:
+        if raw_checkpoint.get("game_state") is not None:
             try:
-                checkpoint["game_state"] = gamestate_from_dict(checkpoint["game_state"])
+                raw_checkpoint["game_state"] = gamestate_from_dict(raw_checkpoint["game_state"])
             except Exception as e:
                 raise RuntimeError(
-                    f"Failed to restore game_state from checkpoint {path}. "
+                    f"Failed to restore game_state from checkpoint {checkpoint_path}. "
                     f"Checkpoint may be corrupted or from incompatible version. "
                     f"Original error: {e}"
                 ) from e
-        return checkpoint
+
+        # Deserialize into CheckpointState
+        try:
+            checkpoint_state = CheckpointState.from_dict(raw_checkpoint)
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to deserialize checkpoint {checkpoint_path} into CheckpointState. "
+                f"Original error: {e}"
+            ) from e
+
+        return checkpoint_state
+
+    try:
+        return _load_and_validate(path)
     except Exception as e:
         warnings.warn(
             f"Failed to load checkpoint from {path}: {e}. "
-            "Attempting to load previous checkpoint..."
+            "Attempting to load previous checkpoint...",
+            UserWarning
         )
         # Try to find previous checkpoint
         checkpoint_dir = Path(path).parent
-        import re
         pattern = re.compile(r"global_step_(\d+)")
         match = pattern.search(Path(path).name)
         if match:
@@ -262,59 +333,8 @@ def load_checkpoint(path: str | Path) -> dict:
                         candidates.append((int(m.group(1)), entry))
             if candidates:
                 prev_path = max(candidates, key=lambda x: x[0])[1]
-                warnings.warn(f"Loading previous checkpoint: {prev_path}")
-                checkpoint = torch.load(prev_path, map_location="cpu", weights_only=False)
-
-                # C06-SCHEMA: Validate schema_version for fallback checkpoint
-                checkpoint_schema = checkpoint.get("schema_version")
-                if checkpoint_schema is None:
-                    raise ValueError(
-                        f"Fallback checkpoint {prev_path} missing schema_version. "
-                        f"Cannot restore from checkpoint without version metadata. "
-                        f"Expected schema_version={CHECKPOINT_SCHEMA_VERSION}"
-                    )
-
-                # C07-TYPE: Explicit type coercion with validation
-                try:
-                    checkpoint_schema = int(checkpoint_schema)
-                except (ValueError, TypeError) as e:
-                    raise TypeError(
-                        f"Fallback checkpoint {prev_path} has invalid schema_version type: {type(checkpoint_schema).__name__}. "
-                        f"Expected int. Cannot safely restore checkpoint. Error: {e}"
-                    ) from e
-
-                if checkpoint_schema != CHECKPOINT_SCHEMA_VERSION:
-                    raise ValueError(
-                        f"Fallback checkpoint schema version mismatch: checkpoint has version {checkpoint_schema}, "
-                        f"but current code expects version {CHECKPOINT_SCHEMA_VERSION}. "
-                        f"Cannot restore from incompatible checkpoint. "
-                        f"Checkpoint path: {prev_path}"
-                    )
-
-                # C2-4: Validate fallback checkpoint
-                required_keys = ["global_step"]
-                for key in required_keys:
-                    if key not in checkpoint:
-                        raise ValueError(f"Fallback checkpoint missing required key: {key}")
-
-                # C07-TYPE: Explicit type coercion for global_step
-                try:
-                    checkpoint["global_step"] = int(checkpoint["global_step"])
-                except (ValueError, TypeError) as e:
-                    raise TypeError(
-                        f"Fallback checkpoint {prev_path} has invalid global_step type: {type(checkpoint['global_step']).__name__}. "
-                        f"Expected int. Error: {e}"
-                    ) from e
-
-                if checkpoint.get("game_state") is not None:
-                    try:
-                        checkpoint["game_state"] = gamestate_from_dict(checkpoint["game_state"])
-                    except Exception as e:
-                        raise RuntimeError(
-                            f"Failed to restore game_state from fallback checkpoint {prev_path}. "
-                            f"Original error: {e}"
-                        ) from e
-                return checkpoint
+                warnings.warn(f"Loading previous checkpoint: {prev_path}", UserWarning)
+                return _load_and_validate(prev_path)
         # No previous checkpoint found — re-raise original error
         raise RuntimeError(f"Checkpoint load failed and no previous checkpoint found: {e}") from e
 
