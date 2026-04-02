@@ -26,6 +26,7 @@ from qgre.types import (
     CheckpointState,
     GameState,
     RewardResult,
+    TrainerState,
     TrainingContext,
 )
 
@@ -1271,6 +1272,19 @@ class QGRETrainer:
         if path is None:
             path = Path(self.config.logging.checkpoint_dir) / f"global_step_{self.global_step}.pt"
 
+        # Build TrainerState with all mutable state
+        trainer_state = TrainerState(
+            global_step=self.global_step,
+            accumulated_loss=self._accumulated_loss,
+            accumulation_count=self._accumulation_count,
+            accumulated_samples=self._accumulated_samples,
+            resumed_mid_accumulation=getattr(self, '_resumed_mid_accumulation', False),
+            fused_validated=getattr(self, '_fused_validated', False),
+            needs_weight_sync=getattr(self, '_needs_weight_sync', False),
+            rng_state=torch.get_rng_state(),
+            cuda_rng_state=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+        )
+
         save_checkpoint(
             path=path,
             global_step=self.global_step,
@@ -1279,14 +1293,11 @@ class QGRETrainer:
             scheduler_state_dict=self.scheduler.state_dict() if self.scheduler else None,
             game_state=self.game_state,
             advantage_estimator_state=self.advantage_estimator.state_dict(),
-            cuda_rng_state=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
             vprm_critic_state=self.vprm_critic.state_dict_with_meta() if self.vprm_critic else None,
             vprm_optimizer_state=self.vprm_optimizer.state_dict() if self.vprm_optimizer else None,
-            accumulated_loss=self._accumulated_loss,  # TRN-R2-1: Save accumulation state
-            accumulated_samples=self._accumulated_samples,  # TL-R3-04: Save accumulated samples
-            accumulation_count=self._accumulation_count,
             dataloader_state=self._dataloader.state_dict() if self._dataloader else None,
             training_context=self.ctx.to_dict(),
+            trainer_state=trainer_state,  # Use StateSpec instead of individual fields
         )
 
     def resume(self, checkpoint_dir: str | Path) -> bool:
@@ -1460,13 +1471,17 @@ class QGRETrainer:
             self.ctx = TrainingContext.from_config(self.config, device=str(_device))
             self.ctx.step = self.global_step
 
-        # TRN-R2-5: Set _resumed_mid_accumulation flag when resuming mid-accumulation
-        n_accum = self.config.training.gradient_accumulation_steps
-        if self.global_step % n_accum != 0:
+        # TRN-R2-5: Restore _resumed_mid_accumulation from checkpoint (StateSpec)
+        # Fallback: compute from global_step if checkpoint doesn't have it (backward compat)
+        if checkpoint.trainer.resumed_mid_accumulation:
             self._resumed_mid_accumulation = True
+        else:
+            n_accum = self.config.training.gradient_accumulation_steps
+            if self.global_step % n_accum != 0:
+                self._resumed_mid_accumulation = True
 
-        # Re-validate fused logprobs after resume — model weights changed
-        self._fused_validated = False
+        # Restore fused_validated from checkpoint — same weights, same validation status
+        self._fused_validated = checkpoint.trainer.fused_validated
 
         # Zero gradients AFTER resume to avoid clearing loaded optimizer state
         if self.optimizer is not None:

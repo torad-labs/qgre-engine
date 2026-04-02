@@ -338,3 +338,86 @@ def test_v_tracker_persists_across_checkpoint():
         assert trainer2.advantage_estimator.V[42][1] == 0.85
         assert trainer2.advantage_estimator.V[42][2] == 0.6
         assert 1 in trainer2.advantage_estimator._step_seen[42]
+
+
+# --- Old-format checkpoint migration ---
+
+
+def test_old_format_checkpoint_migration():
+    """Old checkpoint format (flat keys) migrates to StateSpec format."""
+    import torch
+    from qgre.checkpoint import load_checkpoint
+    from qgre.types import CheckpointState, TrainerState
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "global_step_100.pt"
+
+        # Create old-format checkpoint (no "trainer" key, flat structure)
+        old_checkpoint = {
+            "global_step": 100,
+            "accumulated_loss": 5.5,
+            "accumulated_samples": 32,
+            "accumulation_count": 4,
+            "model_state_dict": {"weight": torch.randn(4, 4)},
+            "optimizer_state_dict": {"lr": 1e-5},
+            "game_state": {"phase": 2, "step_count": 100},
+            "rng_state": torch.get_rng_state(),
+            # No schema_version — old format
+        }
+        torch.save(old_checkpoint, path)
+
+        # Load and verify migration
+        loaded = load_checkpoint(path)
+
+        # Should be CheckpointState
+        assert isinstance(loaded, CheckpointState)
+
+        # TrainerState should be populated from flat keys
+        assert loaded.trainer.global_step == 100
+        assert loaded.trainer.accumulated_loss == 5.5
+        assert loaded.trainer.accumulated_samples == 32
+        assert loaded.trainer.accumulation_count == 4
+
+        # Model state preserved
+        assert loaded.model_state_dict is not None
+        assert "weight" in loaded.model_state_dict
+
+        # GameState migrated
+        assert loaded.game_state.phase == 2
+
+
+def test_trainer_state_full_roundtrip():
+    """All TrainerState fields survive checkpoint round-trip."""
+    import torch
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "global_step_50.pt"
+
+        # Save with all TrainerState fields populated
+        rng = torch.get_rng_state()
+        save_checkpoint(
+            path=path,
+            global_step=50,
+            model_state_dict={"w": torch.randn(2, 2)},
+            accumulated_loss=2.5,
+            accumulated_samples=16,
+            accumulation_count=2,
+        )
+
+        # Load checkpoint manually to set additional fields
+        ckpt = torch.load(path)
+        ckpt["trainer"]["resumed_mid_accumulation"] = True
+        ckpt["trainer"]["fused_validated"] = True
+        ckpt["trainer"]["needs_weight_sync"] = True
+        torch.save(ckpt, path)
+
+        # Load and verify all fields
+        loaded = load_checkpoint(path)
+
+        assert loaded.trainer.global_step == 50
+        assert loaded.trainer.accumulated_loss == 2.5
+        assert loaded.trainer.accumulated_samples == 16
+        assert loaded.trainer.accumulation_count == 2
+        assert loaded.trainer.resumed_mid_accumulation is True
+        assert loaded.trainer.fused_validated is True
+        assert loaded.trainer.needs_weight_sync is True
