@@ -1471,14 +1471,11 @@ class QGRETrainer:
             self.ctx = TrainingContext.from_config(self.config, device=str(_device))
             self.ctx.step = self.global_step
 
-        # TRN-R2-5: Restore _resumed_mid_accumulation from checkpoint (StateSpec)
-        # Fallback: compute from global_step if checkpoint doesn't have it (backward compat)
-        if checkpoint.trainer.resumed_mid_accumulation:
-            self._resumed_mid_accumulation = True
-        else:
-            n_accum = self.config.training.gradient_accumulation_steps
-            if self.global_step % n_accum != 0:
-                self._resumed_mid_accumulation = True
+        # TRN-R2-5: Compute _resumed_mid_accumulation at resume time
+        # This flag means "we JUST resumed mid-accumulation, clear momentum on next step"
+        # Must be determined by current resume state, not restored from checkpoint
+        n_accum = self.config.training.gradient_accumulation_steps
+        self._resumed_mid_accumulation = (self.global_step % n_accum != 0)
 
         # Restore fused_validated from checkpoint — same weights, same validation status
         self._fused_validated = checkpoint.trainer.fused_validated

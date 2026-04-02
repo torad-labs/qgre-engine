@@ -320,7 +320,9 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
         # Convert to CheckpointState (handles migration from old format)
         checkpoint_state = CheckpointState.from_dict(raw_checkpoint)
         return checkpoint_state
-    except Exception as e:
+    except (FileNotFoundError, ValueError, TypeError, RuntimeError, KeyError, EOFError) as e:
+        # Catch checkpoint-specific errors only — let system errors (MemoryError,
+        # KeyboardInterrupt, SystemExit, ImportError) propagate
         warnings.warn(
             f"Failed to load checkpoint from {path}: {e}. "
             "Attempting to load previous checkpoint..."
@@ -403,8 +405,10 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                 # Convert to CheckpointState (handles migration)
                 checkpoint_state = CheckpointState.from_dict(raw_checkpoint)
                 return checkpoint_state
-        # No previous checkpoint found — re-raise original error
-        raise RuntimeError(f"Checkpoint load failed and no previous checkpoint found: {e}") from e
+        # No previous checkpoint found — re-raise with context
+        raise RuntimeError(
+            f"Checkpoint load failed for {path} and no previous checkpoint found: {e}"
+        ) from e
 
 
 def discover_latest_checkpoint(checkpoint_dir: str | Path) -> Path | None:

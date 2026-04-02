@@ -307,15 +307,33 @@ class CheckpointState:
                 "Migrating to StateSpec format with defaults.",
                 UserWarning
             )
+            # Validate required field exists (silent default to 0 would be catastrophic)
+            if "global_step" not in d:
+                raise ValueError(
+                    "Old format checkpoint missing required key 'global_step'. "
+                    "Cannot safely restore checkpoint — training step is unknown."
+                )
+            # Warn for optional fields that affect training behavior
+            missing_fields = []
+            if "accumulated_loss" not in d:
+                missing_fields.append("accumulated_loss")
+            if "accumulated_samples" not in d:
+                missing_fields.append("accumulated_samples")
+            if missing_fields:
+                warnings.warn(
+                    f"Old checkpoint missing fields {missing_fields} — using defaults. "
+                    "Loss averaging may be incorrect for this step.",
+                    UserWarning
+                )
             # Migrate: build StateSpec dicts from flat fields
             trainer = TrainerState(
-                global_step=d.get("global_step", 0),
+                global_step=d["global_step"],  # Required, validated above
                 accumulated_loss=d.get("accumulated_loss", 0.0),
                 accumulation_count=d.get("accumulation_count", 0),
                 accumulated_samples=d.get("accumulated_samples", 0),
-                resumed_mid_accumulation=False,  # Default
-                fused_validated=False,  # Default
-                needs_weight_sync=False,  # Default
+                resumed_mid_accumulation=False,  # Computed at resume time
+                fused_validated=False,  # Re-validate after migration
+                needs_weight_sync=False,  # Set at resume time
                 rng_state=d.get("rng_state"),
                 cuda_rng_state=d.get("cuda_rng_state"),
             )
@@ -341,6 +359,12 @@ class CheckpointState:
             # GameState uses gamestate_from_dict in checkpoint.py — here we just pass through
             game_state_raw = d.get("game_state")
             if game_state_raw is None:
+                warnings.warn(
+                    "Checkpoint missing 'game_state' — creating fresh GameState with phase=1. "
+                    "All mastery progress and tier phases will be reset. "
+                    "If unexpected, checkpoint may be corrupted.",
+                    UserWarning
+                )
                 game_state = GameState()
             elif isinstance(game_state_raw, GameState):
                 game_state = game_state_raw
@@ -348,9 +372,23 @@ class CheckpointState:
                 # Assume it's already been converted by checkpoint.py's gamestate_from_dict
                 game_state = game_state_raw
         else:
-            # New format: reconstruct nested dataclasses from their dict representations
-            trainer_d = d.get("trainer", {})
-            trainer = TrainerState(**trainer_d) if isinstance(trainer_d, dict) else trainer_d
+            # New format: validate required keys exist
+            required_keys = ["trainer"]
+            missing = [k for k in required_keys if k not in d]
+            if missing:
+                raise ValueError(
+                    f"New-format checkpoint missing required keys: {missing}. "
+                    "Checkpoint may be corrupted or truncated."
+                )
+
+            # Reconstruct nested dataclasses from their dict representations
+            trainer_d = d["trainer"]  # Required, validated above
+            if not isinstance(trainer_d, dict):
+                raise TypeError(
+                    f"Expected dict for 'trainer', got {type(trainer_d).__name__}. "
+                    "Checkpoint may be corrupted."
+                )
+            trainer = TrainerState(**trainer_d)
 
             dataloader_d = d.get("dataloader", {})
             dataloader = DataLoaderState(**dataloader_d) if isinstance(dataloader_d, dict) else dataloader_d
@@ -363,6 +401,12 @@ class CheckpointState:
 
             game_state_raw = d.get("game_state")
             if game_state_raw is None:
+                warnings.warn(
+                    "Checkpoint missing 'game_state' — creating fresh GameState with phase=1. "
+                    "All mastery progress and tier phases will be reset. "
+                    "If unexpected, checkpoint may be corrupted.",
+                    UserWarning
+                )
                 game_state = GameState()
             elif isinstance(game_state_raw, dict):
                 # Don't reconstruct GameState from dict here — checkpoint.py handles that
