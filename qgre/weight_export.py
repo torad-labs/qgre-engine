@@ -46,14 +46,25 @@ class WeightExporter:
         import warnings
 
         weights = {}
+        # WARNING: Concurrent state_dict access race condition.
+        # If optimizer.step() runs during this call, tensors may be in inconsistent state.
+        # This is hard to fix without locks. Document the risk.
         # Call state_dict() inside sync function to avoid stale tensor references
+        import warnings as _warnings
+        if model.training:
+            _warnings.warn(
+                "get_modules_to_save called during training (model.training=True). "
+                "Race condition possible if optimizer.step() runs concurrently. "
+                "Call sync only between training steps."
+            )
         for key, tensor in model.state_dict().items():
             if "modules_to_save" not in key or "weight" not in key:
                 continue
+            # WS3-008: Force .clone() on state_dict tensors before sync
             if "lm_head" in key:
-                weights["lm_head"] = tensor
+                weights["lm_head"] = tensor.clone()
             elif "embed_tokens" in key:
-                weights["embed_tokens"] = tensor
+                weights["embed_tokens"] = tensor.clone()
 
         # Warn if expected modules are missing or unexpected modules present
         if expected:

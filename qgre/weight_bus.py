@@ -58,17 +58,22 @@ class WeightBus:
             model: PEFT-wrapped training model
             modules_to_save: Expected modules (e.g., ["lm_head"]). Warns if missing.
         """
-        if self.strategy == SyncStrategy.MERGE:
-            exporter.merge_lora(model)
-            loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
-            # MERGE modifies base weights in-place — flush vLLM KV cache to prevent stale keys/values
-            loader.flush_kv_cache()
-        elif self.strategy == SyncStrategy.DIRECT_COPY:
-            loader.sync_lora_direct(model, first_call=not self._initialized)
-            # Get fresh state_dict inside sync_modules_to_save to avoid stale tensor references
-            loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
+        try:
+            if self.strategy == SyncStrategy.MERGE:
+                exporter.merge_lora(model)
+                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
+                # MERGE modifies base weights in-place — flush vLLM KV cache to prevent stale keys/values
+                loader.flush_kv_cache()
+            elif self.strategy == SyncStrategy.DIRECT_COPY:
+                loader.sync_lora_direct(model, first_call=not self._initialized)
+                # Get fresh state_dict inside sync_modules_to_save to avoid stale tensor references
+                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save))
 
-        self._initialized = True
+            # Only set initialized=True after successful sync
+            self._initialized = True
+        except Exception as e:
+            # Don't set initialized=True on failure — next sync will retry first_call path
+            raise RuntimeError(f"Weight sync failed: {e}") from e
 
     def restore_for_training(
         self,

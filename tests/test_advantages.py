@@ -230,7 +230,11 @@ def test_spo_second_observation_has_advantage():
 
 
 def test_spo_on_tier_advance_resets_v():
-    """on_tier_advance resets V for affected prompts."""
+    """on_tier_advance fully resets ALL baselines for affected prompts.
+
+    When curriculum advances, stale baselines anchored to the old reward distribution
+    produce catastrophic negative advantages. Full reset forces warm-start recalibration.
+    """
     estimator = QGREStepAdvantageEstimator(lr=0.1, mode="spo", step_qualities=STEP_QUALITIES, segmenter=XML_SEG)
     tokens = _make_completion_tokens()
     rr = _make_reward_result(step1_score=0.9, step4_score=0.7)
@@ -244,13 +248,15 @@ def test_spo_on_tier_advance_resets_v():
 
     # V should have values for prompt 42
     assert 42 in estimator.V
+    assert len(estimator.V[42]) > 0
 
-    # Tier advance resets ONLY the new step (2) for prompt 42, preserves mastered step (1)
-    old_step1_v = estimator.V[42][1]
+    # Tier advance resets ALL baselines for prompt 42 (full reset)
     estimator.on_tier_advance(new_tier=2, prompt_tier_map={42: 2, 99: 1})
-    assert estimator.V[42][2] == 0.0, "New step should be reset"
-    assert estimator.V[42][1] == old_step1_v, "Mastered step should be preserved"
-    assert 2 not in estimator._step_seen.get(42, set()), "New step should not be in seen set"
+    assert len(estimator.V[42]) == 0, "All baselines should be cleared"
+    assert len(estimator._step_seen.get(42, set())) == 0, "Step seen should be cleared"
+    assert len(estimator._quality_seen.get(42, set())) == 0, "Quality seen should be cleared"
+    assert len(estimator._reward_var.get(42, {})) == 0, "Reward variance should be cleared"
+    assert len(estimator._reward_mean.get(42, {})) == 0, "Reward mean should be cleared"
 
 
 def test_spo_value_tracker_ema_convergence():

@@ -190,6 +190,7 @@ class UnslothBackend:
         self._FastLanguageModel = FastLanguageModel
         self.weight_loader = WeightLoader(model)
 
+        # WS3-005: Log warning if patch fails, don't fail silently
         # Patch vLLM max_logprobs: Unsloth sets max_logprobs=0 by default,
         # but LLDS needs logprobs=1. Find the vLLM engine and set max_logprobs.
         try:
@@ -206,12 +207,34 @@ class UnslothBackend:
                 if hasattr(engine, 'model_config'):
                     engine.model_config.max_logprobs = self.generation_config.max_logprobs
                     print(f"vLLM max_logprobs patched to {self.generation_config.max_logprobs} for LLDS logprob extraction")
+                else:
+                    import warnings
+                    warnings.warn(
+                        "WS3-005: vLLM max_logprobs patch failed: engine has no model_config attribute. "
+                        "LLDS requires max_logprobs >= logprobs. Check vLLM version compatibility."
+                    )
+                    raise RuntimeError(
+                        "vLLM max_logprobs patch failed: engine has no model_config attribute. "
+                        "LLDS requires max_logprobs >= logprobs. Check vLLM version compatibility."
+                    )
+            else:
+                import warnings
+                warnings.warn(
+                    "WS3-005: vLLM max_logprobs patch failed: could not find vLLM engine. "
+                    "LLDS requires max_logprobs >= logprobs. Check Unsloth integration."
+                )
+                raise RuntimeError(
+                    "vLLM max_logprobs patch failed: could not find vLLM engine. "
+                    "LLDS requires max_logprobs >= logprobs. Check Unsloth integration."
+                )
         except Exception as e:
             import warnings
-            warnings.warn(
-                f"Could not patch vLLM max_logprobs: {e}. "
-                "LLDS will be disabled because vLLM cannot return sufficient logprobs for all continuation tokens."
-            )
+            warnings.warn(f"WS3-005: vLLM max_logprobs patch failed: {e}")
+            if self.generation_config.max_logprobs > 0:
+                raise RuntimeError(
+                    f"Could not patch vLLM max_logprobs: {e}. "
+                    "LLDS is enabled but vLLM cannot return sufficient logprobs for all continuation tokens."
+                ) from e
 
         return model, tokenizer
 
@@ -273,14 +296,41 @@ class UnslothBackend:
         """
         from vllm import SamplingParams
 
+        requested_logprobs = 1  # Return chosen token logprob at each position (for LLDS)
+
+        # GB3-001: Define llds_enabled from generation_config.max_logprobs > 0
+        llds_enabled = self.generation_config.max_logprobs > 0
+
+        # Verify max_logprobs >= requested_logprobs before generation
+        if hasattr(self.model, 'vllm_engine') or hasattr(getattr(self.model, 'model', None), 'vllm_engine'):
+            engine = getattr(self.model, 'vllm_engine', None) or getattr(getattr(self.model, 'model', None), 'vllm_engine', None)
+            if engine is not None:
+                llm_engine = getattr(engine, 'llm_engine', engine)
+                if hasattr(llm_engine, 'model_config'):
+                    max_lp = getattr(llm_engine.model_config, 'max_logprobs', 0)
+                    if max_lp < requested_logprobs:
+                        # GB2-001: Raise error instead of warning if LLDS enabled and max_logprobs insufficient
+                        if llds_enabled:
+                            raise ValueError(
+                                f"max_logprobs={max_lp} < requested logprobs={requested_logprobs}. "
+                                "LLDS requires max_logprobs >= 1. Set max_logprobs in vLLM engine config."
+                            )
+                        else:
+                            import warnings
+                            warnings.warn(
+                                f"max_logprobs={max_lp} < requested logprobs={requested_logprobs}. "
+                                "vLLM will truncate logprobs output."
+                            )
+
         sampling_params = SamplingParams(
             temperature=self.generation_config.temperature,
             top_p=self.generation_config.top_p,
             top_k=self.generation_config.top_k if self.generation_config.top_k > 0 else -1,
             min_p=self.generation_config.min_p,
             max_tokens=self.generation_config.max_tokens,
+            repetition_penalty=self.generation_config.repetition_penalty,
             stop_token_ids=self.generation_config.stop_token_ids,
-            logprobs=1,  # Return chosen token logprob at each position (for LLDS)
+            logprobs=requested_logprobs,
         )
 
         # Decode prompts for fast_generate (it takes text, not tensors)
@@ -289,6 +339,10 @@ class UnslothBackend:
             mask = attention_mask[i].bool()
             tokens = input_ids[i][mask].tolist()
             text = self.tokenizer.decode(tokens, skip_special_tokens=False)
+            # Force disable thinking mode: append </think> if not already present
+            # This ensures model generates direct answers, not <think> blocks
+            if "</think>" not in text:
+                text = text.rstrip() + "<think>\n</think>\n\n"
             prompts.append(text)
 
         lora_req = self.weight_loader.lora_request if self.weight_loader else None
@@ -321,19 +375,29 @@ class UnslothBackend:
                     warnings.warn(
                         f"vLLM logprobs length ({len(completion_out.logprobs)}) != "
                         f"completion length ({len(completion_ids)}) for prompt {idx}. "
-                        f"Discarding logprobs for this batch."
+                        f"Setting this sample's logprobs to None (batch will continue)."
                     )
-                    all_logprobs = []
-                    break
+                    all_logprobs.append(None)
+                    continue
+                # GB3-006: Filter None values before length check
                 for t, pos_dict in enumerate(completion_out.logprobs):
+                    if pos_dict is None:
+                        import warnings
+                        warnings.warn(
+                            f"GB3-006: vLLM returned None logprobs at position {t} for prompt {idx}. "
+                            f"Using -inf as placeholder."
+                        )
+                        sample_lps.append(float('-inf'))
+                        continue
+                    # GB2-002: Continue loop on empty dict, fill with None placeholder
                     if not pos_dict:
                         import warnings
                         warnings.warn(
                             f"vLLM returned empty logprobs at position {t} for prompt {idx}. "
-                            f"Discarding logprobs for this batch."
+                            f"Using -inf as placeholder (token was below cutoff)."
                         )
-                        sample_lps = []
-                        break
+                        sample_lps.append(float('-inf'))
+                        continue
                     # Extract by the actual sampled token_id — NOT by dict iteration order.
                     # With temperature > 0, the sampled token may differ from top-1.
                     sampled_id = completion_ids[t]
@@ -350,11 +414,12 @@ class UnslothBackend:
                         sample_lps.append(float('-inf'))
             all_logprobs.append(sample_lps)
 
-        has_logprobs = all(len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
-        if not has_logprobs and any(len(lps) > 0 for lps in all_logprobs):
+        # Guard against None entries (from logprobs length mismatch at line 375)
+        has_logprobs = all(lps is not None and len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
+        if not has_logprobs and any(lps is not None and len(lps) > 0 for lps in all_logprobs):
             import warnings
             warnings.warn(
-                f"Partial logprobs: {sum(1 for lps in all_logprobs if len(lps) > 0)}"
+                f"Partial logprobs: {sum(1 for lps in all_logprobs if lps is not None and len(lps) > 0)}"
                 f"/{len(all_logprobs)} samples have logprobs. LLDS disabled for this batch."
             )
         return GenerationOutput(

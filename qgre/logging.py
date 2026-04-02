@@ -69,13 +69,24 @@ class CompletionLogger:
         phase: int = 1,
     ):
         """Write a single completion as a JSONL line."""
+        # CP3-008: Wrap open in try-except, restore _file state on failure
         if self._file is None or self._step != step:
             if self._file is not None:
                 self._file.close()
             path = self.output_dir / f"step_{step:06d}.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
-            self._file = open(path, "a")
-            self._step = step
+            prev_file = self._file
+            prev_step = self._step
+            try:
+                self._file = open(path, "a")
+                self._step = step
+            except Exception as e:
+                # CP3-008: Restore state on failure
+                self._file = prev_file
+                self._step = prev_step
+                import warnings
+                warnings.warn(f"CP3-008: Failed to open log file {path}: {e}. Log not written.")
+                return
 
         record = {
             "step": step,

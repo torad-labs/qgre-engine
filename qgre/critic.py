@@ -102,13 +102,16 @@ class VPRMCritic(nn.Module):
     @torch.no_grad()
     def update_target_network(self, tau: float = 0.01):
         """Polyak averaging: θ_target ← (1-τ)θ_target + τ*θ_online."""
+        # RL3-009: Document that caller (compute_advantages or trainer) must call this
         for q_name in self.quality_names:
             for op, tp in zip(self.heads[q_name].parameters(), self.target_heads[q_name].parameters()):
                 if not torch.isfinite(op.data).all():
                     import warnings
                     warnings.warn(f"NaN/Inf in online head '{q_name}' — skipping Polyak update")
                     return
-                tp.data.mul_(1.0 - tau).add_(op.data, alpha=tau)
+                # Move online params to target device before Polyak update
+                op_data = op.data.to(device=tp.device, dtype=tp.dtype)
+                tp.data.mul_(1.0 - tau).add_(op_data, alpha=tau)
 
     @torch.no_grad()
     def sync_target_to_online(self):
@@ -136,12 +139,18 @@ class VPRMCritic(nn.Module):
         # Mean-pool hidden states per region (STEP_1, STEP_2, ...)
         # Extract unique step IDs in Python (avoids GPU sync from .unique().tolist())
         step_ids_present = sorted({
-            int(r.split("_")[1]) for r in regions if r.startswith("STEP_")
+            int(r.split("_")[1]) for r in regions if r.startswith("STEP_") and "_" in r
         })
-        region_ids = torch.tensor(
-            [int(r.split("_")[1]) if r.startswith("STEP_") else -1 for r in regions],
-            device=hidden_states.device,
-        )
+        region_ids_list = []
+        for r in regions:
+            if r.startswith("STEP_") and "_" in r:
+                try:
+                    region_ids_list.append(int(r.split("_")[1]))
+                except (ValueError, IndexError):
+                    region_ids_list.append(-1)
+            else:
+                region_ids_list.append(-1)
+        region_ids = torch.tensor(region_ids_list, device=hidden_states.device)
         region_pools: dict[str, torch.Tensor] = {}
         for step_id in step_ids_present:
             mask = (region_ids == step_id).float()
@@ -159,10 +168,20 @@ class VPRMCritic(nn.Module):
             region_key = f"STEP_{region_step}"
             if region_key in region_pools:
                 pooled = region_pools[region_key].unsqueeze(0)  # [1, hidden_dim]
-                predictions[q_name] = heads[q_name](pooled).squeeze(0).squeeze(0)
+                out = heads[q_name](pooled)
+                predictions[q_name] = out.squeeze() if out.numel() == 1 else out.squeeze(0).squeeze(0)
             else:
-                # Region not found — return zero baseline (SPO fallback handles this)
-                predictions[q_name] = torch.tensor(0.0, device=hidden_states.device)
+                # AE5: Region missing → return None so caller skips this quality's advantage
+                # (zero baseline would cause unbounded advantage = reward - 0)
+                if not hasattr(self, "_region_not_found_count"):
+                    self._region_not_found_count = 0
+                self._region_not_found_count += 1
+                import logging
+                logging.getLogger(__name__).error(
+                    f"RL3-003: Region {region_key} not found for quality '{q_name}'. "
+                    f"Skipping advantage for this quality. Total skipped: {self._region_not_found_count}"
+                )
+                predictions[q_name] = None
 
         return predictions
 
@@ -198,10 +217,13 @@ class VPRMCritic(nn.Module):
             count = mask.sum()
             if count > 0:
                 pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=0) / count
-                # Check for NaN propagation after region pooling
+                # RL3-004: Track NaN replacement count
                 if torch.isnan(pooled).any():
+                    if not hasattr(self, "_nan_replacement_count"):
+                        self._nan_replacement_count = 0
+                    self._nan_replacement_count += 1
                     import warnings
-                    warnings.warn(f"NaN detected in VPRM critic region pooling for STEP_{step_id}. Returning zero.")
+                    warnings.warn(f"RL3-004: NaN detected in VPRM critic region pooling for STEP_{step_id}. Returning zero. Total: {self._nan_replacement_count}")
                     pooled = torch.zeros_like(pooled)
                 region_pools[f"STEP_{step_id}"] = pooled
 
@@ -215,13 +237,19 @@ class VPRMCritic(nn.Module):
             region_key = f"STEP_{region_step}"
 
             if region_key not in region_pools:
+                # A2-5: Track occurrence count and log periodically
                 if not hasattr(self, "_region_warned"):
                     self._region_warned = set()
-                if q_name not in self._region_warned:
+                    self._region_warned_count = {}
+                if q_name not in self._region_warned_count:
+                    self._region_warned_count[q_name] = 0
+                self._region_warned_count[q_name] += 1
+                if q_name not in self._region_warned or self._region_warned_count[q_name] % 100 == 0:
                     import logging
                     logging.getLogger(__name__).warning(
                         f"Critic: no {region_key} found for quality '{q_name}' — "
-                        "segmenter may not be producing expected regions, critic will have zero gradient."
+                        f"segmenter may not be producing expected regions, critic will have zero gradient. "
+                        f"(occurred {self._region_warned_count[q_name]} times)"
                     )
                     self._region_warned.add(q_name)
                 advantages[q_name] = 0.0
@@ -310,9 +338,14 @@ class VPRMCritic(nn.Module):
     @classmethod
     def from_checkpoint(cls, checkpoint: dict, device: str = "cpu") -> VPRMCritic:
         """Restore critic from checkpoint. Handles old checkpoints without target_heads or step_region_map."""
+        # C6: Convert step_qualities keys to int to prevent string key corruption
+        step_qualities = checkpoint["step_qualities"]
+        if step_qualities:
+            step_qualities = {int(k): v for k, v in step_qualities.items()}
+
         critic = cls(
             hidden_dim=checkpoint["hidden_dim"],
-            step_qualities=checkpoint["step_qualities"],
+            step_qualities=step_qualities,
             step_region_map=checkpoint.get("step_region_map"),  # May be None for old checkpoints
         )
         # Load with strict=False to handle old checkpoints without target_heads

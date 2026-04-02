@@ -8,7 +8,38 @@ import numpy as np
 import torch
 
 from qgre.segments import Segmenter, segmenter_region_count, uniform_segmenter
+from qgre.spans import REPETITION_MARKER
 from qgre.types import PromptContext, RewardResult
+
+# Penalty multiplier for repeated spans (applied to abs(q_adv))
+# 1.5 means repeating gives -1.5 * |q_adv| regardless of sign
+REPETITION_PENALTY_MULTIPLIER = 1.5
+
+
+def _validate_region_step_coverage(
+    regions: list[str],
+    step_qualities: dict[int, list[str]],
+    sample_idx: int | None = None,
+) -> None:
+    """Validate that all STEP_N regions in output have corresponding step_qualities entries.
+
+    Warns if a step region has no qualities defined — this means the segmenter found a step
+    that won't receive any advantage signal. This is usually a config mismatch but may be
+    intentional for partial step coverage.
+    """
+    step_regions = {r for r in set(regions) if r.startswith("STEP_")}
+    for region in step_regions:
+        try:
+            step_num = int(region.split("_")[1])
+        except (IndexError, ValueError):
+            continue  # Malformed region name — skip
+        if step_num not in step_qualities:
+            sample_info = f" (sample {sample_idx})" if sample_idx is not None else ""
+            warnings.warn(
+                f"Region '{region}' found in segmenter output{sample_info} but step {step_num} "
+                f"not in step_qualities. Available steps: {sorted(step_qualities.keys())}. "
+                f"This step will receive 0.0 advantage."
+            )
 
 
 def apply_frontier_amplification(
@@ -33,6 +64,7 @@ def broadcast_step_advantages_to_tokens(
     regions: list[str],
     region_extra_steps: dict[int, list[int]],
     sample_idx: int | None = None,
+    device: str | torch.device | None = None,
 ) -> torch.Tensor:
     """Broadcast per-step advantages to per-token by region label.
 
@@ -44,6 +76,7 @@ def broadcast_step_advantages_to_tokens(
         regions: per-token region labels from segmenter
         region_extra_steps: region_step → [virtual steps mapped to it]
         sample_idx: when step_advs values are batch tensors, index into them
+        device: Target device for output tensor (default: infer from step_advs or use cuda/cpu)
     """
     # Pre-build label → advantage value map from unique regions (O(n_labels) string ops)
     # then do O(seq_len) dict lookups instead of per-token string parsing
@@ -59,23 +92,36 @@ def broadcast_step_advantages_to_tokens(
                     if vs in step_advs:
                         v = step_advs[vs]
                         contribs.append(v[sample_idx] if sample_idx is not None else v)
-                # Convert all to tensors before torch.stack
+                # Convert all to tensors on consistent device before torch.stack
+                if not contribs:
+                    continue
                 if isinstance(contribs[0], torch.Tensor):
-                    contribs_tensors = [c if isinstance(c, torch.Tensor) else torch.tensor(c, device=contribs[0].device) for c in contribs]
+                    ref_device = contribs[0].device
+                    contribs_tensors = [
+                        c.to(ref_device) if isinstance(c, torch.Tensor) else torch.tensor(c, device=ref_device)
+                        for c in contribs
+                    ]
                     label_to_adv[region] = torch.stack(contribs_tensors).sum()
                 else:
-                    label_to_adv[region] = sum(contribs)
+                    ref_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    contribs_tensors = [
+                        c if isinstance(c, torch.Tensor) else torch.tensor(c, device=ref_device)
+                        for c in contribs
+                    ]
+                    label_to_adv[region] = torch.stack(contribs_tensors).sum()
         elif region == "THINK" and 0 in step_advs:
             val = step_advs[0]
             label_to_adv[region] = val[sample_idx] if sample_idx is not None else val
 
     seq_len = len(regions)
     # Infer device from step_advs values (may be Tensor or float)
-    device = None
+    inferred_device = None
     for val in step_advs.values():
         if isinstance(val, torch.Tensor):
-            device = val.device
+            inferred_device = val.device
             break
+    if device is None:
+        device = inferred_device if inferred_device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
     token_advs = torch.zeros(seq_len, device=device)
     for t, region in enumerate(regions):
         if region in label_to_adv:
@@ -174,6 +220,7 @@ class QGREStepAdvantageEstimator:
         # Target-aware aspiration gap
         self._aspiration_beta = 0.0  # Set from config via trainer
         self._aspiration_target = 0.0
+        self._advantage_scale = 1.0  # Set from config via trainer
 
         # Variance-aware baseline: track per-(prompt, quality) reward variance
         self._var_aware = var_aware
@@ -186,6 +233,13 @@ class QGREStepAdvantageEstimator:
         self._staleness_window = staleness_window
         self._baseline_prior = baseline_prior
         self._current_step = 0  # Updated externally by trainer
+
+        # Auto-reset on distribution shift: track divergence per (prompt, step)
+        # When |r - baseline| > threshold for N consecutive observations, reset baseline
+        self._divergence_window: dict[int, dict[int, list[float]]] = defaultdict(lambda: defaultdict(list))
+        self._divergence_threshold = 0.3  # Absolute divergence threshold (0.85→0.2 = 0.65)
+        self._divergence_window_size = 3  # Consecutive observations before reset
+
         # step_region_map: virtual steps (no segmenter region) → region step whose tokens carry their advantage
         # e.g., {7: 2} means step 7's advantage is added to STEP_2 tokens
         self.step_region_map = step_region_map or {}
@@ -202,6 +256,8 @@ class QGREStepAdvantageEstimator:
                         f"step_region_map value {rs} (target for step {vs}) not in step_qualities — "
                         f"no tokens will carry step {vs}'s advantage. Check segmenter regions."
                     )
+            # Additional validation: warn if mapped regions don't exist in actual segmenter output
+            # This is done per-sample in compute_advantages when regions are available
         # Build reverse map: region_step → [virtual steps that map to it]
         self._region_extra_steps: dict[int, list[int]] = defaultdict(list)
         for virtual_step, region_step in self.step_region_map.items():
@@ -296,14 +352,18 @@ class QGREStepAdvantageEstimator:
 
         for i in range(batch_size):
             regions = self.segmenter(batch_token_ids[i])
+            # Validate segmenter output matches step_qualities config (once per init, not per batch)
+            if not getattr(self, '_region_validated', False):
+                _validate_region_step_coverage(regions, self.step_qualities, sample_idx=i)
+                self._region_validated = True
             step_rews: dict[int, float] = {}
             for step_num, quality_keys in self.step_qualities.items():
                 active = [k for k in quality_keys if k in batch_active_qualities[i]]
                 if active:
                     vals = [batch_reward_results[i].scores.get(k, 0.0) for k in active]
                     step_rews[step_num] = sum(vals) / len(vals)
-                else:
-                    step_rews[step_num] = 0.0
+                # else: skip — inactive qualities produce NO advantage signal,
+                # not 0.0 vs old baseline which generates catastrophic negatives
             all_step_rewards.append(step_rews)
             all_regions.append(regions)
 
@@ -382,21 +442,33 @@ class QGREStepAdvantageEstimator:
                 "Must provide context for all samples."
             )
         # Pre-compute batch mean per step for warm-start (PLAN.md spec: use batch mean, not sample)
+        # Only include samples that HAVE this step (not inactive/skipped)
         batch_means: dict[int, float] = {}
         for step_num in self._step_nums:
-            rewards = [all_step_rewards[i].get(step_num, 0.0) for i in range(batch_size)]
+            rewards = [all_step_rewards[i][step_num] for i in range(batch_size) if step_num in all_step_rewards[i]]
             batch_means[step_num] = float(np.mean(rewards)) if rewards else 0.0
 
         for step_num in self._step_nums:
             for i in range(batch_size):
+                # Skip inactive qualities — no advantage signal, no baseline update
+                if step_num not in all_step_rewards[i]:
+                    step_advs[step_num][i] = 0.0
+                    continue
+
                 # ADV-R2-4: Check for None before accessing attributes
+                if i >= len(batch_prompt_ids):
+                    raise IndexError(
+                        f"SPO warm-start: batch index {i} out of range for batch_prompt_ids (len={len(batch_prompt_ids)}). "
+                        f"batch_size={batch_size}, step_num={step_num}"
+                    )
                 ctx = batch_contexts[i] if batch_contexts and i < len(batch_contexts) else None
                 pid = ctx.prompt_id if ctx is not None else batch_prompt_ids[i]
-                r = all_step_rewards[i].get(step_num, 0.0)
+                r = all_step_rewards[i][step_num]
                 v = self.V[pid][step_num]
 
                 # Warm-start: first observation → set baseline to BATCH MEAN (not sample)
-                if step_num not in self._step_seen[pid]:
+                is_first_observation = step_num not in self._step_seen[pid]
+                if is_first_observation:
                     v = batch_means[step_num]
                     self._step_seen[pid].add(step_num)
 
@@ -411,7 +483,34 @@ class QGREStepAdvantageEstimator:
                     if self._aspiration_beta > 0:
                         ctx = batch_contexts[i] if batch_contexts and i < len(batch_contexts) and batch_contexts[i] is not None else None
                         warmup = getattr(ctx, 'aspiration_warmup', 1.0) if ctx else 1.0
+                        warmup = max(0.0, min(1.0, warmup))  # Clamp to [0, 1] to prevent double application
                         step_advs[step_num][i] += self._aspiration_beta * warmup * (r - 1.0)
+
+                # Auto-reset on distribution shift: detect sustained divergence
+                # Skip on first observation (baseline not calibrated yet)
+                if not is_first_observation:
+                    divergence = abs(r - v)
+                    self._divergence_window[pid][step_num].append(divergence)
+                    # Keep only last N observations
+                    if len(self._divergence_window[pid][step_num]) > self._divergence_window_size:
+                        self._divergence_window[pid][step_num].pop(0)
+
+                    # Check if all recent observations exceed threshold
+                    window = self._divergence_window[pid][step_num]
+                    if (len(window) >= self._divergence_window_size and
+                        all(d > self._divergence_threshold for d in window)):
+                        # Distribution shift detected — reset this prompt's baselines
+                        import logging
+                        _logger = logging.getLogger("qgre.advantages")
+                        _logger.warning(
+                            f"[AUTO-RESET] Distribution shift detected for prompt {pid}, step {step_num}: "
+                            f"divergence {window} all > {self._divergence_threshold}. "
+                            f"Resetting baselines (baseline={v:.3f}, new_score={r:.3f})"
+                        )
+                        self._reset_prompt_baselines(pid)
+                        # Clear divergence window after reset
+                        if pid in self._divergence_window:
+                            self._divergence_window[pid].clear()
 
                 # Variance-aware baseline: slow lr when reward is constant
                 effective_lr = self.lr
@@ -422,6 +521,7 @@ class QGREStepAdvantageEstimator:
                     self._reward_mean[pid][step_num] = new_mean
                     old_var = self._reward_var[pid][step_num]
                     # ADV-R2-2: Use new_mean for variance (not stale r_mean)
+                    # Clamp variance BEFORE computing effective_lr
                     new_var = old_var + self._var_lr * ((r - new_mean) ** 2 - old_var)
                     if new_var < 0:
                         # Negative variance indicates numerical instability in EMA — log and clamp
@@ -429,8 +529,12 @@ class QGREStepAdvantageEstimator:
                             f"Negative variance {new_var:.6f} for prompt {pid} step {step_num}. "
                             f"old_var={old_var:.6f}, r={r:.4f}, r_mean={r_mean:.4f}. Clamping to 0."
                         )
+                        new_var = 0.0
                     self._reward_var[pid][step_num] = max(0.0, new_var)
-                    if new_var < self._var_threshold:
+                    # Skip variance-aware LR on first sample (when old_var == threshold and r_mean == 0)
+                    if is_first_observation:
+                        effective_lr = self.lr
+                    elif new_var < self._var_threshold:
                         effective_lr = self.lr * max(new_var / self._var_threshold, self._min_var_ratio)
 
                 self.V[pid][step_num] = v + effective_lr * (r - v)
@@ -500,12 +604,61 @@ class QGREStepAdvantageEstimator:
             priorities[pid] = mean_abs_v
         return priorities
 
+    def _reset_prompt_baselines(self, prompt_id: int):
+        """Reset all baseline state for a single prompt.
+
+        Called when distribution shift is detected (auto-reset mechanism).
+        Clears baselines, variance, and observation tracking to force recalibration.
+        """
+        if prompt_id in self.V:
+            self.V[prompt_id].clear()
+        if prompt_id in self.V_last_seen:
+            self.V_last_seen[prompt_id].clear()
+        if prompt_id in self._quality_seen:
+            self._quality_seen[prompt_id].clear()
+        if prompt_id in self._step_seen:
+            self._step_seen[prompt_id].clear()
+        if prompt_id in self._reward_var:
+            self._reward_var[prompt_id].clear()
+        if prompt_id in self._reward_mean:
+            self._reward_mean[prompt_id].clear()
+
     def on_tier_advance(self, new_tier: int, prompt_tier_map: dict[int, int]):
-        """Reset SPO baseline for the NEW step only — preserve learned baselines for mastered steps."""
-        for pid, tier in prompt_tier_map.items():
-            if tier == new_tier:
-                self.V[pid][new_tier] = 0.0
-                self._step_seen[pid].discard(new_tier)
+        """Full reset of baselines for affected prompts on tier/phase advance.
+
+        When the reward distribution shifts (tier advance, phase advance), stale baselines
+        anchored to the old distribution produce catastrophic negative advantages.
+        Reset V, _reward_mean, _reward_var, _quality_seen, V_last_seen, and _step_seen
+        for ALL qualities/steps of affected prompts — not just one key.
+
+        This forces the warm-start path (is_first_observation) to recalibrate baselines
+        from the first batch at the new difficulty level.
+        """
+        _logger.warning(f"on_tier_advance called: new_tier={new_tier}, n_prompts={len(prompt_tier_map)}, pids={list(prompt_tier_map.keys())[:5]}")
+        n_cleared = 0
+        for pid in prompt_tier_map:
+            # Reset ALL per-quality baselines for this prompt
+            if pid in self.V:
+                n_qualities = len(self.V[pid])
+                self.V[pid].clear()
+                n_cleared += 1
+                if n_cleared <= 2:  # Log first 2 prompts
+                    _logger.warning(f"  Cleared {n_qualities} qualities for prompt {pid}")
+            if pid in self.V_last_seen:
+                self.V_last_seen[pid].clear()
+            if pid in self._quality_seen:
+                self._quality_seen[pid].clear()
+            if pid in self._step_seen:
+                self._step_seen[pid].clear()
+            # Reset variance tracking — stale variance locks EMA lr to near-zero
+            if pid in self._reward_var:
+                self._reward_var[pid].clear()
+            if pid in self._reward_mean:
+                self._reward_mean[pid].clear()
+            # Clear divergence tracking — fresh start after manual reset
+            if pid in self._divergence_window:
+                self._divergence_window[pid].clear()
+        _logger.warning(f"on_tier_advance: cleared baselines for {n_cleared}/{len(prompt_tier_map)} prompts")
 
     def state_dict(self) -> dict:
         return {
@@ -518,6 +671,9 @@ class QGREStepAdvantageEstimator:
             # Per-quality variance tracking
             "reward_var": {pid: dict(qualities) for pid, qualities in self._reward_var.items()},
             "reward_mean": {pid: dict(qualities) for pid, qualities in self._reward_mean.items()},
+            # Divergence tracking for auto-reset
+            "divergence_window": {pid: {step: list(window) for step, window in steps.items()}
+                                  for pid, steps in self._divergence_window.items()},
             "lr": self.lr,
             "mode": self.mode,
             "current_step": self._current_step,
@@ -572,9 +728,9 @@ class QGREStepAdvantageEstimator:
                     quality_advs[quality_name] = 0.0
                 else:
                     adv = r - v
-                    # Aspiration gap: push toward target (usually mastery_threshold)
+                    # Aspiration gap: push toward perfection (1.0, not mastery_threshold)
                     if self._aspiration_beta > 0:
-                        adv += self._aspiration_beta * warmup * (r - self._aspiration_target)
+                        adv += self._aspiration_beta * warmup * (r - 1.0)
                     quality_advs[quality_name] = adv
 
                 # Variance-aware baseline learning rate
@@ -608,21 +764,36 @@ class QGREStepAdvantageEstimator:
 
         # Phase 3: Broadcast per-quality advantages to tokens (additive + normalized)
         batch_advantages: list[torch.Tensor] = []
+        # A5: Validate batch_active_qualities and batch_token_masks have same length
+        if len(batch_active_qualities) != len(batch_token_masks):
+            raise ValueError(
+                f"A5: Shape mismatch — batch_active_qualities has {len(batch_active_qualities)} entries, "
+                f"batch_token_masks has {len(batch_token_masks)} entries. Lengths must match."
+            )
+
         for i in range(batch_size):
             seq_len = len(batch_token_ids[i])
-            # Get device from batch_token_masks
-            device = None
+            # A2-1: Use CUDA if available, then check masks for device override
+            device = "cuda" if torch.cuda.is_available() else "cpu"
             if batch_token_masks[i]:
                 first_mask = next(iter(batch_token_masks[i].values()), None)
                 if first_mask is not None and isinstance(first_mask, torch.Tensor):
                     device = first_mask.device
 
             token_advs = torch.zeros(seq_len, device=device)
-            token_coverage = torch.zeros(seq_len, device=device)
+            overlap_count = torch.zeros(seq_len, device=device)
             masks = batch_token_masks[i]
 
+            # RL3-008: Track skipped qualities and raise if all skipped due to SHAPE MISMATCH
+            skipped_count = 0
+            shape_mismatch_count = 0
             for quality_name in batch_active_qualities[i]:
                 if quality_name not in masks:
+                    # Missing mask — backward compat, not an error
+                    if not hasattr(self, '_quality_mask_mismatch_count'):
+                        self._quality_mask_mismatch_count = 0
+                    self._quality_mask_mismatch_count += 1
+                    skipped_count += 1
                     continue
                 q_adv = all_quality_advs[i].get(quality_name, 0.0)
                 if abs(q_adv) < 1e-10:
@@ -635,14 +806,42 @@ class QGREStepAdvantageEstimator:
                         f"mask has {q_mask.shape[0]} tokens but sequence has {seq_len}. "
                         f"Skipping — check reward_fn scored_spans and tokenizer consistency."
                     )
+                    skipped_count += 1
+                    shape_mismatch_count += 1
                     continue
-                token_advs += q_adv * q_mask
-                token_coverage += q_mask
+                # Sign-aware repetition penalty:
+                # - Mask value 1.0 = first occurrence → normal advantage
+                # - Mask value REPETITION_MARKER = repeat → penalty (always negative effect)
+                # Split mask into first-occurrence and repetition components
+                first_mask = (q_mask == 1.0).float()
+                repeat_mask = (q_mask == REPETITION_MARKER).float()
 
-            # Normalize: tokens covered by N qualities get advantage / N
-            # Preserves direction, bounds magnitude
-            token_coverage = torch.clamp(token_coverage, min=1.0)
-            token_advs = token_advs / token_coverage
+                # First occurrence: normal q_adv (positive for correct, negative for wrong)
+                # Repetition: always penalize with -|q_adv| * multiplier
+                # This ensures repeating correct = net negative, repeating wrong = even more negative
+                token_advs += q_adv * first_mask
+                token_advs += -abs(q_adv) * REPETITION_PENALTY_MULTIPLIER * repeat_mask
+
+                # For overlap normalization, count both first and repeat as participating
+                overlap_count += first_mask + repeat_mask
+
+            # RL3-008: Raise if ALL qualities were skipped AND at least one was due to shape mismatch
+            # (Empty masks dict is backward compat, not an error)
+            if shape_mismatch_count > 0 and skipped_count == len(batch_active_qualities[i]):
+                raise RuntimeError(
+                    f"RL3-008: All {skipped_count} qualities skipped for sample {i} due to mask shape mismatch. "
+                    "Check reward_fn scored_spans and tokenizer consistency."
+                )
+
+            # Normalize: tokens in multiple quality spans get their advantage divided by overlap count.
+            # Example: token in both q_format and q_correct_H spans → advantage / 2
+            # Tokens with zero overlap (thinking, whitespace) get advantage = 0 (no training signal).
+            overlap_count = torch.clamp(overlap_count, min=1.0)
+            token_advs = token_advs / overlap_count
+
+            # Scale advantages to fit model's logit resolution
+            if self._advantage_scale != 1.0:
+                token_advs = token_advs * self._advantage_scale
 
             batch_advantages.append(token_advs)
 
@@ -653,36 +852,43 @@ class QGREStepAdvantageEstimator:
         self.mode = state.get("mode", self.mode)
         self._current_step = state.get("current_step", 0)
 
-        # Per-quality baselines (string keys)
+        # Per-quality baselines — preserve original key type (int for legacy step-based,
+        # string for new per-quality span-based). torch.save/load preserves Python types.
         self.V = defaultdict(lambda: defaultdict(float))
         for pid, qualities in state.get("V", {}).items():
-            for quality_name, val in qualities.items():
-                # Handle both old (int step keys) and new (string quality keys)
-                self.V[int(pid)][str(quality_name)] = float(val)
+            for key, val in qualities.items():
+                # Preserve original key type (int or str)
+                self.V[int(pid)][key] = float(val)
 
         self.V_last_seen = defaultdict(lambda: defaultdict(int))
         for pid, qualities in state.get("V_last_seen", {}).items():
-            for quality_name, val in qualities.items():
-                self.V_last_seen[int(pid)][str(quality_name)] = int(val)
+            for key, val in qualities.items():
+                self.V_last_seen[int(pid)][key] = int(val)
 
         self._quality_seen = defaultdict(set)
         for pid, qualities in state.get("quality_seen", {}).items():
-            self._quality_seen[int(pid)] = set(str(q) for q in qualities)
+            self._quality_seen[int(pid)] = set(qualities)
 
         # Legacy step_seen for backward compat
         self._step_seen = defaultdict(set)
         for pid, steps in state.get("step_seen", {}).items():
             self._step_seen[int(pid)] = set(int(s) for s in steps)
 
-        # Per-quality variance tracking (string keys)
+        # Per-quality variance tracking — preserve original key type
         for pid, qualities in state.get("reward_var", {}).items():
-            for quality_name, val in qualities.items():
-                self._reward_var[int(pid)][str(quality_name)] = float(val)
+            for key, val in qualities.items():
+                self._reward_var[int(pid)][key] = float(val)
 
         self._reward_mean = defaultdict(lambda: defaultdict(float))
         for pid, qualities in state.get("reward_mean", {}).items():
-            for quality_name, val in qualities.items():
-                self._reward_mean[int(pid)][str(quality_name)] = float(val)
+            for key, val in qualities.items():
+                self._reward_mean[int(pid)][key] = float(val)
+
+        # Divergence tracking for auto-reset
+        self._divergence_window = defaultdict(lambda: defaultdict(list))
+        for pid, steps in state.get("divergence_window", {}).items():
+            for step, window in steps.items():
+                self._divergence_window[int(pid)][int(step)] = list(window)
 
 
 def compute_advantages_vprm(
@@ -713,6 +919,16 @@ def compute_advantages_vprm(
     # Check if enough regions for critic — else SPO fallback
     n_regions = segmenter_region_count(regions)
     if n_regions < min_regions:
+        # RL3-010: Return flag + log metric for SPO fallback
+        if not hasattr(compute_advantages_vprm, "_spo_fallback_count"):
+            compute_advantages_vprm._spo_fallback_count = 0
+        compute_advantages_vprm._spo_fallback_count += 1
+        if compute_advantages_vprm._spo_fallback_count <= 3:
+            import logging
+            logging.getLogger(__name__).info(
+                f"RL3-010: SPO fallback (regions={n_regions} < min_regions={min_regions}). "
+                f"Total fallbacks: {compute_advantages_vprm._spo_fallback_count}"
+            )
         return (
             torch.zeros(seq_len, device=device),
             torch.tensor(0.0, device=device),
@@ -740,19 +956,39 @@ def compute_advantages_vprm(
     for step_num in step_nums:
         qualities = [q for q in step_qualities[step_num] if q in active_qualities]
         if qualities:
-            vals = [advs_dict.get(q, 0.0) for q in qualities]
-            step_advs[step_num] = sum(vals) / len(vals)
+            vals = [v for v in (advs_dict.get(q, 0.0) for q in qualities) if v is not None]
+            # A2-2: Log warning when quality is dropped due to missing critic region
+            dropped_count = len(qualities) - len(vals)
+            if dropped_count > 0:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"A2-2: {dropped_count} qualities dropped for step {step_num} due to missing critic region (None values)"
+                )
+            step_advs[step_num] = sum(vals) / len(vals) if vals else 0.0
         else:
             step_advs[step_num] = 0.0
 
-    # ADV-R1-8: Initialize virtual steps with 0.0 advantage
+    # RL3-007: Document virtual step behavior and add metric
     if step_region_map:
+        virtual_steps_used = []
         for vs in step_region_map.keys():
             if vs not in step_advs:
                 step_advs[vs] = 0.0
+                virtual_steps_used.append(vs)
+        if virtual_steps_used and not hasattr(compute_advantages_vprm, "_virtual_logged"):
+            import logging
+            logging.getLogger(__name__).info(
+                f"RL3-007: Virtual steps initialized: {virtual_steps_used}. "
+                "These are frontier amplification targets that don't have direct quality assignments."
+            )
+            compute_advantages_vprm._virtual_logged = True
 
     # Perfect score = zero advantage. Imperfect = push toward 1.0.
-    for step_num in step_nums:
+    # Include virtual steps (generated by frontier amplification) in aspiration bonus loop
+    all_step_keys = list(step_advs.keys())
+    for step_num in all_step_keys:
+        if step_num not in step_qualities:
+            continue  # Virtual step, no qualities to check
         qualities = [q for q in step_qualities[step_num] if q in active_qualities]
         if qualities:
             step_reward = sum(reward_result.scores.get(q, 0.0) for q in qualities) / len(qualities)
@@ -774,8 +1010,13 @@ def compute_advantages_vprm(
         if len(losses) < len(critic_losses):
             import warnings
             warnings.warn(f"Filtered {len(critic_losses) - len(losses)} NaN critic losses before aggregation")
-        total_critic_loss = torch.stack(losses).mean() if losses else torch.tensor(0.0, device=device)
+        if losses:
+            total_critic_loss = torch.stack(losses).mean()
+        else:
+            # All losses were NaN — return zero with requires_grad=True to preserve gradient flow
+            total_critic_loss = torch.tensor(0.0, device=device, requires_grad=True)
     else:
-        total_critic_loss = torch.tensor(0.0, device=device)
+        # No critic losses available — return zero with requires_grad=True to preserve gradient flow
+        total_critic_loss = torch.tensor(0.0, device=device, requires_grad=True)
 
     return token_advantages, total_critic_loss, True

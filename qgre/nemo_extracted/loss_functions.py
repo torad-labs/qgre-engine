@@ -44,7 +44,13 @@ def apply_eligibility_traces(
     # Backward pass: accumulate eligibility trace from end of sequence
     trace = torch.zeros(batch, device=advantages.device)
     for t in range(seq - 1, -1, -1):
-        trace = advantages[:, t] + lambda_val * trace
+        # RL3-001: Check for NaN before accumulation
+        adv_t = advantages[:, t]
+        if torch.isnan(adv_t).any():
+            import warnings
+            warnings.warn(f"NaN detected in eligibility trace at position {t}. Replacing with 0.0")
+            adv_t = torch.where(torch.isnan(adv_t), torch.zeros_like(adv_t), adv_t)
+        trace = adv_t + lambda_val * trace
         traces[:, t] = trace
     return traces
 
@@ -144,6 +150,13 @@ class ClippedPGLossFn:
         if self.use_importance_sampling_correction:
             importance_weights = torch.exp(curr_logprobs.detach() - prev_logprobs).detach()
             importance_weights = torch.nan_to_num(importance_weights, nan=0.0, posinf=0.0, neginf=0.0)
+            # Clamp to prevent underflow (silent zero gradients)
+            # RL3-006: Track when clamping occurs
+            clamped_mask = importance_weights < 1e-8
+            if clamped_mask.any():
+                import warnings
+                warnings.warn(f"RL3-006: {clamped_mask.sum().item()} importance weights clamped to minimum (1e-8). Gradients may be suppressed.")
+            importance_weights = importance_weights.clamp(min=1e-8)
             if self.truncated_importance_sampling_ratio is not None:
                 importance_weights = importance_weights.clamp(max=self.truncated_importance_sampling_ratio)
         else:

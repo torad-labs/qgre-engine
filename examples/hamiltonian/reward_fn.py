@@ -112,11 +112,18 @@ class StructuredOutputParser:
     def _clean_line(self, line: str) -> str:
         """Strip markdown artifacts from a line."""
         s = line.strip()
-        # Strip markdown bold/italic markers
+        # Strip markdown bold/italic markers from start
         while s.startswith('*') or s.startswith('#'):
             s = s.lstrip('*#').strip()
+        # Strip trailing * markers
         while s.endswith('*'):
             s = s.rstrip('*').strip()
+        # Strip **LABEL**: pattern — bold markers around label before colon
+        # Handle cases like "MOMENTUM**: p = ..." → "MOMENTUM: p = ..."
+        for i in range(len(s)):
+            if s[i:i+3] == '**:' or s[i:i+2] == '*:':
+                s = s[:i] + s[i+2:] if s[i:i+3] == '**:' else s[:i] + s[i+1:]
+                break
         # Strip LaTeX delimiters
         if s.startswith('$'):
             s = s[1:].strip()
@@ -300,6 +307,99 @@ class StructuredOutputParser:
 
         self._all_expressions_cache = results
         return results
+
+
+    def get_section_spans(self) -> dict[str, list[tuple[int, int]]]:
+        """Get character spans for each labeled section. No regex.
+
+        Returns:
+            {canonical_label: [(char_start, char_end), ...], ...}
+
+        Finds:
+        1. Labeled sections (HAMILTONIAN: ..., KINETIC: ..., etc.)
+        2. VAR = expr patterns anywhere in lines (H = ..., V = ..., etc.)
+        3. Equation patterns (dX/dt = ..., frac{dX}{dt} = ...)
+        """
+        spans: dict[str, list[tuple[int, int]]] = {
+            "COORDINATES": [], "MOMENTUM": [], "KINETIC": [], "POTENTIAL": [],
+            "HAMILTONIAN": [], "EQUATIONS": [],
+        }
+
+        char_pos = 0
+        current_label: str | None = None
+        current_start: int = 0
+
+        for i, line in enumerate(self.lines):
+            line_start = char_pos
+            line_end = char_pos + len(line)
+
+            match = self._match_label(line)
+            if match:
+                # Close previous section
+                if current_label and current_start < line_start:
+                    spans[current_label].append((current_start, line_start))
+
+                # Start new section
+                current_label = match[0]
+                current_start = line_start
+
+            # Also find VAR = expr patterns ANYWHERE in the line (not just labeled)
+            # This catches expressions in derivations like "derivation: H = p²/6"
+            # Skip if line was already matched as a labeled section (avoid duplicates)
+            cleaned = self._clean_line(line)
+            if '=' in cleaned and not match:
+                # Find VAR = patterns by looking for single-letter vars followed by =
+                for var, label in [('H', 'HAMILTONIAN'), ('V', 'POTENTIAL'),
+                                   ('T', 'KINETIC'), ('p', 'MOMENTUM')]:
+                    # Look for "VAR =" or "VAR=" pattern anywhere in the line
+                    # Use exact string search, not regex
+                    idx = 0
+                    while idx < len(cleaned):
+                        # Find next occurrence of var
+                        found = cleaned.find(var, idx)
+                        if found == -1:
+                            break
+                        # Check if followed by = (possibly with spaces)
+                        after = cleaned[found + len(var):].lstrip()
+                        if after.startswith('='):
+                            # Check it's a standalone var (not part of a word)
+                            is_standalone = (found == 0 or not cleaned[found-1].isalnum())
+                            if is_standalone:
+                                spans[label].append((line_start, line_end))
+                                break  # One match per line per var is enough
+                        idx = found + 1
+                    else:
+                        continue
+                    break  # Found a match for this var, stop checking other vars
+
+                # Check for equation patterns: dX/dt = ... or frac{dX}{dt} = ...
+                lower = cleaned.lower()
+                has_derivative = False
+                # Check for dX/dt pattern
+                if 'd' in lower:
+                    d_idx = lower.find('d')
+                    while d_idx >= 0 and d_idx < len(lower) - 3:
+                        # Look for /dt after d + letter
+                        if d_idx + 1 < len(lower) and lower[d_idx + 1].isalpha():
+                            rest = lower[d_idx + 2:]
+                            if '/dt' in rest:
+                                has_derivative = True
+                                break
+                        d_idx = lower.find('d', d_idx + 1)
+                # Check for frac{dX}{dt} pattern
+                if 'frac{d' in lower and 'dt}' in lower:
+                    has_derivative = True
+
+                if has_derivative:
+                    spans["EQUATIONS"].append((line_start, line_end))
+
+            char_pos = line_end + 1  # +1 for newline
+
+        # Close final section
+        if current_label and current_start < len(self.text):
+            spans[current_label].append((current_start, len(self.text)))
+
+        return spans
 
 
 # ─── Parser factory (for consistent usage) ────────────────────────────────────
@@ -674,7 +774,17 @@ def _score_expression(
     if student_str is None:
         return 0.0
 
-    student = _try_sympify(student_str)
+    # Handle chained equalities: "(6/2)*x² = 3x²" → try final expression first
+    # Many derivations show work via "expr1 = expr2 = ... = final". We want the final.
+    if '=' in student_str:
+        parts = [p.strip() for p in student_str.split('=')]
+        # Try the last part first (most simplified form)
+        student = _try_sympify(parts[-1])
+        # If that fails, try the first part (may be more explicit)
+        if student is None and len(parts) > 1:
+            student = _try_sympify(parts[0])
+    else:
+        student = _try_sympify(student_str)
     teacher = _try_sympify(teacher_str)
 
     # Substitute known constants (m, k, F from prompt) into student expression
@@ -1597,69 +1707,61 @@ def _score_defines_momentum(text: str) -> float:
 def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     """Find character spans of scored expression patterns in RAW completion text.
 
+    Uses the StructuredOutputParser for exact string matching — NO REGEX.
     Runs on the ORIGINAL text with NO cleaning so character offsets are valid
-    for the char→token mapping in qgre/spans.py. This is intentionally separate
-    from the scoring extractors which clean text before matching.
+    for the char→token mapping in qgre/spans.py.
 
     Returns quality_name → [(char_start, char_end), ...].
     """
+    parser = StructuredOutputParser(text)
+    section_spans = parser.get_section_spans()
+
     spans: dict[str, list[tuple[int, int]]] = {}
 
-    # H = expr (Hamiltonian) — greedy match to end of line captures full expression
-    spans["q_correct_H"] = [
-        (m.start(), m.end())
-        for m in re.finditer(r'H\s*=\s*[^\n]{3,}', text)
-    ]
+    # Map section spans to quality names
+    spans["q_correct_H"] = section_spans.get("HAMILTONIAN", [])
+    spans["q_V_correct"] = section_spans.get("POTENTIAL", [])
 
-    # V = expr (potential energy)
-    spans["q_V_correct"] = [
-        (m.start(), m.end())
-        for m in re.finditer(r'V\s*=\s*[^\n]{3,}', text)
-    ]
-
-    # T = expr (kinetic energy)
-    t_spans = [
-        (m.start(), m.end())
-        for m in re.finditer(r'T\s*=\s*[^\n]{3,}', text)
-    ]
+    t_spans = section_spans.get("KINETIC", [])
     spans["q_T_uses_p"] = t_spans
     spans["q_T_in_momentum"] = t_spans  # Same spans, different quality
 
-    # H also scored by momentum form quality
     spans["q_H_in_momentum"] = spans["q_correct_H"]
 
-    # Equation expressions: dq/dt = ..., dp/dt = ..., \frac{dX}{dt} = ...
-    eq_spans = [
-        (m.start(), m.end())
-        for m in re.finditer(r'd[a-z_]+/dt\s*=\s*[^\n]{2,}', text)
-    ]
-    eq_spans += [
-        (m.start(), m.end())
-        for m in re.finditer(r'\\frac\{d[a-z_\\]+\}\{dt\}\s*=\s*[^\n]{2,}', text)
-    ]
+    eq_spans = section_spans.get("EQUATIONS", [])
     spans["q_correct_dqdt"] = eq_spans
     spans["q_correct_dpdt"] = eq_spans
-    # Consistency/coefficient qualities only target equations — avoid bleeding onto H tokens
-    # which have their own step (q_correct_H). The model should learn to make equations
-    # consistent with H, not vice versa.
     spans["q_consistency"] = eq_spans
     spans["q_correct_coefficient"] = eq_spans
     spans["q_derivative_correct"] = eq_spans
 
-    # Momentum definition: p = expr
-    spans["q_momentum_defined"] = [
-        (m.start(), m.end())
-        for m in re.finditer(r'p\s*=\s*[^\n]{3,}', text)
-    ]
-    spans["q_defines_momentum"] = spans["q_momentum_defined"]
+    momentum_spans = section_spans.get("MOMENTUM", [])
+    spans["q_momentum_defined"] = momentum_spans
+    spans["q_defines_momentum"] = momentum_spans
 
-    # Format qualities: entire completion (all tokens get format signal)
-    full = [(0, len(text))] if text else []
-    spans["q_format"] = full
-    spans["q_has_math"] = full
+    # Format/has_math qualities: target labeled sections when present.
+    # FALLBACK: If NO labeled sections found, span the FULL completion so the model
+    # gets negative training signal for bad format. Without this, garbage output
+    # (no labels at all) would get zero gradient.
+    all_labeled_spans = []
+    for label in ["COORDINATES", "MOMENTUM", "KINETIC", "POTENTIAL", "HAMILTONIAN", "EQUATIONS"]:
+        all_labeled_spans.extend(section_spans.get(label, []))
+    # Deduplicate and sort by start position
+    all_labeled_spans = sorted(set(all_labeled_spans), key=lambda x: x[0])
+    if all_labeled_spans:
+        # Good structure found — train on labeled sections only
+        spans["q_format"] = all_labeled_spans
+        spans["q_has_math"] = all_labeled_spans
+    else:
+        # No structure found — train on full completion so bad output gets negative signal
+        spans["q_format"] = [(0, len(text))]
+        spans["q_has_math"] = [(0, len(text))]
 
-    # Grounding: entire completion (checks numerical values throughout)
-    spans["q_grounding"] = full
+    # Grounding: target sections with numerical values (T, V, H, equations)
+    grounding_spans = []
+    for label in ["KINETIC", "POTENTIAL", "HAMILTONIAN", "EQUATIONS"]:
+        grounding_spans.extend(section_spans.get(label, []))
+    spans["q_grounding"] = sorted(set(grounding_spans), key=lambda x: x[0])
 
     return spans
 

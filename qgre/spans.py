@@ -14,6 +14,10 @@ from typing import Any
 
 import torch
 
+# Marker value for repeated spans. In spans.py, we use this as a marker.
+# The actual sign-aware penalty is applied in advantages.py.
+REPETITION_MARKER = -1.0
+
 
 def build_char_to_token_map(
     token_ids: list[int],
@@ -46,12 +50,13 @@ def build_char_to_token_map(
 
     full_len = len(full_text)
     if full_len == 0:
-        return []
+        return None  # Return None instead of [] for empty decode
 
     # Build offset map by decoding each token and tracking cumulative position
     # This uses the ORIGINAL token_ids — no re-encoding
     char_to_token: list[int] = [-1] * full_len
     char_pos = 0
+    decode_failures = 0
 
     for tok_idx, tid in enumerate(token_ids):
         try:
@@ -87,9 +92,38 @@ def build_char_to_token_map(
                             for c in range(char_pos, min(char_pos + chars_for_this, full_len)):
                                 char_to_token[c] = tok_idx
                             char_pos += chars_for_this
-        except Exception:
-            # Decode failed for this token — skip
-            pass
+        except (torch.cuda.OutOfMemoryError, MemoryError):
+            raise  # Never swallow OOM — let it crash so we can diagnose
+        except (UnicodeDecodeError, ValueError, RuntimeError) as e:
+            # Known decode failure types — track and continue
+            decode_failures += 1
+            if decode_failures == 1:
+                warnings.warn(f"build_char_to_token_map: per-token decode failed at tok_idx {tok_idx}: {e}")
+        except Exception as e:
+            # Unexpected error — warn but continue
+            decode_failures += 1
+            if decode_failures == 1:
+                warnings.warn(f"build_char_to_token_map: unexpected error at tok_idx {tok_idx}: {type(e).__name__}: {e}")
+
+    # Safety check: if per-token decode covered way less than full decode, the
+    # mapping is unreliable. Return None to trigger segmenter fallback.
+    # DP2-010: Raise threshold to 80% (was 50%) for better reliability
+    if full_len > 0 and char_pos < full_len * 0.8:
+        warnings.warn(
+            f"build_char_to_token_map: per-token decode covered {char_pos}/{full_len} chars "
+            f"({100*char_pos/full_len:.1f}%). Mapping unreliable — returning None. "
+            "Threshold is 80% coverage."
+        )
+        return None
+
+    # DP3-006: Track gap-fill count, warn if high percentage
+    gap_count = sum(1 for c in char_to_token if c < 0)
+    if gap_count > 0 and gap_count / full_len > 0.1:
+        warnings.warn(
+            f"DP3-006: char_to_token gap-fill: {gap_count}/{full_len} chars ({100*gap_count/full_len:.1f}%) "
+            "have no direct token mapping. Filling with nearest valid. "
+            "High gap percentage may indicate tokenizer decode mismatch."
+        )
 
     # Fill any remaining gaps with nearest valid token
     last_valid = 0
@@ -97,7 +131,7 @@ def build_char_to_token_map(
         if char_to_token[c] >= 0:
             last_valid = char_to_token[c]
         else:
-            char_to_token[c] = last_valid
+            char_to_token[c] = min(last_valid, seq_len - 1)
 
     return char_to_token
 
@@ -106,6 +140,7 @@ def scored_spans_to_token_masks(
     scored_spans: dict[str, list[tuple[int, int]]],
     char_to_token: list[int],
     seq_len: int,
+    _clamped_count: list[int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Convert character-based scored_spans to per-token boolean masks.
 
@@ -113,17 +148,26 @@ def scored_spans_to_token_masks(
         scored_spans: quality_name → [(char_start, char_end), ...]
         char_to_token: char_idx → token_idx mapping (from build_char_to_token_map)
         seq_len: number of tokens in the completion
+        _clamped_count: Optional list to track clamped span count (mutable int workaround)
 
     Returns:
         dict mapping quality_name → torch.Tensor of shape [seq_len] with 1.0
         at token positions covered by that quality's spans, 0.0 elsewhere.
     """
+    # Move counter to function scope via mutable default argument
+    if _clamped_count is None:
+        _clamped_count = [0]
+
     masks: dict[str, torch.Tensor] = {}
     max_char = len(char_to_token)
 
     for quality_name, spans in scored_spans.items():
         mask = torch.zeros(seq_len)
-        for char_start, char_end in spans:
+        # Reward FIRST span for each quality — later repetitions get penalized
+        # The original answer is typically the correct one; repeats are noise
+        # First span gets +1.0, later spans get REPETITION_MARKER penalty
+        num_spans = len(spans)
+        for span_idx, (char_start, char_end) in enumerate(spans):
             # Clamp to valid range
             cs = max(0, min(char_start, max_char - 1))
             ce = max(0, min(char_end, max_char))
@@ -134,11 +178,24 @@ def scored_spans_to_token_masks(
                     f"original ({char_start}, {char_end}) → clamped ({cs}, {ce}). "
                     f"max_char={max_char}. Final tokens may lose advantage signal."
                 )
+                # Track clamped spans for metrics
+                _clamped_count[0] += 1
             # Map char range → token indices and set mask
+            # First span: +1.0 (reward original answer), later spans: REPETITION_MARKER (penalize repeats)
+            # The marker is detected in advantages.py where sign-aware penalty is applied
+            is_first_span = (span_idx == 0)
+            span_value = 1.0 if is_first_span else REPETITION_MARKER
             for c in range(cs, ce):
                 tok_idx = char_to_token[c]
-                if tok_idx < seq_len:
-                    mask[tok_idx] = 1.0
+                # DP3-005: Add assertion that tok_idx < seq_len with informative error
+                if tok_idx >= seq_len:
+                    raise RuntimeError(
+                        f"DP3-005: Span mapping exceeds seq_len. "
+                        f"tok_idx={tok_idx} >= seq_len={seq_len} for quality '{quality_name}'. "
+                        f"char_range=({cs}, {ce}), max_char={max_char}. "
+                        "Tokenizer or span detection is inconsistent."
+                    )
+                mask[tok_idx] = span_value
         masks[quality_name] = mask
 
     return masks

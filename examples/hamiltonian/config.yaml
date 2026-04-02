@@ -47,6 +47,7 @@ generation:
   lora_dropout_rate: 0.25
   lora_dropout_anneal_steps: 5000
   max_tokens: 4096
+  repetition_penalty: 1.2
   stop_token_ids: [151643, 151645]
 
 algorithm:
@@ -62,6 +63,7 @@ algorithm:
   segmenter: hamiltonian
   length_penalty_coef: 0.005
   length_penalty_threshold: 0.6
+  advantage_scale: 0.1  # Calibrated via gradient probe - moves logits 0.06% of gap per step
 
   step_qualities:
     1: [q_format, q_has_math]
@@ -89,6 +91,8 @@ training:
   gradient_accumulation_steps: 1
   mastery_threshold: 0.8
   stagnation_timeout: 50
+  log_attention_patterns: true  # Detect laminar→turbulent transitions
+  attention_log_freq: 10  # Log attention stats every 10 steps
 
 vprm:
   enabled: true
@@ -107,27 +111,26 @@ tutorial:
     # match_metadata selects prompts from training data by metadata column values
     # Learnability-based advancement: skill advances when mastery_threshold met
     # AND learnability (p*(1-p)) drops below learnability_threshold.
-    # This prevents advancing while still in the zone of proximal development.
-    # p=0.85 → learnability=0.1275, p=0.90 → learnability=0.09
+    # p=0.80 → learnability=0.16, p=0.85 → learnability=0.1275
     freefall:
       match_metadata: {system: freefall}
       prerequisites: []
-      mastery_threshold: 0.85
+      mastery_threshold: 0.80
       regression_threshold: 0.65
       mastery_window: 20
       review_probability: 0.30
       score_key: q_V_correct
-      learnability_threshold: 0.10  # Advance when variance collapsed (p > ~0.89)
+      learnability_threshold: 0.17  # Advance when p >= 0.80
 
     spring_only:
       match_metadata: {system: spring}
       prerequisites: [freefall]  # Must master freefall before spring
-      mastery_threshold: 0.85
+      mastery_threshold: 0.80
       regression_threshold: 0.65
       mastery_window: 20
       review_probability: 0.30
       score_key: q_V_correct
-      learnability_threshold: 0.10
+      learnability_threshold: 0.17
 
     # Compound skills — prerequisites required, lower threshold
     # Tutorial-tracked prompts bypass tier gate — skill gate is the authority
@@ -139,7 +142,7 @@ tutorial:
       mastery_window: 20
       review_probability: 0.30
       score_key: q_correct_H
-      learnability_threshold: 0.12  # Slightly more lenient for compound skills
+      learnability_threshold: 0.20  # More lenient for compound skills
 
     damped_spring:
       match_metadata: {system: stiff_spring}
@@ -149,7 +152,7 @@ tutorial:
       mastery_window: 20
       review_probability: 0.30
       score_key: q_correct_H
-      learnability_threshold: 0.12
+      learnability_threshold: 0.20
 
     # Boss level — multiple interacting components
     driven_oscillator:
@@ -160,7 +163,7 @@ tutorial:
       mastery_window: 20
       review_probability: 0.30
       score_key: q_correct_H
-      learnability_threshold: 0.15  # Most lenient — boss is harder
+      learnability_threshold: 0.22  # Most lenient — boss is harder
 
 logging:
   mlflow_experiment: hamiltonian-curriculum-400

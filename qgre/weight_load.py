@@ -16,6 +16,11 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+try:
+    from qgre.lora_dropout import apply_lora_dropout
+except ImportError:
+    apply_lora_dropout = None
+
 
 class WeightLoader:
     """Inject weights into vLLM engine."""
@@ -47,16 +52,33 @@ class WeightLoader:
         """
         from unsloth_zoo.vllm_utils import prepare_vllm_lora_loading, load_lora_directly
 
+        # WS3-001: Track dropout state, skip sync if dropout active
+        if apply_lora_dropout is not None and getattr(apply_lora_dropout, '_dropout_active', False):
+            import warnings
+            warnings.warn(
+                "WS3-001: sync_lora_direct called while LoRA dropout is active. "
+                "Skipping sync to avoid race condition. Call restore() first."
+            )
+            return
+
         if first_call or not self._direct_ready:
             # Bootstrap: register adapter once, set up GPU→GPU copy mappings
-            self._lora_request = model.load_lora(
-                self._get_adapter_config_path(), load_tensors=True
-            )
+            # W2: Track whether load_lora was called to prevent double-load on recovery
+            if self._lora_request is None:
+                if not getattr(self, "_load_lora_called", False):
+                    self._lora_request = model.load_lora(
+                        self._get_adapter_config_path(), load_tensors=True
+                    )
+                    self._load_lora_called = True
             try:
                 prepare_vllm_lora_loading(model)
                 self._direct_ready = True
             except Exception as e:
                 import traceback
+                # WS3-002: Reset _direct_ready on exception
+                self._direct_ready = False
+                self._lora_request = None
+                self._load_lora_called = False
                 raise RuntimeError(
                     f"prepare_vllm_lora_loading failed — direct LoRA sync unavailable. "
                     f"Check vLLM engine initialization.\nOriginal error: {e}\n{traceback.format_exc()}"
@@ -81,41 +103,66 @@ class WeightLoader:
                 "Engine must be initialized before weight sync. Check generation_backend setup."
             )
 
-        synced = []
+        # W3: Validate all modules exist before any copy (atomic sync)
         expected = list(weights.keys())
-        for name, tensor in weights.items():
+        for name in expected:
             if name == "lm_head":
-                try:
-                    target = vllm_model.lm_head.weight
-                except AttributeError:
-                    warnings.warn("lm_head not found in vLLM model — skipping")
-                    continue
-                if tensor.shape != target.shape:
+                if not hasattr(vllm_model, "lm_head"):
                     raise RuntimeError(
-                        f"Shape mismatch syncing lm_head: training={tensor.shape} vs vLLM={target.shape}"
+                        f"W3: modules_to_save sync validation: lm_head not found in vLLM model. "
+                        f"Cannot sync {expected}. Check vLLM model structure."
                     )
-                # Check dtype match before copy, warn if mismatch
-                if tensor.dtype != target.dtype:
-                    import warnings
-                    warnings.warn(f"lm_head dtype mismatch: training={tensor.dtype} vs vLLM={target.dtype}. Converting.")
-                target.data.copy_(tensor.to(target.dtype))
-                synced.append(name)
             elif name == "embed_tokens":
-                try:
-                    target = vllm_model.model.embed_tokens.weight
-                except AttributeError:
-                    warnings.warn("embed_tokens not found in vLLM model — skipping")
-                    continue
-                if tensor.shape != target.shape:
+                if not hasattr(vllm_model, "model") or not hasattr(vllm_model.model, "embed_tokens"):
                     raise RuntimeError(
-                        f"Shape mismatch syncing embed_tokens: training={tensor.shape} vs vLLM={target.shape}"
+                        f"W3: modules_to_save sync validation: embed_tokens not found in vLLM model. "
+                        f"Cannot sync {expected}. Check vLLM model structure."
                     )
-                # Check dtype match before copy, warn if mismatch
-                if tensor.dtype != target.dtype:
-                    import warnings
-                    warnings.warn(f"embed_tokens dtype mismatch: training={tensor.dtype} vs vLLM={target.dtype}. Converting.")
-                target.data.copy_(tensor.to(target.dtype))
-                synced.append(name)
+
+        synced = []
+        try:
+            for name, tensor in weights.items():
+                if name == "lm_head":
+                    try:
+                        target = vllm_model.lm_head.weight
+                    except AttributeError:
+                        warnings.warn("lm_head not found in vLLM model — skipping")
+                        continue
+                    if tensor.shape != target.shape:
+                        raise RuntimeError(
+                            f"Shape mismatch syncing lm_head: training={tensor.shape} vs vLLM={target.shape}"
+                        )
+                    # Check dtype match before copy, warn if mismatch
+                    if tensor.dtype != target.dtype:
+                        import warnings
+                        warnings.warn(f"lm_head dtype mismatch: training={tensor.dtype} vs vLLM={target.dtype}. Converting.")
+                    target.data.copy_(tensor.to(device=target.device, dtype=target.dtype))
+                    synced.append(name)
+                elif name == "embed_tokens":
+                    try:
+                        target = vllm_model.model.embed_tokens.weight
+                    except AttributeError:
+                        warnings.warn("embed_tokens not found in vLLM model — skipping")
+                        continue
+                    if tensor.shape != target.shape:
+                        raise RuntimeError(
+                            f"Shape mismatch syncing embed_tokens: training={tensor.shape} vs vLLM={target.shape}"
+                        )
+                    # Check dtype match before copy, warn if mismatch
+                    if tensor.dtype != target.dtype:
+                        import warnings
+                        warnings.warn(f"embed_tokens dtype mismatch: training={tensor.dtype} vs vLLM={target.dtype}. Converting.")
+                    target.data.copy_(tensor.to(device=target.device, dtype=target.dtype))
+                    synced.append(name)
+        except Exception as e:
+            # WS3-006: Rollback on failure (log error, don't crash)
+            import warnings
+            warnings.warn(
+                f"WS3-006: modules_to_save sync failed mid-operation. "
+                f"Synced: {synced}, expected: {expected}. Error: {e}. "
+                "Weights may be inconsistent — restart training from checkpoint."
+            )
+            raise
 
         # WS-R1-4: Track expected vs synced and raise if mismatch
         if expected and set(expected) != set(synced):
@@ -124,7 +171,7 @@ class WeightLoader:
                 f"Missing: {set(expected) - set(synced)}"
             )
         # Only sync if we actually copied modules_to_save (restores pre-harden behavior)
-        if synced:
+        if synced and torch.cuda.is_available():
             torch.cuda.synchronize()
 
     def get_vllm_model(self):
@@ -156,16 +203,36 @@ class WeightLoader:
                 continue
             model = getattr(model_runner, "model", None)
             if model is not None:
-                # WS-R1-5: Validate traversal result has expected vLLM model structure
+                # W2-3: Validate both lm_head and embed_tokens
                 if not hasattr(model, "lm_head"):
                     warnings.warn(
                         "vLLM model traversal returned object without lm_head — "
                         "may be wrong type due to vLLM version change. Skipping."
                     )
                     continue
+                if not hasattr(model, "model") or not hasattr(model.model, "embed_tokens"):
+                    warnings.warn(
+                        "W2-3: vLLM model traversal returned object without embed_tokens — "
+                        "may be wrong type due to vLLM version change. Skipping."
+                    )
+                    continue
                 return model
 
-        return None
+        # WS3-010: Log diagnostic info on traversal failure
+        import logging
+        logging.getLogger(__name__).error(
+            "WS3-010: get_vllm_model traversal failed. Diagnostic info: "
+            f"model_type={type(self._model).__name__}, "
+            f"has_vllm_engine={hasattr(self._model, 'vllm_engine')}, "
+            f"has_model={hasattr(self._model, 'model')}, "
+            f"base_has_vllm_engine={hasattr(getattr(self._model, 'model', None), 'vllm_engine')}"
+        )
+        raise RuntimeError(
+            "get_vllm_model: traversal failed. Could not find vLLM model via engine chain. "
+            f"Checked attributes: vllm_engine, model. "
+            f"Model type: {type(self._model).__name__}. "
+            "Possible causes: vLLM engine not initialized, or vLLM API changed."
+        )
 
     def flush_kv_cache(self) -> None:
         """Flush vLLM KV cache to reclaim VRAM without destroying the engine.
@@ -209,12 +276,22 @@ class WeightLoader:
                     if gpu_allocator is not None and hasattr(gpu_allocator, "free_all"):
                         gpu_allocator.free_all()
         except AttributeError as e:
-            # Expected if vLLM API changed. Warn once so user knows flush is skipped.
-            if not getattr(self, "_kv_scheduler_warned", False):
-                warnings.warn(f"KV cache scheduler flush skipped (vLLM API change): {e}")
+            # W2-6: Track failure count and log periodically
+            if not hasattr(self, "_kv_scheduler_warned_count"):
+                self._kv_scheduler_warned_count = 0
+            self._kv_scheduler_warned_count += 1
+            if not getattr(self, "_kv_scheduler_warned", False) or self._kv_scheduler_warned_count % 100 == 0:
+                warnings.warn(
+                    f"KV cache scheduler flush skipped (vLLM API change): {e}. "
+                    f"(occurred {self._kv_scheduler_warned_count} times)"
+                )
                 self._kv_scheduler_warned = True
         except Exception as e:
-            warnings.warn(f"KV cache scheduler flush failed: {e}")
+            # W4: Raise error instead of warning when flush fails
+            raise RuntimeError(
+                f"W4: KV cache scheduler flush failed: {e}. Stale cache may cause hallucinations. "
+                "Check vLLM scheduler state."
+            ) from e
 
         # Zero GPU cache tensors directly — pre-check each attribute in chain
         model_executor = getattr(llm_engine, "model_executor", None)
@@ -228,7 +305,9 @@ class WeightLoader:
                 self._kv_worker_warned = True
         else:
             try:
-                for layer_cache in gpu_cache:
+                # W2-5: Handle both list and dict structures
+                cache_items = gpu_cache.values() if isinstance(gpu_cache, dict) else gpu_cache
+                for layer_cache in cache_items:
                     if isinstance(layer_cache, torch.Tensor):
                         layer_cache.zero_()
                     elif isinstance(layer_cache, (list, tuple)):
@@ -253,3 +332,34 @@ class WeightLoader:
             path = tempfile.mkdtemp(prefix="qgre_adapter_")
             self._adapter_path = path
         return path
+
+    def reset_state(self):
+        """WS3-009: Reset state on engine recreate."""
+        self._direct_ready = False
+        self._lora_request = None
+        # W2: Reset load_lora tracking on state reset
+        self._load_lora_called = False
+
+    def cleanup_adapter_tempdir(self):
+        """Explicitly clean up adapter tempdir. Call at trainer shutdown."""
+        import shutil
+        path = getattr(self, "_adapter_path", None)
+        # WS3-004: Track cleanup state to avoid double-free
+        if path is not None and not getattr(self, "_cleaned_up", False):
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+                self._adapter_path = None
+                self._cleaned_up = True
+            except Exception as e:
+                warnings.warn(f"Failed to clean up adapter tempdir {path}: {e}")
+
+    def __del__(self):
+        """Clean up tempdir on deletion."""
+        import shutil
+        path = getattr(self, "_adapter_path", None)
+        # WS3-004: Only cleanup if not already cleaned
+        if path is not None and not getattr(self, "_cleaned_up", False):
+            try:
+                shutil.rmtree(path, ignore_errors=True)
+            except Exception:
+                pass

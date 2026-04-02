@@ -89,6 +89,7 @@ if HAS_TRITON:
             label_in_tile = (label >= v_start) & (label < v_start + BLOCK_V)
             if label_in_tile:
                 label_idx = label - v_start
+                # GB3-003: Explicit -inf assignment if label not found (was implicit)
                 label_logit = tl.load(
                     weight_ptr + label * hidden_dim + h_offs,
                     mask=None,
@@ -122,6 +123,8 @@ if HAS_TRITON:
 
         # log_softmax(label) = label_logit - max_logit - log(sum_exp)
         log_prob = label_logit - max_logit - tl.log(sum_exp)
+        # LC5: Clamp to ≤0 — logprobs must be in [-inf, 0]; positive values indicate numerical issues
+        log_prob = tl.minimum(log_prob, 0.0)
         tl.store(output_ptr + pid, log_prob)
 
 
@@ -149,8 +152,28 @@ def triton_logprobs_from_hidden(
     vocab_size = lm_head.weight.shape[0]
     has_bias = lm_head.bias is not None
 
+    # L2: Validate labels are within vocab bounds before kernel call
+    if labels.numel() > 0:
+        label_min = labels.min().item()
+        label_max = labels.max().item()
+        if label_min < 0 or label_max >= vocab_size:
+            raise ValueError(
+                f"L2: Triton logprob kernel: label out of bounds. "
+                f"Label range [{label_min}, {label_max}] exceeds vocab_size={vocab_size}. "
+                f"Invalid labels would cause -inf logprobs without masking. "
+                f"Check tokenizer and label data."
+            )
+
     # Qwen3: vocab=151936, divisible by 128 but NOT 256
     BLOCK_V = 128
+
+    # Validate vocab_size is divisible by BLOCK_V
+    if vocab_size % BLOCK_V != 0:
+        raise ValueError(
+            f"Triton logprob kernel requires vocab_size % BLOCK_V == 0, "
+            f"got vocab_size={vocab_size}, BLOCK_V={BLOCK_V}. "
+            f"Use a different BLOCK_V or disable fused logprobs."
+        )
 
     # Return empty tensor early if seq_len=0 or batch=0
     if seq_len == 0 or batch == 0:
@@ -158,10 +181,29 @@ def triton_logprobs_from_hidden(
 
     result = torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
 
+    # Validate all tensors on same device before kernel call
+    ref_device = hidden_states.device
+    if lm_head.weight.device != ref_device:
+        raise RuntimeError(
+            f"Device mismatch: hidden_states on {ref_device}, lm_head.weight on {lm_head.weight.device}. "
+            "All tensors must be on the same device for Triton kernel."
+        )
+    if has_bias and lm_head.bias.device != ref_device:
+        raise RuntimeError(
+            f"Device mismatch: hidden_states on {ref_device}, lm_head.bias on {lm_head.bias.device}. "
+            "All tensors must be on the same device for Triton kernel."
+        )
+
     for b in range(batch):
         h = hidden_states[b].contiguous()  # [seq, hidden_dim]
         lab = labels[b].contiguous()       # [seq]
         out = result[b]                    # [seq]
+
+        if lab.device != ref_device:
+            raise RuntimeError(
+                f"Device mismatch: batch {b} labels on {lab.device}, expected {ref_device}. "
+                "All tensors must be on the same device for Triton kernel."
+            )
 
         grid = (seq_len,)
         _fused_logprob_kernel[grid](

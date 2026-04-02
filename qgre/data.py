@@ -83,17 +83,18 @@ class QGREDataLoader:
 
     def _prepare(self, prompts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Tokenize, filter overlong, store results."""
-        # Validate metadata_columns exist in first prompt
+        # DP3-002: Sample multiple rows for validation (e.g., first 10)
         if self.metadata_columns and prompts:
-            first_row = prompts[0]
-            missing = [col for col in self.metadata_columns if col not in first_row]
-            if missing:
-                import warnings
-                warnings.warn(
-                    f"metadata_columns {missing} not found in prompt data. "
-                    f"Available columns: {list(first_row.keys())}. "
-                    "All lookups for these columns will return None."
-                )
+            sample_size = min(10, len(prompts))
+            for idx in range(sample_size):
+                row = prompts[idx]
+                missing = [col for col in self.metadata_columns if col not in row]
+                if missing:
+                    raise ValueError(
+                        f"Required metadata_columns {missing} not found in prompt data at index {idx}. "
+                        f"Available columns: {list(row.keys())}. "
+                        "Update metadata_columns in config or add missing columns to training data."
+                    )
         items = []
         for row in prompts:
             text = row[self.prompt_column]
@@ -147,6 +148,11 @@ class QGREDataLoader:
                 token_ids = self.tokenizer.encode(text)
 
             if len(token_ids) > self.max_prompt_length:
+                import warnings
+                warnings.warn(
+                    f"Prompt truncated: {len(token_ids)} tokens > max_prompt_length={self.max_prompt_length}. "
+                    "This prompt will be skipped. Increase max_prompt_length if this is unintended."
+                )
                 continue  # Filter overlong
 
             metadata = {col: row.get(col) for col in self.metadata_columns}
@@ -177,12 +183,27 @@ class QGREDataLoader:
         Called by the trainer on phase advancement to gradually introduce harder problems.
         """
         if difficulty_column not in self.metadata_columns:
-            import warnings
-            warnings.warn(
+            raise ValueError(
                 f"set_difficulty_gate: difficulty_column='{difficulty_column}' "
                 f"not in metadata_columns={self.metadata_columns}. "
-                "All prompts will have empty difficulty, gate may fail. "
+                "Cannot gate by difficulty without the column. "
                 "Add difficulty_column to metadata_columns in config."
+            )
+        # DP3-001: Validate column exists in actual data at set_difficulty_gate time
+        if self.items:
+            sample_item = self.items[0]
+            if difficulty_column not in sample_item["metadata"]:
+                raise ValueError(
+                    f"DP3-001: difficulty_column='{difficulty_column}' not found in actual data metadata. "
+                    f"Available keys: {list(sample_item['metadata'].keys())}. "
+                    "Check that difficulty_column is in metadata_columns and present in training data."
+                )
+        # DP3-003: Warn if metadata_columns is empty but difficulty_column is set
+        if not self.metadata_columns:
+            import warnings
+            warnings.warn(
+                "DP3-003: metadata_columns is empty but difficulty_column is set. "
+                "Difficulty gating will not work. Add difficulty_column to metadata_columns."
             )
         self._difficulty_gate = (allowed_difficulties, difficulty_column)
 
@@ -201,23 +222,60 @@ class QGREDataLoader:
         # Apply difficulty gate: zero out prompts above the current phase
         if hasattr(self, "_difficulty_gate") and self._difficulty_gate is not None:
             allowed, col = self._difficulty_gate
+            filtered_count = 0
+            none_count = 0
             for i, item in enumerate(self.items):
-                difficulty = item["metadata"].get(col, "")
+                difficulty = item["metadata"].get(col)
+                # DP3-010: Treat None same as missing, don't convert to empty string
+                if difficulty is None:
+                    none_count += 1
+                    weights[i] = 0.0
+                    filtered_count += 1
+                    continue
+                # DP3-010: Explicit check — don't convert None to ""
                 if difficulty not in allowed:
                     weights[i] = 0.0
+                    filtered_count += 1
+            if none_count > 0:
+                import warnings
+                warnings.warn(
+                    f"DP3-010: Difficulty gate: {none_count}/{len(self.items)} prompts have difficulty=None "
+                    f"and were filtered. Check difficulty_column '{col}' data."
+                )
 
+        # DP3-004: Warn early if combined filtering zeroes all
         if weights.sum() == 0:
-            # Fallback: if all weights are zero (misconfigured gate), use uniform
+            import warnings
+            warnings.warn(
+                "DP3-004: ALL priority weights are zero after priority/difficulty gate filtering. "
+                "Falling back to uniform sampling. Check: (1) difficulty_gate allowed_difficulties, "
+                "(2) priority weights, (3) metadata column values."
+            )
             weights = torch.ones(len(self.items), dtype=torch.float64)
 
         if self._priorities is not None or (hasattr(self, "_difficulty_gate") and self._difficulty_gate is not None):
-            # Add epsilon only to non-zero weights (preserve hard zeros from difficulty gate)
+            # DP2-007: Filter out zero-weight prompts before multinomial sampling
             mask = weights > 0
-            weights[mask] = weights[mask] + 1e-8
-            weights = weights / weights.sum()
-            indices = torch.multinomial(
-                weights, len(self.items), replacement=True, generator=gen,
-            ).tolist()
+            if mask.sum() == 0:
+                import warnings
+                warnings.warn("All weights are zero after filtering — falling back to uniform sampling")
+                indices = torch.randperm(len(self.items), generator=gen).tolist()
+            else:
+                # Only sample from non-zero weights
+                nonzero_indices = torch.nonzero(mask, as_tuple=True)[0]
+                nonzero_weights = weights[mask]
+                nonzero_weights = nonzero_weights + 1e-8
+                nonzero_weights = nonzero_weights / nonzero_weights.sum()
+                sampled = torch.multinomial(
+                    nonzero_weights, len(self.items), replacement=True, generator=gen,
+                )
+                # DP3-008: Add assertion that remapped indices are valid
+                indices = nonzero_indices[sampled].tolist()
+                if any(idx >= len(self.items) or idx < 0 for idx in indices):
+                    raise RuntimeError(
+                        f"DP3-008: Multinomial sampling produced invalid indices. "
+                        f"Max index: {max(indices)}, items: {len(self.items)}"
+                    )
         else:
             indices = torch.randperm(len(self.items), generator=gen).tolist()
 
@@ -226,6 +284,15 @@ class QGREDataLoader:
     def _left_pad(self, token_ids_list: list[list[int]]) -> tuple[torch.Tensor, torch.Tensor]:
         """Left-pad a batch of token ID lists to max_prompt_length."""
         pad_id = getattr(self.tokenizer, "pad_token_id", 0) or 0
+        # DP2-006: Validate pad_token_id is within vocab bounds
+        # Use len(tokenizer) not vocab_size — special tokens (e.g., <|fim_pad|>)
+        # are valid but may exceed the base vocab_size property
+        vocab_size = len(self.tokenizer) if hasattr(self.tokenizer, "__len__") else None
+        if vocab_size is not None and pad_id >= vocab_size:
+            raise ValueError(
+                f"pad_token_id={pad_id} >= vocab_size={vocab_size}. "
+                "Invalid tokenizer configuration. Set tokenizer.pad_token_id to a valid token ID."
+            )
         batch_size = len(token_ids_list)
         input_ids = torch.full(
             (batch_size, self.max_prompt_length), pad_id, dtype=torch.long,

@@ -41,6 +41,19 @@ def selective_log_softmax(
     Returns:
         [...] gathered log probabilities (same shape as index)
     """
+    # GB3-002: Add shape assertion before gather
+    if logits.shape[0] != index.shape[0]:
+        raise ValueError(
+            f"GB3-002: selective_log_softmax batch size mismatch. "
+            f"logits.shape[0]={logits.shape[0]} != index.shape[0]={index.shape[0]}"
+        )
+    if len(logits.shape) < 2 or len(index.shape) < 1:
+        raise ValueError(
+            f"GB3-002: selective_log_softmax shape error. "
+            f"logits.shape={logits.shape} (expected [..., vocab]), "
+            f"index.shape={index.shape} (expected [...])."
+        )
+
     if logits.dtype in (torch.float32, torch.float64):
         # logsumexp identity: log_softmax(x_i) = x_i - logsumexp(x)
         # Loop over batch to avoid materializing full [batch, seq, vocab]
@@ -50,13 +63,15 @@ def selective_log_softmax(
     else:
         # GEN-R1-5: bf16/fp16: convert to FP32 BEFORE log_softmax for stability
         # logsumexp in BF16 loses precision — compute log_softmax in FP32.
-        token_logprobs = torch.zeros_like(index, dtype=torch.float32)
-        for i, (logits_row, index_row) in enumerate(zip(logits, index)):
+        # GB2-004: Use functional approach to preserve gradients (no in-place)
+        logprobs_list = []
+        for logits_row, index_row in zip(logits, index):
             logprobs_row = logits_row.float().log_softmax(dim=-1)
-            token_logprobs[i] = torch.gather(
+            selected = torch.gather(
                 logprobs_row, dim=-1, index=index_row.unsqueeze(-1)
             ).squeeze(-1)
-        return token_logprobs
+            logprobs_list.append(selected)
+        return torch.stack(logprobs_list).to(torch.float32)
 
 
 def logprobs_from_logits(

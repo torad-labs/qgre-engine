@@ -37,7 +37,25 @@ class DataConfig:
     # Prompts with difficulty not in the current phase's set get zero sampling weight.
     # The difficulty value comes from the metadata column named by difficulty_column.
     difficulty_column: str | None = None  # e.g. "difficulty"
-    difficulty_schedule: dict | None = None  # e.g. {1: ["tier1","edge"], 2: ["tier1","edge","tier2"], ...}
+    difficulty_schedule: dict | None = None  # DEPRECATED: use tier_order + initial_tiers instead
+
+    def __post_init__(self):
+        """Validate config after initialization."""
+        if self.difficulty_schedule is not None:
+            import warnings
+            warnings.warn(
+                "difficulty_schedule is deprecated. Use tier_order + initial_tiers for 2D curriculum. "
+                "difficulty_schedule will be removed in a future version."
+            )
+        # DP3-009: Validate initial_tiers subset of tier_order
+        if self.tier_order and self.initial_tiers:
+            tier_order_set = set(self.tier_order)
+            initial_set = set(self.initial_tiers)
+            if not initial_set.issubset(tier_order_set):
+                raise ValueError(
+                    f"DP3-009: initial_tiers {self.initial_tiers} contains tiers not in tier_order {self.tier_order}. "
+                    f"Invalid tiers: {initial_set - tier_order_set}"
+                )
     system_prompt_column: str | None = None  # e.g. "system_prompt" — separate system message in chat template
     # 2D mastery matrix curriculum (takes precedence over difficulty_schedule when set)
     tier_order: list[str] | None = None           # e.g. ["tier1", "edge", "tier2", "tier3"]
@@ -53,6 +71,7 @@ class GenerationConfig:
     top_k: int = 20
     min_p: float = 0.1
     max_tokens: int = 4096
+    repetition_penalty: float = 1.0  # 1.0 = disabled, >1.0 penalizes repeated tokens in vLLM sampling
     stop_token_ids: list[int] = field(default_factory=list)  # Required per-model. Qwen3: [151643, 151645]
     max_logprobs: int = 5  # vLLM max_logprobs for LLDS logprob extraction
     # LoRA dropout during generation: partially revert to base model for exploration
@@ -196,6 +215,10 @@ class AlgorithmConfig:
     # Mastered steps get weight 1.0, frontier steps get (1 + frontier_amplification).
     # 0=off, 2.0=triple gradient on bottleneck steps (recommended for multi-step curriculum).
     frontier_amplification: float = 2.0
+    # Scale factor for final token advantages before loss computation.
+    # Compresses advantage signal to fit small model logit resolution.
+    # 1.0 = no scaling, 0.1 = 10x compression (recommended for 1-3B models).
+    advantage_scale: float = 1.0
 
 
 @dataclass
@@ -217,6 +240,10 @@ class TrainingConfig:
     kv_cache_flush_freq: int = 50  # Flush vLLM KV cache every N steps (0=never)
     quality_window_size: int = 20  # Rolling window for mastery score tracking
     seed: int = -1  # Random seed for training. -1 = time-based (non-reproducible), 0+ = fixed seed.
+    gradient_probe_steps: int = 0  # If > 0, capture actual logit changes on physics tokens for first N steps
+    gradient_probe_prompt: str = ""  # Fixed prompt for logit measurement (if empty, uses first batch prompt)
+    log_attention_patterns: bool = False  # Log attention entropy and collapse patterns at each step
+    attention_log_freq: int = 10  # Log attention stats every N steps (if log_attention_patterns enabled)
 
 
 @dataclass

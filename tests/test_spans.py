@@ -233,14 +233,21 @@ class TestFindExpressionSpans:
 
         assert len(spans["q_V_correct"]) == 2
 
-    def test_format_is_full_completion(self):
+    def test_format_targets_labeled_sections_not_full_completion(self):
+        """Format spans should target labeled sections, NOT full completion."""
         from examples.hamiltonian.reward_fn import _find_expression_spans
 
+        # Text with no labels - format should be empty (no signal to unlabeled text)
         text = "some completion text"
         spans = _find_expression_spans(text)
+        assert spans["q_format"] == []  # No labels found, no format signal
 
-        assert spans["q_format"] == [(0, len(text))]
-        assert spans["q_has_math"] == [(0, len(text))]
+        # Text with labels - format should target those sections only
+        text_with_labels = "COORDINATES: q = x\nHAMILTONIAN: H = p²"
+        spans = _find_expression_spans(text_with_labels)
+        assert len(spans["q_format"]) >= 1  # At least one labeled section
+        # Should NOT be full completion - only labeled sections get format signal
+        assert spans["q_format"] != [(0, len(text_with_labels))]
 
     def test_equation_spans(self):
         from examples.hamiltonian.reward_fn import _find_expression_spans
@@ -285,8 +292,11 @@ class TestRewardResultSpans:
         assert "q_correct_H" in result.scored_spans
         assert "q_format" in result.scored_spans
         assert len(result.scored_spans["q_correct_H"]) >= 1
-        # Format should be full completion
-        assert result.scored_spans["q_format"] == [(0, len(text))]
+        # Format targets labeled sections only - NOT full completion
+        # This prevents rewarding arbitrary text outside labeled regions
+        assert result.scored_spans["q_format"] != [(0, len(text))], \
+            "q_format must NOT span full completion - only labeled sections"
+        assert len(result.scored_spans["q_format"]) >= 1, "q_format should have labeled section spans"
 
 
 # --- Per-quality advantage edge cases ---

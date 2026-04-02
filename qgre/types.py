@@ -580,7 +580,11 @@ class GameState:
                 # Untracked: tier gate decides
                 is_active = active_tiers is None or tier in active_tiers
 
+            # Aspiration warmup: dampen after tutorial skill unlock OR tier phase advance
             warmup = self.get_aspiration_warmup_factor(pid_str) if self.tutorial_enabled else 1.0
+            # Also dampen after tier phase advance — prevents gradient shock on new phases
+            tier_warmup = self._get_tier_phase_warmup(tier)
+            warmup = min(warmup, tier_warmup)
 
             contexts.append(PromptContext(
                 prompt_id=pid,
@@ -640,6 +644,20 @@ class GameState:
         if skill_key is not None:
             return self.skill_tree[skill_key].mastery_threshold
         return self.default_aspiration_target
+
+    def _get_tier_phase_warmup(self, tier: str, warmup_steps: int = 20) -> float:
+        """Return aspiration warmup for recently-advanced tier phases.
+
+        Ramps from 0→1 over warmup_steps after a tier phase advance.
+        Prevents gradient shock from full aspiration pressure when the model
+        encounters harder quality requirements at the new phase.
+        """
+        if tier not in self.tier_steps_at_phase_start:
+            return 1.0  # No record → full aspiration
+        steps_since = self.step_count - self.tier_steps_at_phase_start[tier]
+        if steps_since >= warmup_steps:
+            return 1.0
+        return max(0.0, steps_since / warmup_steps)
 
     def get_aspiration_warmup_factor(self, prompt_id: str) -> float:
         """Return aspiration warmup multiplier (0→1) for recently unlocked skills.
@@ -803,11 +821,13 @@ class GameState:
 
         mastery = self.get_tier_step_mastery(tier, current_phase)
         if mastery >= self.mastery_threshold:
-
+            import logging
+            _logger = logging.getLogger("qgre.types")
             old_phase = current_phase
             self.tier_phases[tier] = current_phase + 1
             self.phase_history.append((self.step_count, tier, old_phase, current_phase + 1))
             self.tier_steps_at_phase_start[tier] = self.step_count
+            _logger.warning(f"[PHASE ADVANCE] tier={tier}, {old_phase}→{current_phase+1}, step={self.step_count}, mastery={mastery:.3f}")
             return True
         return False
 

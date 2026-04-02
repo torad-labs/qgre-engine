@@ -116,13 +116,14 @@ class TestGetHiddenStatesAndLmHead:
             get_hidden_states_and_lm_head(model, input_ids, labels=torch.zeros(1, 10))
 
     def test_shape_check_returns_none_when_output_matches_vocab(self):
-        """When output last dim == vocab_size, function returns (None, None)."""
+        """When output last dim == vocab_size, function raises RuntimeError (GB3-005)."""
         # Model returns tensor with shape[-1] == vocab_size (got logits, not hidden states)
         model = self._make_stub_model(32, 100, return_dim=100)
         input_ids = torch.randint(0, 100, (1, 10))
-        hs, lm = get_hidden_states_and_lm_head(model, input_ids)
-        assert hs is None, "Should return None when shape matches vocab_size"
-        assert lm is None
+        # GB3-005: Should raise RuntimeError instead of returning None
+        import pytest
+        with pytest.raises(RuntimeError, match="GB3-005.*logits.*not hidden states"):
+            get_hidden_states_and_lm_head(model, input_ids)
 
     def test_shape_check_succeeds_when_output_is_hidden_dim(self):
         """When output last dim < vocab_size, function returns hidden states."""

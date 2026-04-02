@@ -27,7 +27,7 @@ from torch.utils.checkpoint import checkpoint as torch_checkpoint
 from qgre.nemo_extracted.logits import selective_log_softmax
 
 
-def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **kwargs):
+def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, output_attentions: bool = False, **kwargs):
     """Get hidden states and lm_head from model.
 
     UNSLOTH_RETURN_HIDDEN_STATES=1 is set globally at startup (__main__.py).
@@ -36,11 +36,15 @@ def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **k
     Args:
         model: The Unsloth-wrapped language model
         input_ids: [batch, seq] token IDs
+        output_attentions: If True, also return attention weights
         **kwargs: Additional kwargs passed to model forward (e.g., attention_mask)
 
     Returns:
-        (hidden_states, lm_head) — hidden_states [batch, seq, hidden], lm_head nn.Linear
-        Returns (None, None) if hidden states mode didn't take effect.
+        If output_attentions=False:
+            (hidden_states, lm_head) — hidden_states [batch, seq, hidden], lm_head nn.Linear
+        If output_attentions=True:
+            (hidden_states, lm_head, attentions) — attentions is tuple of [batch, n_heads, seq, seq]
+        Returns (None, None) or (None, None, None) if hidden states mode didn't take effect.
     """
     # CRITICAL: Do NOT pass labels. Unsloth issue #3000 (open): Qwen3Moe
     # bypasses NOT_RETURN_LOGITS when labels are present. See rejection framework.
@@ -62,10 +66,10 @@ def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **k
             lm_head = None  # Model doesn't implement get_output_embeddings
 
     if lm_head is None:
-        return None, None
+        return (None, None, None) if output_attentions else (None, None)
 
     # No env var toggling needed — set globally at startup
-    output = model(input_ids, **kwargs)
+    output = model(input_ids, output_attentions=output_attentions, **kwargs)
     hidden_states = output.logits if hasattr(output, "logits") else output
 
     # Model-agnostic shape check: use lm_head dimensions as ground truth.
@@ -73,23 +77,25 @@ def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, **k
     # lm_head.out_features → got logits. If matches in_features → got hidden states.
     last_dim = hidden_states.shape[-1]
     if last_dim == lm_head.out_features:
-        import warnings
-        warnings.warn(
-            f"get_hidden_states_and_lm_head: output dim {last_dim} matches vocab_size "
-            f"(lm_head.out_features={lm_head.out_features}). Model returned logits, "
-            f"not hidden states. UNSLOTH_RETURN_HIDDEN_STATES may not have taken effect."
+        # GB3-005: Raise explicit error instead of returning None
+        raise RuntimeError(
+            f"GB3-005: get_hidden_states returned logits (dim={last_dim}=vocab_size), not hidden states. "
+            f"UNSLOTH_RETURN_HIDDEN_STATES did not take effect. "
+            f"Check env var is set before model load."
         )
-        return None, None
     if last_dim != lm_head.in_features:
-        import warnings
-        warnings.warn(
-            f"get_hidden_states_and_lm_head: output dim {last_dim} matches neither "
+        # GB3-005: Raise explicit error instead of returning None
+        raise RuntimeError(
+            f"GB3-005: get_hidden_states output dim {last_dim} matches neither "
             f"hidden_dim ({lm_head.in_features}) nor vocab_size ({lm_head.out_features}). "
             f"Model output is corrupted or architecture is unsupported."
         )
-        return None, None
 
-    return hidden_states, lm_head
+    if output_attentions:
+        attentions = output.attentions if hasattr(output, "attentions") else None
+        return hidden_states, lm_head, attentions
+    else:
+        return hidden_states, lm_head
 
 
 def _chunk_forward(chunk_hidden: torch.Tensor, lm_head: nn.Linear, chunk_labels: torch.Tensor) -> torch.Tensor:

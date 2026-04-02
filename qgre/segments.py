@@ -4,6 +4,8 @@ import re
 from functools import partial
 from typing import Any, Callable
 
+import torch
+
 # --- Segmenter protocol ---
 # A segmenter takes token IDs and returns region labels (same length).
 # Region labels: "THINK", "STEP_1", "STEP_2", ..., "FORMAT", "OTHER"
@@ -155,15 +157,21 @@ def _hif_json_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
     for tid in token_ids:
         try:
             token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
+        except (torch.cuda.OutOfMemoryError, MemoryError):
+            raise  # Never swallow OOM — let it crash so we can diagnose
         except Exception:
             token_texts.append("")
             decode_failures += 1
+    # DP2-009: Track decode failure count, warn if > threshold
     if decode_failures > 0:
         import warnings
-        warnings.warn(
-            f"Segmenter per-token decode: {decode_failures}/{len(token_ids)} failures. "
-            f"Region mapping may be inaccurate."
-        )
+        failure_rate = decode_failures / len(token_ids) if token_ids else 0
+        if failure_rate > 0.05:  # Warn if >5% failures
+            warnings.warn(
+                f"Segmenter per-token decode: {decode_failures}/{len(token_ids)} failures "
+                f"({failure_rate*100:.1f}%). Region mapping may be inaccurate. "
+                "Check tokenizer compatibility."
+            )
 
     # Build char_offset → token_index mapping
     char_to_token = []
@@ -204,7 +212,7 @@ def make_hif_json_segmenter(tokenizer: Any) -> Segmenter:
     return partial(_hif_json_segmenter_impl, tokenizer=tokenizer)
 
 
-# --- Hamiltonian structured-label segmenter (decode-and-regex) ---
+# --- Hamiltonian structured-label segmenter (exact string matching, no regex) ---
 
 # --- Shared Hamiltonian label configuration (single source of truth) ---
 # Used by both the segmenter AND reward_fn.py for label extraction.
@@ -219,27 +227,51 @@ HAMILTONIAN_LABEL_ALIASES: dict[str, list[str]] = {
     "EQUATIONS": ["equations", "equations of motion", "hamilton's equations"],
 }
 
-# Maps label patterns to step regions. Order matters — first match wins at each position.
-# Each label's tokens get ONLY that label's quality signal.
-# Patterns match canonical names AND aliases, with markdown bold/headers.
-def _build_hamiltonian_patterns() -> list[tuple[str, str]]:
-    """Build segmenter patterns from the shared alias dict."""
-    step_map = {"COORDINATES": "STEP_1", "MOMENTUM": "STEP_2", "KINETIC": "STEP_3",
-                "POTENTIAL": "STEP_4", "HAMILTONIAN": "STEP_5", "EQUATIONS": "STEP_6"}
-    patterns = []
-    for label, region in step_map.items():
-        aliases = HAMILTONIAN_LABEL_ALIASES.get(label, [label.lower()])
-        all_names = [label] + aliases
-        # Build alternation: (?:COORDINATES|coordinates|coordinate|generalized coordinate)
-        alt = "|".join(re.escape(n) for n in all_names)
-        patterns.append((
-            rf"(?:^|\n)\s*(?:\*{{0,3}}|#{{1,4}}\s*)(?:{alt})\s*(?:\*{{0,3}})\s*:",
-            region,
-        ))
-    return patterns
+# Maps canonical labels to step regions
+HAMILTONIAN_LABEL_TO_STEP: dict[str, str] = {
+    "COORDINATES": "STEP_1",
+    "MOMENTUM": "STEP_2",
+    "KINETIC": "STEP_3",
+    "POTENTIAL": "STEP_4",
+    "HAMILTONIAN": "STEP_5",
+    "EQUATIONS": "STEP_6",
+}
 
 
-HAMILTONIAN_LABEL_PATTERNS: list[tuple[str, str]] = _build_hamiltonian_patterns()
+def _strip_markdown_prefix(line: str) -> str:
+    """Strip markdown formatting from start of line (headers, bold, etc.)."""
+    s = line.lstrip()
+    # Strip leading # headers
+    while s.startswith('#'):
+        s = s[1:]
+    s = s.lstrip()
+    # Strip leading ** or * (bold/italic)
+    while s.startswith('*'):
+        s = s[1:]
+    s = s.lstrip()
+    return s
+
+
+def _match_hamiltonian_label(line: str) -> tuple[str, int] | None:
+    """Check if line starts with a Hamiltonian label. Returns (canonical_label, colon_pos) or None.
+
+    Uses exact string matching — no regex.
+    """
+    cleaned = _strip_markdown_prefix(line).lower()
+
+    for canonical, aliases in HAMILTONIAN_LABEL_ALIASES.items():
+        # Check canonical name first
+        all_names = [canonical.lower()] + [a.lower() for a in aliases]
+        for name in all_names:
+            if cleaned.startswith(name):
+                # Must be followed by : (possibly with trailing ** from markdown)
+                rest = cleaned[len(name):].lstrip('*').lstrip()
+                if rest.startswith(':'):
+                    # Find colon position in original line
+                    colon_idx = line.find(':')
+                    if colon_idx >= 0:
+                        return (canonical, colon_idx)
+    return None
 
 
 def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
@@ -292,6 +324,8 @@ def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[st
     for tid in token_ids:
         try:
             token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
+        except (torch.cuda.OutOfMemoryError, MemoryError):
+            raise  # Never swallow OOM — let it crash so we can diagnose
         except Exception:
             token_texts.append("")
             decode_failures += 1
@@ -306,11 +340,16 @@ def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[st
         for _ in range(len(tt)):
             char_to_token.append(i)
 
-    # Find label positions
+    # Find label positions using exact string matching (no regex)
     label_spans: list[tuple[int, str]] = []  # (start_char, region)
-    for pattern, region in HAMILTONIAN_LABEL_PATTERNS:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
-            label_spans.append((m.start(), region))
+    char_pos = 0
+    for line in text.split('\n'):
+        match = _match_hamiltonian_label(line)
+        if match:
+            canonical_label, _ = match
+            region = HAMILTONIAN_LABEL_TO_STEP.get(canonical_label, "STEP_1")
+            label_spans.append((char_pos, region))
+        char_pos += len(line) + 1  # +1 for newline
 
     if not label_spans:
         return regions  # No labels found → all STEP_1
@@ -399,6 +438,8 @@ def _label_segmenter_impl(
     for tid in token_ids:
         try:
             token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
+        except (torch.cuda.OutOfMemoryError, MemoryError):
+            raise  # Never swallow OOM — let it crash so we can diagnose
         except Exception:
             token_texts.append("")
             decode_failures += 1

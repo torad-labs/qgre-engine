@@ -146,6 +146,15 @@ def cmd_train(args):
     print(f"  Reward: {args.reward}")
     print()
 
+    # Resume from checkpoint if requested
+    if args.resume:
+        trainer.setup_optimizer()  # Optimizer must exist before loading its state
+        checkpoint_dir = config.logging.checkpoint_dir
+        if trainer.resume(checkpoint_dir):
+            print(f"  Resumed from step {trainer.global_step}")
+        else:
+            print(f"  No checkpoint found in {checkpoint_dir}, starting fresh")
+
     trainer.train(dataloader, backend)
     print("Training complete.")
 
@@ -166,6 +175,10 @@ def main():
     train_p.add_argument(
         "--segmenter", default=None,
         help="Segmenter: 'uniform', 'qwen3_xml', or module:function (default: from config)",
+    )
+    train_p.add_argument(
+        "--resume", action="store_true",
+        help="Resume from latest checkpoint in checkpoint_dir",
     )
 
     args = parser.parse_args()

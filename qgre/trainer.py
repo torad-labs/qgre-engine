@@ -84,6 +84,7 @@ class QGRETrainer:
             self.game_state.active_tiers = list(data_cfg.initial_tiers)
             for t in data_cfg.initial_tiers:
                 self.game_state.tier_phases.setdefault(t, 1)
+                self.game_state.tier_steps_at_phase_start.setdefault(t, 0)
 
         # Step qualities and phase mapping — configurable per domain
         # step_qualities: from constructor arg, config YAML, or error
@@ -99,6 +100,14 @@ class QGRETrainer:
         self.step_qualities = sq
         self.phase_qualities = build_phase_qualities(sq)
         self._sq_validated = False  # Validate step_qualities keys against first reward result
+
+        # Weight sync strategy validation — fail fast at init, not during training
+        if config.model.load_in_4bit and config.model.weight_sync_strategy == "merge":
+            raise ValueError(
+                "weight_sync_strategy='merge' is incompatible with load_in_4bit=True. "
+                "MERGE creates new tensors and breaks shared memory with vLLM. "
+                "Use weight_sync_strategy='direct_copy' (default) for 4-bit training."
+            )
 
         # Algorithm setup
         alg = config.algorithm
@@ -144,6 +153,7 @@ class QGRETrainer:
         )
         self.advantage_estimator._aspiration_beta = spo_cfg.aspiration_beta
         self.advantage_estimator._aspiration_target = aspiration_target
+        self.advantage_estimator._advantage_scale = config.algorithm.advantage_scale
 
         # VPRM critic — per-region per-dimension learned baseline
         self.vprm_critic = None
@@ -182,22 +192,38 @@ class QGRETrainer:
         self._fused_chunk_size = config.algorithm.fused_logprob_chunk_size
         self._fused_validated = False  # One-time validation on first use
 
-        # Completion logger
-        self.completion_logger = CompletionLogger(config.logging.completion_dir)
+        # Completion logger (lazily initialized on first log to handle checkpoint resume)
+        self._completion_logger_path = config.logging.completion_dir
+        self._completion_logger = None
 
         # Training state
         self.global_step = 0
         self.optimizer: torch.optim.Optimizer | None = None
         self.scheduler: Any = None
         self._accumulated_loss = 0.0
+        self._accumulation_count = 0  # CP2-004: Track actual accumulation steps
 
-        # Validate weight sync strategy compatibility with quantization
-        if config.model.load_in_4bit and config.model.weight_sync_strategy == "merge":
-            raise ValueError(
-                "weight_sync_strategy='merge' is incompatible with load_in_4bit=True. "
-                "MERGE creates new tensors and breaks shared memory with vLLM. "
-                "Use weight_sync_strategy='direct_copy' (default) for 4-bit training."
-            )
+        # SPO filter monitoring — track drop rate to detect data starvation
+        self._spo_filter_stats = {"total": 0, "passed": 0, "dropped": 0, "warned": False}
+
+        # Gradient probe — measure actual logit changes on physics tokens for advantage_scale calibration
+        self._gradient_probe_steps = config.training.gradient_probe_steps
+        self._gradient_probe_log = []
+        self._gradient_probe_prompt_ids = None  # Fixed prompt for measurement
+        self._gradient_probe_physics_tokens = None  # Physics token IDs to track
+
+        # Attention pattern monitoring — detect laminar→turbulent transitions
+        self._log_attention = config.training.log_attention_patterns
+        self._attention_log_freq = config.training.attention_log_freq
+        self._attention_log = []  # Per-step attention statistics
+
+    @property
+    def completion_logger(self):
+        """Lazy completion logger — creates on first access, handles resume."""
+        if self._completion_logger is None:
+            from qgre.logging import CompletionLogger
+            self._completion_logger = CompletionLogger(self._completion_logger_path)
+        return self._completion_logger
 
     def _init_vprm_critic(self, hidden_dim: int, device: str | torch.device):
         """Lazily initialize VPRM critic once hidden_dim is known from first forward pass."""
@@ -417,10 +443,24 @@ class QGRETrainer:
                     if char_map is not None:
                         masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]))
                     else:
+                        import logging
+                        logging.getLogger(__name__).error(
+                            f"char_to_token_map returned None for sample {i} — cannot map scored_spans to tokens. "
+                            "Falling back to uniform advantage (no span signal). Check tokenizer decode consistency."
+                        )
                         masks = {}  # Mapping failed — fall back to segmenter
                 else:
                     masks = {}
                 batch_token_masks.append(masks)
+
+            # A4: Validate all samples have same mask status (all empty or all populated)
+            mask_statuses = [bool(m) for m in batch_token_masks]
+            if mask_statuses and not (all(mask_statuses) or not any(mask_statuses)):
+                import warnings
+                warnings.warn(
+                    f"A4: Heterogeneous batch detected — {sum(mask_statuses)} samples have masks, "
+                    f"{len(mask_statuses) - sum(mask_statuses)} don't. This may cause inconsistent advantage computation."
+                )
 
             # Check if span mapping succeeded for any sample
             # Debug: log span mapping status
@@ -481,8 +521,9 @@ class QGRETrainer:
                 if len(lps) != len(comp):
                     import warnings
                     warnings.warn(
-                        f"Logprobs length ({len(lps)}) != completion length ({len(comp)}) "
-                        f"for sample {i}. Disabling LLDS for this step."
+                        f"T3: Logprobs length ({len(lps)}) != completion length ({len(comp)}) "
+                        f"for sample {i}. LLDS is disabled for this step due to length mismatch. "
+                        "Check generation backend configuration."
                     )
                     valid = False
                     break
@@ -530,6 +571,27 @@ class QGRETrainer:
         _spo_filter_idx = None  # Maps filtered indices → original batch indices
         if self.config.algorithm.mode == "spo":
             useful = (padded_advs.abs() > self.config.algorithm.spo_filter_threshold).any(dim=-1)
+            # Track filter stats for data starvation detection
+            batch_total = len(completions)
+            batch_passed = useful.sum().item()
+            self._spo_filter_stats["total"] += batch_total
+            self._spo_filter_stats["passed"] += batch_passed
+            self._spo_filter_stats["dropped"] += batch_total - batch_passed
+            # Warn if drop rate exceeds 50% after 100+ samples
+            if (
+                not self._spo_filter_stats["warned"]
+                and self._spo_filter_stats["total"] >= 100
+            ):
+                drop_rate = self._spo_filter_stats["dropped"] / self._spo_filter_stats["total"]
+                if drop_rate > 0.5:
+                    import warnings
+                    warnings.warn(
+                        f"SPO filter drop rate {drop_rate:.1%} exceeds 50% "
+                        f"(dropped {self._spo_filter_stats['dropped']}/{self._spo_filter_stats['total']}). "
+                        "Model may be stuck — reward function returns near-zero signal for most samples. "
+                        "Check reward function thresholds and phase gating."
+                    )
+                    self._spo_filter_stats["warned"] = True
             if useful.sum() == 0:
                 # All advantages near-zero — skip backward pass but still record mastery + log completions
                 metrics = {"loss": 0.0, "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
@@ -682,9 +744,9 @@ class QGRETrainer:
                 mb_gen_lp = gen_logprobs_padded[mb_start:mb_end, 1:]  # Shift to match mb_lp indexing
                 min_lp_len = min(mb_lp.shape[1], mb_gen_lp.shape[1])
                 mb_old_lp = mb_gen_lp[:, :min_lp_len]
-                # Use large negative value instead of -inf to avoid inf in KL computation
+                # L5: Use -100 instead of -1e9 to prevent exp(inf) in KL computation
                 if mb_lp.shape[1] > min_lp_len:
-                    pad = torch.full((mb_lp.shape[0], mb_lp.shape[1] - min_lp_len), -1e9, device=device)
+                    pad = torch.full((mb_lp.shape[0], mb_lp.shape[1] - min_lp_len), -100.0, device=device)
                     mb_old_lp = torch.cat([mb_old_lp, pad], dim=1)
             else:
                 mb_old_lp = mb_lp.detach()
@@ -700,6 +762,16 @@ class QGRETrainer:
                         hidden_dim=mb_hidden_states.shape[-1],
                         device=device,
                     )
+
+                # Validate hidden_dim matches checkpoint (only on first forward after resume)
+                if hasattr(self, "_vprm_checkpoint_hidden_dim"):
+                    actual_hidden_dim = mb_hidden_states.shape[-1]
+                    if self._vprm_checkpoint_hidden_dim != actual_hidden_dim:
+                        raise RuntimeError(
+                            f"VPRM critic hidden_dim mismatch: checkpoint has {self._vprm_checkpoint_hidden_dim} "
+                            f"but model produces {actual_hidden_dim}. Model architecture changed between checkpoints."
+                        )
+                    del self._vprm_checkpoint_hidden_dim  # Only check once
 
                 # Compute VPRM advantages per-sample in this micro-batch
                 for mb_i in range(mb_end - mb_start):
@@ -727,8 +799,15 @@ class QGRETrainer:
                     sample_aq = active_qualities[orig_i] if orig_i < len(active_qualities) else []
                     # Get hidden states for this sample
                     sample_hs = mb_hidden_states[mb_i]  # [seq_len, hidden_dim]
-                    # Trim to completion length
+                    # Trim to completion length with bounds validation
                     comp_len = len(completions[orig_i]) if orig_i < len(completions) else sample_hs.shape[0]
+                    if comp_len > sample_hs.shape[0]:
+                        import warnings
+                        warnings.warn(
+                            f"VPRM: completion length ({comp_len}) > hidden states length ({sample_hs.shape[0]}) "
+                            f"for sample orig_i={orig_i}. Clamping to hidden states length."
+                        )
+                        comp_len = sample_hs.shape[0]
                     sample_hs_trimmed = sample_hs[:comp_len]
 
                     vprm_advs, vprm_loss, used_critic = compute_advantages_vprm(
@@ -742,8 +821,8 @@ class QGRETrainer:
                         frontier_steps=frontier_steps,
                         frontier_amplification=self.config.algorithm.frontier_amplification,
                         min_regions=self.config.vprm.spo_fallback_min_regions,
-                        aspiration_beta=self.advantage_estimator._aspiration_beta * batch_contexts[orig_i].aspiration_warmup,
-                        aspiration_target=batch_contexts[orig_i].aspiration_target,
+                        aspiration_beta=self.advantage_estimator._aspiration_beta * batch_contexts[orig_i].aspiration_warmup if orig_i < len(batch_contexts) else 0.0,
+                        aspiration_target=batch_contexts[orig_i].aspiration_target if orig_i < len(batch_contexts) else 0.8,
                     )
 
                     if used_critic:
@@ -809,10 +888,21 @@ class QGRETrainer:
                             orig_i = filtered_i
                         if orig_i < len(batch_token_masks) and batch_token_masks[orig_i]:
                             for q_name, q_mask in batch_token_masks[orig_i].items():
-                                # Shift mask to align with loss positions (logprobs predict next token)
-                                q_mask_shifted = q_mask[1:min_len+1] if q_mask.shape[0] > min_len else q_mask[:min_len]
-                                if q_mask_shifted.shape[0] < min_len:
-                                    continue
+                                # Shift mask to align with loss positions (logprobs[t] predicts token[t+1])
+                                # q_mask is in token space [0..completion_len-1]
+                                # Loss is computed for positions predicting tokens [1..seq_len-1]
+                                # So q_mask[i] contributes to loss position i-1; we need q_mask[1:]
+                                q_mask_shifted = q_mask[1:]  # Always shift by 1
+                                # Align to min_len: truncate if longer, pad with zeros if shorter
+                                if q_mask_shifted.shape[0] >= min_len:
+                                    q_mask_shifted = q_mask_shifted[:min_len]
+                                else:
+                                    # Pad with zeros — no advantage signal for positions beyond mask
+                                    pad_len = min_len - q_mask_shifted.shape[0]
+                                    q_mask_shifted = torch.cat([
+                                        q_mask_shifted,
+                                        torch.zeros(pad_len, device=q_mask.device, dtype=q_mask.dtype)
+                                    ])
                                 q_mask_shifted = q_mask_shifted.to(mb_per_token_loss.device)
                                 # Sum actual per-token loss contribution for this quality's span
                                 q_loss = (mb_per_token_loss[mb_i_inner] * q_mask_shifted[:min_len]).sum()
@@ -853,16 +943,18 @@ class QGRETrainer:
                 mb_metrics["llds_mask_ratio"] = llds_mask.sum().item() / max(mb_mask[:, :min_len].sum().item(), 1)
 
             # VPRM critic loss: normalize by sample count and add to policy loss
+            # T2-5: Guard div by zero to prevent NaN
             if mb_critic_count > 0:
                 mb_critic_loss = mb_critic_loss / mb_critic_count
-            if mb_critic_loss.requires_grad:
-                mb_loss = mb_loss + mb_critic_loss
-                mb_metrics["critic_loss"] = mb_critic_loss.item()
+                if mb_critic_loss.requires_grad:
+                    mb_loss = mb_loss + mb_critic_loss
+                    mb_metrics["critic_loss"] = mb_critic_loss.item()
 
             # TRN-R1-2: Check loss for NaN/inf BEFORE backward() to prevent optimizer corruption
             if not torch.isfinite(mb_loss):
+                mb_idx = mb_start // micro_batch_size + 1
                 raise RuntimeError(
-                    f"Step {self.global_step} micro-batch {mb_i+1}/{n_micro}: "
+                    f"Step {self.global_step} micro-batch {mb_idx}/{n_micro}: "
                     f"loss is {mb_loss.item()} — aborting before backward() to prevent gradient corruption."
                 )
 
@@ -879,9 +971,10 @@ class QGRETrainer:
             # TRN-R1-3: Track metric types for correct aggregation
             if not all_metrics:
                 all_metrics = {k: v for k, v in mb_metrics.items()}
-                # Track which metrics are per-token (should be averaged), not summed
-                self._per_token_metrics = {"kl", "llds_loss", "llds_mask_ratio", "critic_loss"}
-            else:
+            # Track which metrics are per-token (should be averaged), not summed
+            # T2-1: Initialize _per_token_metrics unconditionally to prevent AttributeError on early return
+            self._per_token_metrics = {"kl", "llds_loss", "llds_mask_ratio", "critic_loss"}
+            if all_metrics:
                 for k, v in mb_metrics.items():
                     all_metrics[k] = all_metrics.get(k, 0) + v
 
@@ -913,11 +1006,110 @@ class QGRETrainer:
 
         # Track accumulated loss across gradient accumulation steps
         self._accumulated_loss += total_loss
+        self._accumulation_count += 1
 
         # Optimizer step (backward already done in micro-batches above)
         if (self.global_step + 1) % self.config.training.gradient_accumulation_steps == 0:
+            # Gradient probe: initialize fixed prompt and physics tokens on first step
+            if self._gradient_probe_steps > 0 and self.global_step < self._gradient_probe_steps and self._gradient_probe_prompt_ids is None:
+                # Get model device
+                model_device = next(self.model.parameters()).device
+
+                # Use first batch prompt as fixed measurement prompt
+                self._gradient_probe_prompt_ids = batch.input_ids[0:1].clone().to(model_device)  # [1, seq_len]
+
+                # Physics tokens: p, V, T, H, x, m
+                physics_strs = ["p", "V", "T", "H", "x", "m"]
+                self._gradient_probe_physics_tokens = []
+                for tok_str in physics_strs:
+                    tok_ids = self.tokenizer.encode(tok_str, add_special_tokens=False)
+                    if len(tok_ids) == 1:
+                        self._gradient_probe_physics_tokens.append(tok_ids[0])
+
+                if not self._gradient_probe_physics_tokens:
+                    # Fallback: use top-50 most common tokens if physics tokens aren't single-token
+                    self._gradient_probe_physics_tokens = list(range(50, 100))
+
+            # Gradient probe: capture logits BEFORE optimizer step
+            logits_before = None
+            if self._gradient_probe_steps > 0 and self.global_step < self._gradient_probe_steps and self._gradient_probe_prompt_ids is not None:
+                with torch.no_grad():
+                    self.model.eval()
+                    probe_outputs = self.model(self._gradient_probe_prompt_ids)
+                    # Get logits for last position, physics tokens only
+                    physics_tokens_tensor = torch.tensor(self._gradient_probe_physics_tokens, device=probe_outputs.logits.device)
+                    logits_before = probe_outputs.logits[0, -1, physics_tokens_tensor].clone()
+                    self.model.train()
+
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config.training.max_grad_norm)
+
+            # Gradient coherence monitoring — detect laminar→turbulent transitions
+            # Measures "eddies forming": layers disagreeing, energy dissipating into noise
+            # MUST happen AFTER backward + clipping, BEFORE optimizer.step() (which zeros grads)
+            # Note: global_step increments at END of step(), so check (global_step + 1) to log at correct step
+            if self._log_attention and (self.global_step + 1) % self._attention_log_freq == 0:
+                from qgre.gradient_coherence import compute_gradient_coherence
+
+                coherence_stats = compute_gradient_coherence(self.model)
+
+                # Diagnostic: check if near-zero cosine is real or artifact
+                if self.global_step < 100 and self.global_step % 30 == 0:
+                    print(f"[GRADIENT DEBUG step {self.global_step}]")
+                    print(f"  Layers: {coherence_stats['n_layers']}, Comparisons: {coherence_stats['n_comparisons']}, Nonzero norms: {coherence_stats['nonzero_norms']}")
+                    print(f"  Cosine range: [{coherence_stats['min_cosine']:.6f}, {coherence_stats['max_cosine']:.6f}], mean={coherence_stats['mean_cosine']:.6f}")
+                    print(f"  First 5 layer norms: {coherence_stats['per_layer_norms'][:5]}")
+                    print(f"  First 5 cosines: {coherence_stats['per_layer_cosines'][:5]}")
+
+                coherence_stats["step"] = self.global_step
+                coherence_stats["phase"] = self.game_state.phase
+                coherence_stats["reward"] = metrics.get("reward/mean", 0.0)
+                coherence_stats["loss"] = metrics.get("loss", 0.0)
+
+                self._attention_log.append(coherence_stats)
+
+                # Add key metrics to step metrics for MLflow logging
+                metrics["grad/mean_cosine"] = coherence_stats["mean_cosine"]
+                metrics["grad/min_cosine"] = coherence_stats["min_cosine"]
+                metrics["grad/norm_ratio"] = coherence_stats["norm_ratio"]
+                metrics["grad/mean_norm"] = coherence_stats["mean_grad_norm"]
+
+                # Turbulence detection (if detector initialized)
+                if not hasattr(self, '_turbulence_detector'):
+                    from qgre.gradient_coherence import TurbulenceDetector
+                    self._turbulence_detector = TurbulenceDetector(
+                        calibration_steps=50,
+                        cosine_threshold_low=0.3,
+                        cosine_threshold_high=0.6,
+                        transition_window=3,
+                    )
+
+                state = self._turbulence_detector.update(self.global_step, coherence_stats)
+                metrics["grad/turbulence_state"] = {"CALIBRATING": 0, "LAMINAR": 1, "TRANSITIONAL": 2, "TURBULENT": 3}.get(state, 0)
+
             self.optimizer.step()
+
+            # Gradient probe: capture logits AFTER optimizer step and compute delta
+            if self._gradient_probe_steps > 0 and self.global_step < self._gradient_probe_steps and logits_before is not None:
+                with torch.no_grad():
+                    self.model.eval()
+                    probe_outputs = self.model(self._gradient_probe_prompt_ids)
+                    physics_tokens_tensor = torch.tensor(self._gradient_probe_physics_tokens, device=probe_outputs.logits.device)
+                    logits_after = probe_outputs.logits[0, -1, physics_tokens_tensor].clone()
+                    self.model.train()
+
+                    # Compute logit delta (absolute change, averaged across physics tokens)
+                    logit_delta = (logits_after - logits_before).abs()
+                    mean_delta = logit_delta.mean().item()
+                    max_delta = logit_delta.max().item()
+
+                    self._gradient_probe_log.append({
+                        "step": self.global_step,
+                        "loss": total_loss,
+                        "advantage_scale": self.config.algorithm.advantage_scale,
+                        "mean_logit_delta": mean_delta,
+                        "max_logit_delta": max_delta,
+                        "per_token_deltas": logit_delta.cpu().tolist(),
+                    })
             # Clear optimizer momentum state to prevent double-stepping on resume
             if hasattr(self, '_resumed_mid_accumulation') and self._resumed_mid_accumulation:
                 for group in self.optimizer.param_groups:
@@ -958,14 +1150,15 @@ class QGRETrainer:
                         metrics["target_divergence"] = divergence
             if self.scheduler is not None:
                 self.scheduler.step()
-            # Report accumulated loss across gradient accumulation steps (always divide by n_micro)
-            n_micro = self.config.training.gradient_accumulation_steps
-            metrics["accumulated_loss"] = self._accumulated_loss / n_micro
+            # CP2-004: Divide by actual accumulation count, not expected
+            actual_count = self._accumulation_count if self._accumulation_count > 0 else 1
+            metrics["accumulated_loss"] = self._accumulated_loss / actual_count
             self._accumulated_loss = 0.0
+            self._accumulation_count = 0
         else:
             # Track accumulated loss even for non-optimizer steps
-            n_micro = self.config.training.gradient_accumulation_steps
-            metrics["accumulated_loss"] = self._accumulated_loss / n_micro
+            actual_count = self._accumulation_count if self._accumulation_count > 0 else 1
+            metrics["accumulated_loss"] = self._accumulated_loss / actual_count
 
         # KL-adaptive SPO learning rate (SPO paper Algorithm 1)
         spo_cfg = self.config.algorithm.spo
@@ -1011,7 +1204,6 @@ class QGRETrainer:
                 reward_components=rr.scores,
                 phase=self.game_state.phase,
             )
-
         self.global_step += 1
         return metrics
 
@@ -1032,6 +1224,7 @@ class QGRETrainer:
             vprm_critic_state=self.vprm_critic.state_dict_with_meta() if self.vprm_critic else None,
             vprm_optimizer_state=self.vprm_optimizer.state_dict() if self.vprm_optimizer else None,
             accumulated_loss=self._accumulated_loss,  # TRN-R2-1: Save accumulation state
+            dataloader_state=self._dataloader.state_dict() if self._dataloader else None,
         )
 
     def resume(self, checkpoint_dir: str | Path) -> bool:
@@ -1102,24 +1295,63 @@ class QGRETrainer:
                         try:
                             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
                             scheduler_loaded = True
-                        except (ValueError, KeyError):
-                            pass  # Scheduler reset if state incompatible
+                        except (ValueError, KeyError) as e:
+                            warnings.warn(
+                                f"Scheduler state incompatible with current config, resetting: {e}. "
+                                "Learning rate schedule will restart from step 0."
+                            )
                 else:
                     try:
                         self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
                         scheduler_loaded = True
-                    except (ValueError, KeyError):
-                        pass
+                    except (ValueError, KeyError) as e:
+                        warnings.warn(
+                            f"Scheduler state incompatible with current config, resetting: {e}. "
+                            "Learning rate schedule will restart from step 0."
+                        )
             # If optimizer wasn't loaded, scheduler starts fresh too
         if checkpoint.get("game_state"):
             self.game_state = checkpoint["game_state"]
         if checkpoint.get("advantage_estimator_state"):
             self.advantage_estimator.load_state_dict(checkpoint["advantage_estimator_state"])
+        # CP3-003: Warn if checkpoint has critic but config disabled
+        if checkpoint.get("vprm_critic_state") and not self.config.vprm.enabled:
+            import warnings
+            warnings.warn(
+                "CP3-003: Checkpoint contains VPRM critic state but config.vprm.enabled=False. "
+                "Critic will not be restored. Set vprm.enabled=True to restore critic."
+            )
         # Restore VPRM critic + optimizer (if saved)
         if checkpoint.get("vprm_critic_state") and self.config.vprm.enabled:
             from qgre.critic import VPRMCritic
             device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
-            self.vprm_critic = VPRMCritic.from_checkpoint(checkpoint["vprm_critic_state"], device=device)
+
+            # C12: Validate step_qualities match between checkpoint and config
+            ckpt_step_qualities = checkpoint["vprm_critic_state"]["step_qualities"]
+            config_step_qualities = self.step_qualities
+            if ckpt_step_qualities != config_step_qualities:
+                import warnings
+                warnings.warn(
+                    f"C12: step_qualities mismatch between checkpoint and config. "
+                    f"Checkpoint: {ckpt_step_qualities}, Config: {config_step_qualities}. "
+                    "This may cause missing critic heads or incompatible predictions."
+                )
+
+            # C14: Restore with intermediate_dim from current config, not checkpoint
+            # (allows config changes without breaking restore)
+            from qgre.critic import VPRMCritic
+            self.vprm_critic = VPRMCritic(
+                hidden_dim=checkpoint["vprm_critic_state"]["hidden_dim"],
+                step_qualities=config_step_qualities,  # Use current config
+                intermediate_dim=self._vprm_config.intermediate_dim,  # C14: from config
+                step_region_map=checkpoint["vprm_critic_state"].get("step_region_map"),
+            )
+            # Load weights with strict=False to handle architecture mismatches
+            self.vprm_critic.load_state_dict(checkpoint["vprm_critic_state"]["model_state"], strict=False)
+            self.vprm_critic.to(device)
+
+            # Store checkpoint hidden_dim for validation on first forward pass
+            self._vprm_checkpoint_hidden_dim = checkpoint["vprm_critic_state"]["hidden_dim"]
             self.vprm_optimizer = torch.optim.Adam(
                 [p for p in self.vprm_critic.parameters() if p.requires_grad],
                 lr=self._vprm_config.lr,
@@ -1135,10 +1367,16 @@ class QGRETrainer:
             )
             torch.set_rng_state(checkpoint["rng_state"])
         if checkpoint.get("cuda_rng_state") is not None and torch.cuda.is_available():
+            # CP3-002: Save device index in checkpoint, restore to same device
+            # Note: checkpoint format already includes device index in cuda_rng_state
+            # This is correct — no fix needed, but documenting expected behavior
             torch.cuda.set_rng_state(checkpoint["cuda_rng_state"])
 
         # TRN-R2-1: Restore accumulated loss
         self._accumulated_loss = checkpoint.get("accumulated_loss", 0.0)
+        # DI1: Store dataloader state for restore in train() when dataloader is available
+        self._pending_dataloader_state = checkpoint.get("dataloader_state")
+        self._accumulation_count = 0  # Reset count on resume (loss already accumulated)
 
         # TRN-R2-5: Set _resumed_mid_accumulation flag when resuming mid-accumulation
         n_accum = self.config.training.gradient_accumulation_steps
@@ -1149,15 +1387,26 @@ class QGRETrainer:
         self._fused_validated = False
 
         # Zero gradients AFTER resume to avoid clearing loaded optimizer state
-        self.optimizer.zero_grad()
+        if self.optimizer is not None:
+            self.optimizer.zero_grad()
+        else:
+            raise RuntimeError(
+                "Optimizer is None after checkpoint resume. "
+                "Check that optimizer was saved and restored correctly."
+            )
         if self.vprm_optimizer is not None:
             self.vprm_optimizer.zero_grad()
 
         # LoRA verification on resume (PLAN.md line 487-488: mandatory step)
         try:
             from qgre.lora_verify import LoRAVerifier
-        except ImportError:
-            pass  # LoRA verification unavailable — Unsloth not installed
+        except ImportError as e:
+            # Only silence if Unsloth is missing — warn for unexpected import errors
+            if "unsloth" in str(e).lower():
+                pass  # Expected — Unsloth not installed
+            else:
+                import warnings
+                warnings.warn(f"LoRA verification import failed unexpectedly: {e}")
         else:
             try:
                 is_active = LoRAVerifier.verify_active(self.model, self.tokenizer)
@@ -1173,6 +1422,9 @@ class QGRETrainer:
                     f"LoRA verification failed after resume: {e}. "
                     f"LoRA adapters may not be active. Check model state."
                 )
+
+        # WS2: Flag that vLLM needs weight sync (model weights restored but vLLM has stale weights)
+        self._needs_weight_sync = True
 
         return True
 
@@ -1213,9 +1465,18 @@ class QGRETrainer:
             if self.game_state.check_tier_phase_advance(tier, max_phase):
                 new_phase = self.game_state.tier_phases[tier]
                 metrics[f"tier_phase_advanced/{tier}"] = new_phase
-                # Reset SPO baselines for prompts in this tier at the new phase
-                tier_pids = [batch_contexts[i].prompt_id for i in range(len(reward_results))
-                             if batch_contexts[i].tier == tier]
+                # Reset SPO baselines for ALL prompts in this tier (not just current batch)
+                col = self._difficulty_column
+                if self._dataloader and col:
+                    tier_pids = [item["prompt_id"] for item in self._dataloader.items
+                                 if item.get("metadata", {}).get(col, "default") == tier]
+                    import warnings
+                    warnings.warn(f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, dataloader path, found {len(tier_pids)} prompts")
+                else:
+                    tier_pids = [batch_contexts[i].prompt_id for i in range(len(reward_results))
+                                 if batch_contexts[i].tier == tier]
+                    import warnings
+                    warnings.warn(f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, batch path, found {len(tier_pids)} prompts")
                 self.advantage_estimator.on_tier_advance(
                     new_tier=new_phase,
                     prompt_tier_map={pid: new_phase for pid in tier_pids},
@@ -1246,6 +1507,19 @@ class QGRETrainer:
                     print(f"│  Active: {', '.join(self.game_state.active_tiers):<49}│")
                     print(f"└{'─'*60}┘")
                     self._apply_difficulty_gate()
+                    # Reset baselines for ALL prompts in ALL active tiers on tier unlock
+                    # New tier means new prompt distribution — stale baselines must go
+                    col = self._difficulty_column
+                    if self._dataloader and col:
+                        active_set = set(self.game_state.active_tiers)
+                        all_active_pids = [item["prompt_id"] for item in self._dataloader.items
+                                           if item.get("metadata", {}).get(col, "default") in active_set]
+                    else:
+                        all_active_pids = [batch_contexts[i].prompt_id for i in range(len(reward_results))]
+                    self.advantage_estimator.on_tier_advance(
+                        new_tier=0,  # Not used anymore — full reset for all affected pids
+                        prompt_tier_map={pid: 0 for pid in all_active_pids},
+                    )
 
         # Tutorial skill tree: record per-skill mastery score
         if self.game_state.tutorial_enabled:
@@ -1392,6 +1666,15 @@ class QGRETrainer:
         # Try to resume from checkpoint
         self.resume(self.config.logging.checkpoint_dir)
 
+        # DI1: Restore dataloader state after resume (dataloader not available inside resume())
+        if getattr(self, "_pending_dataloader_state", None):
+            if dataloader:
+                dataloader.load_state_dict(self._pending_dataloader_state)
+            else:
+                import warnings
+                warnings.warn("T3-5: Pending dataloader state lost - dataloader is None on resume")
+            self._pending_dataloader_state = None
+
         # Difficulty-gated curriculum: set initial gate based on current phase
         self._apply_difficulty_gate()
 
@@ -1399,6 +1682,14 @@ class QGRETrainer:
             for batch in dataloader:
                 if self.global_step >= cfg.total_steps:
                     break
+
+                # Batch validation — guard against empty batches from dynamic sizing or data issues
+                if batch.input_ids.shape[0] == 0:
+                    raise RuntimeError(
+                        f"Step {self.global_step}: empty batch received. "
+                        "This indicates data pipeline issues (exhausted dataset, filter dropped all samples, "
+                        "or dynamic batch sizing failure). Check data loading and filtering logic."
+                    )
 
                 # 1. Generate (inference mode) with optional LoRA dropout for exploration
                 if hasattr(backend, "set_inference_mode"):
@@ -1420,12 +1711,29 @@ class QGRETrainer:
                             modules_to_save=self.config.model.modules_to_save,
                         )
 
+                # Ensure LoRA weights are synced before first generate (fixes first-batch base-model bug)
+                # When lora_dropout_rate=0, the dropout path above is skipped, but we still need
+                # to sync LoRA weights on step 0 so vLLM uses trained weights, not base model.
+                if (
+                    (self.global_step == 0 or getattr(self, "_needs_weight_sync", False))
+                    and backend.weight_loader is not None
+                    and gen_cfg.lora_dropout_rate == 0
+                ):
+                    weight_bus.sync(
+                        backend.weight_exporter, backend.weight_loader, self.model,
+                        modules_to_save=self.config.model.modules_to_save,
+                    )
+                    self._needs_weight_sync = False
+
+                generation_succeeded = False
+                output = None
                 try:
                     _dev = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
                     output = backend.generate(
                         batch.input_ids.to(_dev),
                         batch.attention_mask.to(_dev),
                     )
+                    generation_succeeded = True
                 finally:
                     # Always restore clean weights — even if generate crashes
                     # Don't sync to vLLM here — step-end sync (after training) handles it
@@ -1433,6 +1741,8 @@ class QGRETrainer:
                         restore_lora()
 
                 # 2. Score via reward_fn
+                if output is None:
+                    raise RuntimeError("Generation failed, output is None")
                 reward_results = []
                 for i in range(len(output.texts)):
                     prompt = batch.raw_prompts[i] if i < len(batch.raw_prompts) else ""
@@ -1509,6 +1819,17 @@ class QGRETrainer:
                                    f"{'pool':>12s} {tut.get('tutorial/active_prompt_pool_size', 0)}")
                         rows.append(("Tutorial", tut_vals))
 
+                    # Gradient coherence metrics (laminar→turbulent detection)
+                    if "grad/mean_cosine" in metrics:
+                        cosine = metrics["grad/mean_cosine"]
+                        norm_ratio = metrics["grad/norm_ratio"]
+                        turb_state = metrics.get("grad/turbulence_state", 0)
+                        state_names = {0: "CALIB", 1: "LAMINAR", 2: "TRANS", 3: "TURB"}
+                        grad_vals = (f"{'cosine':>10s} {cosine:+.3f}   │ "
+                                    f"{'norm_ratio':>10s} {norm_ratio:.1f}   │ "
+                                    f"{'state':>10s} {state_names[turb_state]}")
+                        rows.append(("Gradients", grad_vals))
+
                     # Compute column widths
                     label_w = max((len(r[0]) for r in rows), default=10) + 2
                     val_w = max((len(r[1]) for r in rows), default=40) + 2
@@ -1544,7 +1865,7 @@ class QGRETrainer:
                         reward_mean=metrics.get("reward/mean", 0.0),
                         loss=metrics.get("loss", 0.0),
                         step_rewards=step_rewards if step_rewards else None,
-                        extra={k: v for k, v in metrics.items() if k == "phase"},
+                        extra={k: v for k, v in metrics.items() if k in ("phase",) or k.startswith("grad/")},
                     )
                 except ImportError:
                     pass  # MLflow not installed
@@ -1560,7 +1881,8 @@ class QGRETrainer:
                     self.save()
 
                 # 6. Weight sync via Weight Sync Bus (LoRA + modules_to_save → vLLM)
-                if backend.weight_loader is not None:
+                # Skip if generation failed — stale weights shouldn't be synced
+                if backend.weight_loader is not None and generation_succeeded:
                     weight_bus.sync(
                         backend.weight_exporter, backend.weight_loader, self.model,
                         modules_to_save=self.config.model.modules_to_save,
@@ -1581,6 +1903,45 @@ class QGRETrainer:
 
             if self.global_step >= cfg.total_steps:
                 break
+
+        # Save gradient probe results
+        if self._gradient_probe_log:
+            import json
+            from pathlib import Path
+            output_dir = Path("output/hamiltonian/study/gradient_probe")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            with open(output_dir / "probe_results.json", "w") as f:
+                json.dump({
+                    "config": {
+                        "advantage_scale": self.config.algorithm.advantage_scale,
+                        "lr": self.config.training.lr,
+                        "lora_rank": self.config.model.lora_rank,
+                        "lora_alpha": self.config.model.lora_alpha,
+                        "n_steps": len(self._gradient_probe_log),
+                    },
+                    "measurements": self._gradient_probe_log,
+                }, f, indent=2)
+            print(f"\n{'='*70}")
+            print(f"Gradient probe results saved to {output_dir / 'probe_results.json'}")
+            print(f"{'='*70}")
+
+        # Save gradient coherence log
+        if self._attention_log:
+            import json
+            from pathlib import Path
+            output_dir = Path(self.config.logging.checkpoint_dir).parent / "gradient_coherence"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            with open(output_dir / "coherence_log.json", "w") as f:
+                json.dump({
+                    "config": {
+                        "log_freq": self._attention_log_freq,
+                        "n_measurements": len(self._attention_log),
+                    },
+                    "measurements": self._attention_log,
+                }, f, indent=2)
+            print(f"\n{'='*70}")
+            print(f"Gradient coherence log saved to {output_dir / 'coherence_log.json'}")
+            print(f"{'='*70}")
 
         # Final checkpoint
         self.save()

@@ -93,14 +93,14 @@ class TestCriticForward:
         for v in preds.values():
             assert v.dim() == 0  # scalar
 
-    def test_missing_region_returns_zero(self, critic):
-        """When a quality's region is missing, prediction should be 0."""
+    def test_missing_region_returns_none(self, critic):
+        """When a quality's region is missing, prediction should be None (AE5)."""
         hs = torch.randn(50, HIDDEN_DIM)
         regions = ["STEP_1"] * 50  # Only STEP_1, missing 2-4
         preds = critic(hs, regions)
-        # Qualities mapped to STEP_2, 3, 4 should get zero
-        assert preds["q_momentum_defined"].item() == 0.0
-        assert preds["q_correct_H"].item() == 0.0
+        # Qualities mapped to STEP_2, 3, 4 should get None (missing region)
+        assert preds["q_momentum_defined"] is None
+        assert preds["q_correct_H"] is None
         # STEP_1 qualities should produce predictions (may be zero by chance at init)
 
     def test_think_and_other_regions_ignored(self, critic):
@@ -212,6 +212,11 @@ model:
   path: test
   pad_token: "<pad>"
   pad_token_id: 0
+data:
+  train_files: ["dummy.parquet"]
+algorithm:
+  step_qualities:
+    1: ["q_format"]
 generation:
   stop_token_ids: [2]
 vprm:

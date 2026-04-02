@@ -36,35 +36,69 @@ def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], No
     if dropout_rate <= 0.0:
         return lambda: None  # No-op
 
+    # Track dropout state to detect inference without restore
+    if not hasattr(apply_lora_dropout, "_dropout_active"):
+        apply_lora_dropout._dropout_active = False
+    if apply_lora_dropout._dropout_active:
+        warnings.warn(
+            "LoRA dropout applied twice without restore() call between. "
+            "Previous dropout state may be stale. Call restore() after each generation."
+        )
+    apply_lora_dropout._dropout_active = True
+
+    # W6: Use list instead of closure to allow cleanup on exception
     saved: list[tuple[torch.nn.Parameter, torch.Tensor]] = []
 
-    for name, param in model.named_parameters():
-        # Match LoRA A matrices (input projection) — not B (output projection)
-        if "lora_A" in name and param.requires_grad:
-            saved.append((param, param.data.clone()))
-            # Create Bernoulli mask on same device as param.data
-            mask = torch.bernoulli(
-                torch.ones_like(param.data, device=param.data.device) * (1.0 - dropout_rate)
+    # W7: Wrap dropout application in try-except to ensure cleanup on failure
+    try:
+        for name, param in model.named_parameters():
+            # Match LoRA A matrices (input projection) — not B (output projection)
+            if "lora_A" in name and param.requires_grad:
+                saved.append((param, param.data.clone()))
+                # Create Bernoulli mask on same device as param.data
+                mask = torch.bernoulli(
+                    torch.ones_like(param.data, device=param.data.device) * (1.0 - dropout_rate)
+                )
+                # NO inverted dropout scaling — we WANT to suppress LoRA magnitude.
+                # Expected activation = (1-p) * original. This partially reverts to
+                # base model behavior, surfacing knowledge LoRA learned to suppress.
+                param.data.mul_(mask)
+
+        if not saved and dropout_rate > 0:
+            warnings.warn(
+                f"LoRA dropout rate {dropout_rate} requested but no lora_A parameters found. "
+                f"Check that the model has PEFT/LoRA adapters loaded."
             )
-            # NO inverted dropout scaling — we WANT to suppress LoRA magnitude.
-            # Expected activation = (1-p) * original. This partially reverts to
-            # base model behavior, surfacing knowledge LoRA learned to suppress.
-            param.data.mul_(mask)
-
-    if not saved and dropout_rate > 0:
-        warnings.warn(
-            f"LoRA dropout rate {dropout_rate} requested but no lora_A parameters found. "
-            f"Check that the model has PEFT/LoRA adapters loaded."
-        )
-
-    def restore():
+    except Exception as e:
+        # W6/W7: Exception during dropout — restore saved weights before re-raising
         for param, original in saved:
             param.data.copy_(original)
-            # Clear param.grad after restoring weights to avoid gradient leak
-            if param.grad is not None:
-                param.grad.zero_()
-        # Clear saved list to prevent memory leak
         saved.clear()
+        apply_lora_dropout._dropout_active = False
+        raise RuntimeError(
+            f"W7: LoRA dropout application failed: {e}. Weights restored to original state."
+        ) from e
+
+    def restore():
+        # WS3-007: Clear flag in finally block
+        try:
+            for param, original in saved:
+                param.data.copy_(original)
+                # Clear param.grad after restoring weights to avoid gradient leak
+                if param.grad is not None:
+                    param.grad.zero_()
+            # Clear saved list to prevent memory leak
+            saved.clear()
+        except Exception as e:
+            # CRITICAL: Restore failure corrupts model weights — must re-raise
+            warnings.warn(f"LoRA dropout restore failed: {e}. Weights corrupted — aborting.")
+            raise RuntimeError(
+                f"LoRA dropout restore failed: {e}. Model weights are in dropped state. "
+                "Training cannot continue safely — restart from checkpoint."
+            ) from e
+        finally:
+            # WS3-007: Always clear dropout state flag
+            apply_lora_dropout._dropout_active = False
 
     return restore
 
