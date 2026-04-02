@@ -102,6 +102,144 @@ class TrainingContext:
         )
 
 
+# ── StateSpec Dataclasses ──
+
+
+@dataclass
+class TrainerState:
+    """All mutable trainer state in one place.
+
+    Tracks accumulation progress, resumption flags, and sync requirements.
+    Serializable checkpoint component.
+    """
+    global_step: int = 0
+    accumulated_loss: float = 0.0
+    accumulation_count: int = 0
+    accumulated_samples: int = 0
+    resumed_mid_accumulation: bool = False
+    fused_validated: bool = False
+    needs_weight_sync: bool = False
+
+
+@dataclass
+class DataLoaderState:
+    """Epoch tracking, sampling weights, curriculum gating.
+
+    Manages iteration state and dynamic priority scheduling.
+    Serializable checkpoint component.
+    """
+    epoch: int = 0
+    step_in_epoch: int = 0
+    total_steps: int = 0
+    priority_weights: list[float] | None = None
+    difficulty_gate: tuple[set[str], str] | None = None
+
+
+@dataclass
+class AdvantageEstimatorState:
+    """Estimator config and accumulated statistics.
+
+    Tracks clip parameters and region mapping for advantage computation.
+    Serializable checkpoint component.
+    """
+    clip_advantage: float = 5.0
+    step_region_map: dict | None = None
+
+
+@dataclass
+class WeightLoaderState:
+    """LoRA initialization flags and cleanup tracking.
+
+    Prevents double-initialization and tracks resource lifecycle.
+    Serializable checkpoint component.
+    """
+    load_lora_called: bool = False
+    initialized: bool = False
+    cleaned_up: bool = False
+
+
+@dataclass
+class CheckpointState:
+    """Master container holding all component states.
+
+    Provides validation on construction and forward compatibility
+    for schema evolution.
+    """
+    trainer: TrainerState
+    dataloader: DataLoaderState
+    advantage_estimator: AdvantageEstimatorState
+    weight_loader: WeightLoaderState
+    game_state: GameState
+    vprm_critic_state: dict | None = None
+    vprm_optimizer_state: dict | None = None
+    schema_version: int = CHECKPOINT_SCHEMA_VERSION
+
+    def __post_init__(self):
+        """Validate field presence, types, and schema compatibility.
+
+        Raises:
+            ValueError: If required fields are missing
+            TypeError: If field types are incorrect
+        """
+        # Validate required fields
+        required_fields = [
+            "trainer", "dataloader", "advantage_estimator",
+            "weight_loader", "game_state"
+        ]
+        for field_name in required_fields:
+            if not hasattr(self, field_name):
+                raise ValueError(f"Missing required field: {field_name}")
+            if getattr(self, field_name, None) is None:
+                raise ValueError(f"Required field cannot be None: {field_name}")
+
+        # Validate field types
+        type_checks = [
+            ("trainer", TrainerState),
+            ("dataloader", DataLoaderState),
+            ("advantage_estimator", AdvantageEstimatorState),
+            ("weight_loader", WeightLoaderState),
+            ("game_state", GameState),
+        ]
+        for field_name, expected_type in type_checks:
+            value = getattr(self, field_name)
+            if not isinstance(value, expected_type):
+                raise TypeError(
+                    f"Field '{field_name}' has incorrect type: "
+                    f"expected {expected_type.__name__}, got {type(value).__name__}"
+                )
+
+        # Validate optional field types
+        if self.vprm_critic_state is not None and not isinstance(self.vprm_critic_state, dict):
+            raise TypeError(
+                f"Field 'vprm_critic_state' must be dict or None, "
+                f"got {type(self.vprm_critic_state).__name__}"
+            )
+        if self.vprm_optimizer_state is not None and not isinstance(self.vprm_optimizer_state, dict):
+            raise TypeError(
+                f"Field 'vprm_optimizer_state' must be dict or None, "
+                f"got {type(self.vprm_optimizer_state).__name__}"
+            )
+
+        # Check for extra fields (forward compatibility warning)
+        expected_fields = {
+            "trainer", "dataloader", "advantage_estimator", "weight_loader",
+            "game_state", "vprm_critic_state", "vprm_optimizer_state", "schema_version"
+        }
+        actual_fields = set(self.__dict__.keys())
+        extra_fields = actual_fields - expected_fields
+        if extra_fields:
+            logger.warning(
+                f"CheckpointState contains unexpected fields (forward compatibility): "
+                f"{sorted(extra_fields)}"
+            )
+
+        # Validate schema version
+        if not isinstance(self.schema_version, int):
+            raise TypeError(
+                f"Field 'schema_version' must be int, got {type(self.schema_version).__name__}"
+            )
+
+
 class SkillStatus(Enum):
     LOCKED = "locked"
     ACTIVE = "active"
