@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boundaries | StateSpec</title>
+    <style>
+:root {
+    --bg: #fafaf8;
+    --card: #ffffff;
+    --card-border: #e4e2dc;
+    --text: #1a1a1a;
+    --text-muted: #6b6b6b;
+    --accent: #0e8a7e;
+    --accent-dim: #b4dfda;
+    --amber: #c47a10;
+    --amber-dim: #f5e6c8;
+    --red-soft: #b84040;
+    --red-soft-dim: #e8c4c4;
+    --indigo: #4a5dbd;
+    --indigo-dim: #d8daf0;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+}
+
+.container {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+.hero {
+    padding: 80px 0 48px;
+    border-bottom: 1px solid var(--card-border);
+}
+.hero-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    color: var(--red-soft);
+}
+.hero h1 {
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    margin-bottom: 14px;
+}
+.hero .subtitle {
+    font-size: 18px;
+    color: var(--text-muted);
+    max-width: 580px;
+}
+
+section {
+    padding: 56px 0;
+    border-bottom: 1px solid var(--card-border);
+}
+section:last-of-type { border-bottom: none; }
+.section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+section h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    letter-spacing: -0.3px;
+}
+section h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 36px;
+    margin-bottom: 16px;
+}
+section p { color: var(--text); margin-bottom: 16px; }
+
+.nav-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 32px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+.nav-back:hover { color: var(--text); }
+
+.callout-reject {
+    background: #fdf0f0;
+    border-left: 4px solid var(--red-soft);
+    border-radius: 0 8px 8px 0;
+    padding: 24px;
+    margin: 24px 0;
+}
+.callout-reject strong { color: var(--red-soft); }
+
+.anti-pattern {
+    background: var(--card);
+    border: 1px solid var(--red-soft-dim);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.anti-pattern h4 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--red-soft);
+    margin-bottom: 8px;
+}
+.anti-pattern p {
+    font-size: 14px;
+    margin: 0;
+}
+.anti-pattern code {
+    background: #f5f5f5;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.assumption-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 24px;
+}
+.assumption-table th {
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-muted);
+    padding: 12px 16px;
+    border-bottom: 2px solid var(--card-border);
+}
+.assumption-table td {
+    padding: 16px;
+    border-bottom: 1px solid var(--card-border);
+    vertical-align: top;
+}
+.assumption-table tr:last-child td { border-bottom: none; }
+.struck { text-decoration: line-through; color: var(--text-muted); }
+.evidence { color: var(--accent); font-weight: 500; }
+
+.page-footer {
+    padding: 40px 0 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+@media (max-width: 640px) {
+    .hero h1 { font-size: 28px; }
+    .hero { padding: 48px 0 36px; }
+    section { padding: 40px 0; }
+}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="hero">
+            <div class="hero-label">Boundaries</div>
+            <h1>What NOT to Build</h1>
+            <p class="subtitle">Assumptions overturned during crystallization. Anti-patterns to avoid. The approaches that were considered and rejected.</p>
+        </header>
+
+        <section>
+            <div class="section-label">Core Rejection</div>
+            <h2>The Implicit State Pattern</h2>
+
+            <div class="callout-reject">
+                <strong>Do NOT continue with implicit state management.</strong> The current pattern (scatter mutable fields across __init__, manually sync to state_dict, manually sync to checkpoint) is the root cause of 17+ production bugs. No amount of "fixing individual bugs" addresses the structural weakness.
+            </div>
+
+            <p>The implicit pattern feels natural because it matches how most Python classes work. But RL training has a unique constraint: <strong>state must survive process boundaries</strong>. What feels like normal OOP becomes a sync nightmare when checkpointing enters the picture.</p>
+        </section>
+
+        <section>
+            <div class="section-label">Rejected Approaches</div>
+            <h2>Alternatives Considered and Dismissed</h2>
+
+            <div class="anti-pattern">
+                <h4>Protocol-based Contracts</h4>
+                <p>Define a <code>Stateful</code> Protocol with <code>state_dict()</code> and <code>load_state_dict()</code>. Type checker enforces the contract.</p>
+                <p><strong>Why rejected:</strong> Documents the contract but doesn't enforce field transcription. You still manually keep __init__ and state_dict in sync. The Protocol catches "method missing" but not "field missing".</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>Immutable State + Functional Updates</h4>
+                <p>All state is immutable. Updates return new state objects. Checkpoint is trivially the current state object. Elm/Redux style.</p>
+                <p><strong>Why rejected:</strong> Would require rewriting the entire trainer to use functional updates. The insight (immutability simplifies state) is sound, but the migration cost is prohibitive for this codebase.</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>Descriptor-based Auto-tracking</h4>
+                <p>Use Python descriptors to automatically track mutable attributes. Checkpoint includes all descriptor-tracked fields.</p>
+                <p><strong>Why rejected:</strong> Magic. Fragile. Hard to debug. When the descriptor fails to track a field, you get the same bug class we're trying to eliminate.</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>Just Add More Tests</h4>
+                <p>Continue with implicit state but add linting/tests that detect state/checkpoint drift.</p>
+                <p><strong>Why rejected:</strong> Tests detect drift after it happens. The 17 findings we fixed were all cases where tests weren't catching drift. Prevention beats detection.</p>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Assumptions Overturned</div>
+            <h2>What Training Suggested vs What Evidence Shows</h2>
+
+            <table class="assumption-table">
+                <thead>
+                    <tr>
+                        <th>Assumption</th>
+                        <th>Evidence</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="struck">"Each component should manage its own state"</td>
+                        <td class="evidence">Distributed ownership causes sync failures. Centralize state declarations.</td>
+                    </tr>
+                    <tr>
+                        <td class="struck">"state_dict/load_state_dict is the established pattern"</td>
+                        <td class="evidence">PyTorch pattern works for Modules. Non-Module components need explicit StateSpec.</td>
+                    </tr>
+                    <tr>
+                        <td class="struck">"Runtime errors are acceptable for checkpoint issues"</td>
+                        <td class="evidence">Runtime errors cause production failures. Move friction to design time via type errors.</td>
+                    </tr>
+                    <tr>
+                        <td class="struck">"We can fix bugs as they arise"</td>
+                        <td class="evidence">We fixed 59 bugs in 3 rounds. The pattern keeps producing bugs. Fix the pattern.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section>
+            <div class="section-label">Drift Patterns</div>
+            <h2>Bug Classes That Will Recur Without StateSpec</h2>
+
+            <h3>State Field Not Saved</h3>
+            <p>Developer adds <code>self.new_field</code> to __init__. Forgets to add to state_dict. Checkpoint doesn't include it. Resume loses the value. Training diverges silently.</p>
+
+            <h3>State Field Not Restored</h3>
+            <p>Field is in checkpoint but load_state_dict doesn't read it. Old value persists. Metrics show wrong values. Debugging takes hours.</p>
+
+            <h3>Default Mismatch</h3>
+            <p>Field has default in __init__ (e.g., <code>self.count = 0</code>). Checkpoint has <code>count = 5</code>. Resume calls __init__ first, sets count=0, then load_state_dict overwrites. But if load_state_dict uses <code>.get()</code> with wrong default, you get the wrong value.</p>
+
+            <h3>Flag Not Reset</h3>
+            <p>Boolean flag like <code>_resumed_mid_accumulation</code> is set on resume. Never cleared. Next step still thinks it's resuming. Momentum corruption.</p>
+
+            <a href="index.html" class="nav-back">
+                <span class="arrow">&larr;</span> Back to Overview
+            </a>
+        </section>
+
+        <footer class="page-footer">
+            Generated by feature-crystallize skill
+        </footer>
+    </div>
+</body>
+</html>

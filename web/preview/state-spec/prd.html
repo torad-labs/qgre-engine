@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Implementation Plan | StateSpec</title>
+    <style>
+:root {
+    --bg: #fafaf8;
+    --card: #ffffff;
+    --card-border: #e4e2dc;
+    --text: #1a1a1a;
+    --text-muted: #6b6b6b;
+    --accent: #0e8a7e;
+    --accent-dim: #b4dfda;
+    --amber: #c47a10;
+    --amber-dim: #f5e6c8;
+    --red-soft: #b84040;
+    --red-soft-dim: #e8c4c4;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+}
+
+.container {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+.hero {
+    padding: 80px 0 48px;
+    border-bottom: 1px solid var(--card-border);
+}
+.hero-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    color: var(--accent);
+}
+.hero h1 {
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    margin-bottom: 14px;
+}
+.hero .subtitle {
+    font-size: 18px;
+    color: var(--text-muted);
+    max-width: 580px;
+}
+
+section {
+    padding: 56px 0;
+    border-bottom: 1px solid var(--card-border);
+}
+section:last-of-type { border-bottom: none; }
+.section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+section h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    letter-spacing: -0.3px;
+}
+section h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 36px;
+    margin-bottom: 16px;
+}
+section p { color: var(--text); margin-bottom: 16px; }
+
+.nav-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 32px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.15s ease;
+}
+.nav-back:hover { color: var(--text); }
+
+.callout {
+    background: #f0f9f8;
+    border-left: 4px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    padding: 24px;
+    margin: 24px 0;
+}
+.callout strong { color: var(--accent); }
+
+.component-card {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.component-card h4 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 8px;
+    font-family: 'SF Mono', Monaco, monospace;
+}
+.component-card p {
+    font-size: 14px;
+    margin: 0 0 12px 0;
+}
+.component-card ul {
+    margin: 0;
+    padding-left: 20px;
+}
+.component-card li {
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+.component-card code {
+    background: #f5f5f5;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.build-step {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 24px;
+}
+.step-num {
+    width: 32px;
+    height: 32px;
+    background: var(--accent);
+    color: white;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 14px;
+    flex-shrink: 0;
+}
+.step-content h4 {
+    font-size: 16px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+.step-content p {
+    font-size: 14px;
+    color: var(--text-muted);
+    margin: 0;
+}
+
+.quality-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-top: 24px;
+}
+.quality-item {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 16px;
+    text-align: center;
+}
+.quality-item .score {
+    font-size: 24px;
+    font-weight: 700;
+    color: var(--accent);
+}
+.quality-item .label {
+    font-size: 11px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.decision-point {
+    background: var(--amber-dim);
+    border-left: 4px solid var(--amber);
+    border-radius: 0 8px 8px 0;
+    padding: 20px;
+    margin: 24px 0;
+}
+.decision-point strong { color: var(--amber); }
+
+.antibody-card {
+    background: #eaf5f3;
+    border: 1px solid var(--accent-dim);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+}
+.antibody-card h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 8px;
+}
+.antibody-card p {
+    font-size: 14px;
+    margin: 0;
+}
+
+.page-footer {
+    padding: 40px 0 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+@media (max-width: 640px) {
+    .hero h1 { font-size: 28px; }
+    .hero { padding: 48px 0 36px; }
+    section { padding: 40px 0; }
+    .quality-grid { grid-template-columns: repeat(2, 1fr); }
+}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="hero">
+            <div class="hero-label">Implementation Plan</div>
+            <h1>StateSpec Architecture</h1>
+            <p class="subtitle">Explicit state contracts via typed dataclasses. One source of truth for mutable state. Compile-time enforcement of checkpoint compatibility.</p>
+        </header>
+
+        <section>
+            <div class="section-label">Architecture</div>
+            <h2>New Components</h2>
+
+            <p>All new StateSpec dataclasses live in <code>qgre/types.py</code>, extending the existing type definitions. Each component holds a single <code>_state</code> slot referencing its StateSpec.</p>
+
+            <div class="component-card">
+                <h4>TrainerState</h4>
+                <p>All mutable trainer state in one place.</p>
+                <ul>
+                    <li><code>global_step: int</code></li>
+                    <li><code>accumulated_loss: float</code></li>
+                    <li><code>accumulation_count: int</code></li>
+                    <li><code>accumulated_samples: int</code></li>
+                    <li><code>resumed_mid_accumulation: bool</code></li>
+                    <li><code>fused_validated: bool</code></li>
+                    <li><code>needs_weight_sync: bool</code></li>
+                </ul>
+            </div>
+
+            <div class="component-card">
+                <h4>DataLoaderState</h4>
+                <p>Epoch tracking, sampling weights, and curriculum gating.</p>
+                <ul>
+                    <li><code>epoch: int</code></li>
+                    <li><code>step_in_epoch: int</code></li>
+                    <li><code>total_steps: int</code></li>
+                    <li><code>priority_weights: list[float] | None</code></li>
+                    <li><code>difficulty_gate: tuple[set, str] | None</code></li>
+                </ul>
+            </div>
+
+            <div class="component-card">
+                <h4>AdvantageEstimatorState</h4>
+                <p>Estimator configuration and accumulated statistics.</p>
+                <ul>
+                    <li><code>clip_advantage: float</code></li>
+                    <li><code>step_region_map: dict | None</code></li>
+                </ul>
+            </div>
+
+            <div class="component-card">
+                <h4>WeightLoaderState</h4>
+                <p>LoRA initialization flags and cleanup tracking.</p>
+                <ul>
+                    <li><code>load_lora_called: bool</code></li>
+                    <li><code>initialized: bool</code></li>
+                    <li><code>cleaned_up: bool</code></li>
+                </ul>
+            </div>
+
+            <div class="component-card">
+                <h4>CheckpointState</h4>
+                <p>Master container holding all component states. This is what gets serialized.</p>
+                <ul>
+                    <li><code>trainer: TrainerState</code></li>
+                    <li><code>dataloader: DataLoaderState</code></li>
+                    <li><code>advantage_estimator: AdvantageEstimatorState</code></li>
+                    <li><code>weight_loader: WeightLoaderState</code></li>
+                    <li><code>game_state: GameState</code></li>
+                    <li><code>vprm_critic_state: dict | None</code></li>
+                    <li><code>vprm_optimizer_state: dict | None</code></li>
+                    <li><code>schema_version: int</code></li>
+                </ul>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Data Flow</div>
+            <h2>How State Moves Through the System</h2>
+
+            <div class="callout">
+                <strong>Principle:</strong> State is always accessed via the StateSpec. Components never store mutable fields outside their <code>_state</code> slot. This guarantees that serializing the StateSpec captures ALL mutable state.
+            </div>
+
+            <h3>Save Path</h3>
+            <p><code>trainer._state</code> + <code>dataloader._state</code> + ... &rarr; <code>CheckpointState</code> &rarr; <code>dataclasses.asdict()</code> &rarr; <code>torch.save()</code></p>
+
+            <h3>Load Path</h3>
+            <p><code>torch.load()</code> &rarr; <code>CheckpointState(**dict)</code> with validation &rarr; distribute to components</p>
+
+            <h3>Validation</h3>
+            <p>On load, <code>CheckpointState.__post_init__()</code> validates:</p>
+            <ul>
+                <li>All required fields present (missing &rarr; <code>ValueError</code>)</li>
+                <li>All field types correct (mismatch &rarr; <code>TypeError</code>)</li>
+                <li>Extra fields logged as warning (forward compatibility)</li>
+                <li>Schema version compatible (migration if needed)</li>
+            </ul>
+        </section>
+
+        <section>
+            <div class="section-label">Build Sequence</div>
+            <h2>Implementation Order</h2>
+
+            <div class="build-step">
+                <div class="step-num">1</div>
+                <div class="step-content">
+                    <h4>Define StateSpec dataclasses in types.py</h4>
+                    <p>Foundation. No dependencies on other changes. Can be tested in isolation.</p>
+                </div>
+            </div>
+
+            <div class="build-step">
+                <div class="step-num">2</div>
+                <div class="step-content">
+                    <h4>Update checkpoint.py to use CheckpointState</h4>
+                    <p>Change save_checkpoint/load_checkpoint to serialize/deserialize the container.</p>
+                </div>
+            </div>
+
+            <div class="build-step">
+                <div class="step-num">3</div>
+                <div class="step-content">
+                    <h4>Update trainer.py to use TrainerState</h4>
+                    <p>Main consumer. Replace scattered fields with self._state: TrainerState.</p>
+                </div>
+            </div>
+
+            <div class="build-step">
+                <div class="step-num">4</div>
+                <div class="step-content">
+                    <h4>Update data.py to use DataLoaderState</h4>
+                    <p>Replace state_dict/load_state_dict with direct StateSpec access.</p>
+                </div>
+            </div>
+
+            <div class="build-step">
+                <div class="step-num">5</div>
+                <div class="step-content">
+                    <h4>Update advantages.py to use AdvantageEstimatorState</h4>
+                    <p>Move clip_advantage and related config into StateSpec.</p>
+                </div>
+            </div>
+
+            <div class="build-step">
+                <div class="step-num">6</div>
+                <div class="step-content">
+                    <h4>Update weight_load.py to use WeightLoaderState</h4>
+                    <p>Centralize initialization flags.</p>
+                </div>
+            </div>
+
+            <div class="build-step">
+                <div class="step-num">7</div>
+                <div class="step-content">
+                    <h4>Increment CHECKPOINT_SCHEMA_VERSION</h4>
+                    <p>Breaking change. Old checkpoints need migration.</p>
+                </div>
+            </div>
+
+            <div class="build-step">
+                <div class="step-num">8</div>
+                <div class="step-content">
+                    <h4>Add migration function for old checkpoints</h4>
+                    <p>Detect old schema, fill defaults, convert to new format.</p>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Decision Points</div>
+            <h2>Open Questions</h2>
+
+            <div class="decision-point">
+                <strong>Migration strictness (uncertainty: 0.6)</strong><br>
+                When loading an old checkpoint without all StateSpec fields, should we: (a) fill with defaults and warn, (b) require explicit migration flag, or (c) raise and refuse to load? Leaning toward (a) for smoother upgrades.
+            </div>
+
+            <div class="decision-point">
+                <strong>Validation strictness (uncertainty: 0.4)</strong><br>
+                Should extra fields in checkpoint (future forward-compat) warn or silently ignore? Leaning toward warn to surface version mismatches.
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Quality Profile</div>
+            <h2>Dimensional Scores</h2>
+
+            <div class="quality-grid">
+                <div class="quality-item">
+                    <div class="score">0.90</div>
+                    <div class="label">Integration</div>
+                </div>
+                <div class="quality-item">
+                    <div class="score">0.85</div>
+                    <div class="label">Coherence</div>
+                </div>
+                <div class="quality-item">
+                    <div class="score">0.85</div>
+                    <div class="label">Readiness</div>
+                </div>
+                <div class="quality-item">
+                    <div class="score">0.80</div>
+                    <div class="label">Specificity</div>
+                </div>
+            </div>
+
+            <h3>What Surprised Us</h3>
+            <p>The PyTorch Module pattern (state_dict/load_state_dict) isn't actually broken. The issue is that non-Module components (trainer, dataloader, etc.) don't have any enforced contract. StateSpec extends PyTorch's pattern to non-Module components without fighting the framework.</p>
+        </section>
+
+        <section>
+            <div class="section-label">Pattern Memory</div>
+            <h2>Antibody Deposits</h2>
+
+            <div class="antibody-card">
+                <h4>Implicit state &rarr; Explicit StateSpec</h4>
+                <p>When adding mutable state to a training component, always add it to the component's StateSpec dataclass. Never add loose <code>self.field</code> attributes. The StateSpec IS the checkpoint contract.</p>
+            </div>
+
+            <div class="antibody-card">
+                <h4>Runtime errors &rarr; Design-time type errors</h4>
+                <p>Checkpoint bugs should surface as TypeErrors during development (missing field in StateSpec), not as silent divergence in production. Friction belongs at design time.</p>
+            </div>
+
+            <div class="antibody-card">
+                <h4>Distributed ownership &rarr; Centralized declaration</h4>
+                <p>Each component owns its behavior, but state declarations are centralized in types.py. This prevents the N-way sync problem between __init__, state_dict, and checkpoint code.</p>
+            </div>
+
+            <a href="index.html" class="nav-back">
+                <span class="arrow">&larr;</span> Back to Overview
+            </a>
+        </section>
+
+        <footer class="page-footer">
+            Generated by feature-crystallize skill
+        </footer>
+    </div>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "title": "StateSpec: Explicit State Contracts",
+  "slug": "state-spec",
+  "type": "study",
+  "subtitle": "Replace implicit stateful objects with typed dataclass containers that serialize directly to checkpoints and fail at design time, not runtime.",
+  "date": "2026-04-02",
+  "status": "draft",
+  "audio": false,
+  "reef": null,
+  "source": "feature-crystallize product",
+  "derivatives": [],
+  "connections": []
+}
