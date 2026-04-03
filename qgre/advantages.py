@@ -727,9 +727,9 @@ class QGREStepAdvantageEstimator:
 
         # Phase 1+2: Compute per-quality advantages directly (no step averaging)
         for i in range(batch_size):
-            ctx = batch_contexts[i] if batch_contexts and i < len(batch_contexts) else None
-            pid = ctx.prompt_id if ctx is not None else batch_prompt_ids[i]
-            warmup = getattr(ctx, 'aspiration_warmup', 1.0) if ctx else 1.0
+            prompt_ctx = batch_contexts[i] if batch_contexts and i < len(batch_contexts) else None
+            pid = prompt_ctx.prompt_id if prompt_ctx is not None else batch_prompt_ids[i]
+            warmup = getattr(prompt_ctx, 'aspiration_warmup', 1.0) if prompt_ctx else 1.0
 
             quality_advs: dict[str, float] = {}
 
