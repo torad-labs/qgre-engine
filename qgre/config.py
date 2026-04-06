@@ -530,10 +530,18 @@ class QGREConfig:
             egrs_fields = _pick(EGRSConfig, d["egrs"], "egrs")
             # CSM-005: Validate hint_extractor_mapping is a dict
             if "hint_extractor_mapping" in egrs_fields and egrs_fields["hint_extractor_mapping"] is not None:
-                if not isinstance(egrs_fields["hint_extractor_mapping"], dict):
+                mapping = egrs_fields["hint_extractor_mapping"]
+                if not isinstance(mapping, dict):
                     raise TypeError(
-                        f"CSM-005: egrs.hint_extractor_mapping expected dict, got {type(egrs_fields['hint_extractor_mapping']).__name__}. "
+                        f"CSM-005: egrs.hint_extractor_mapping expected dict, got {type(mapping).__name__}. "
                         "Check YAML formatting — must be a mapping, not a string."
                     )
+                # CR-003: Validate mapping values are strings (metadata field names)
+                for span_id, field_name in mapping.items():
+                    if not isinstance(field_name, str):
+                        raise TypeError(
+                            f"CR-003: egrs.hint_extractor_mapping['{span_id}'] must be str, "
+                            f"got {type(field_name).__name__}. Expected metadata field name."
+                        )
             cfg.egrs = EGRSConfig(**egrs_fields)
         return cfg

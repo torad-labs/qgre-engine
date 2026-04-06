@@ -288,6 +288,8 @@ def compute_entropy_importance(
     if actual_len == 1:
         position_weight = torch.ones(batch_size, 1, device=device, dtype=torch.float32)
     else:
+        # CR-001: Assert actual_len > 1 to prevent division by zero if guard is refactored
+        assert actual_len > 1, f"CR-001: Position weight requires actual_len > 1, got {actual_len}"
         positions = torch.arange(actual_len, device=device, dtype=torch.float32)
         position_weight = (1.0 - positions / (actual_len - 1)) ** position_decay
         position_weight = position_weight.unsqueeze(0).expand(batch_size, -1)
@@ -399,12 +401,22 @@ def compute_normalized_entropy(
     normalized = entropy / max_entropy
 
     # A-7: Warn when NaN detected, then replace with 0.5 (neutral entropy)
+    # CR-002: Track occurrence counts and sample positions for debugging
     if torch.isnan(normalized).any():
         import warnings
-        warnings.warn(
-            f"NaN detected in normalized entropy ({torch.isnan(normalized).sum().item()} values). "
-            "Replacing with 0.5 (neutral). Check for malformed logits or extreme values."
-        )
+        if not hasattr(compute_normalized_entropy, '_nan_count'):
+            compute_normalized_entropy._nan_count = 0
+        nan_count_batch = torch.isnan(normalized).sum().item()
+        compute_normalized_entropy._nan_count += nan_count_batch
+        # Log on first occurrence and every 100th
+        if compute_normalized_entropy._nan_count == nan_count_batch or compute_normalized_entropy._nan_count % 100 < nan_count_batch:
+            nan_positions = torch.nonzero(torch.isnan(normalized))
+            sample_positions = nan_positions[:5].tolist() if len(nan_positions) > 0 else []
+            warnings.warn(
+                f"CR-002: NaN in normalized entropy (batch: {nan_count_batch}, total: {compute_normalized_entropy._nan_count}). "
+                f"Sample positions: {sample_positions}. Replacing with 0.5. "
+                "Investigate logit computation — check for -inf/+inf in input logits."
+            )
     normalized = torch.where(torch.isnan(normalized), torch.tensor(0.5, device=normalized.device, dtype=normalized.dtype), normalized)
 
     return normalized.clamp(0.0, 1.0)

@@ -175,7 +175,8 @@ class HintRegistry:
         for (pid, span_id), entry in list(self._hints.items()):
             if pid != prompt_id:
                 continue
-            # Look up mastery for this specific span
+            # Use mastery_fn to get CURRENT mastery for decay (not mastery_at_flag)
+            # mastery_at_flag is stored for debugging/logging, not for probability computation
             mastery = mastery_fn(span_id) if mastery_fn else 0.0
             hint = self.get_hint(prompt_id, span_id, mastery)
             if hint is not None:
@@ -300,73 +301,86 @@ class HintRegistry:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> HintRegistry:
-        """Deserialize registry from checkpoint."""
+        """Deserialize registry from checkpoint.
+
+        Uses schema validation for consolidated boundary checking.
+        See qgre/schema.py for HINT_REGISTRY_SCHEMA and HINT_ENTRY_SCHEMA.
+        """
         import warnings
+        from qgre.schema import (
+            validate_schema,
+            validate_field,
+            HINT_REGISTRY_SCHEMA,
+            HINT_ENTRY_SCHEMA,
+            FieldSpec,
+        )
+
+        # Validate top-level registry structure
+        try:
+            validated = validate_schema(data, HINT_REGISTRY_SCHEMA, "hint_registry")
+        except (TypeError, ValueError) as e:
+            warnings.warn(
+                f"SCHEMA: HintRegistry validation failed: {e}. "
+                "Returning empty registry."
+            )
+            return cls()
 
         registry = cls(
-            mastery_threshold=data.get("mastery_threshold", 0.8),
-            success_streak_to_clear=data.get("success_streak_to_clear", 2),
+            mastery_threshold=validated["mastery_threshold"],
+            success_streak_to_clear=validated["success_streak_to_clear"],
         )
-        # R2-CSM-004: Validate hints field is a list before iteration
-        hints_data = data.get("hints", [])
+
+        # Process hint entries with per-entry validation
+        hints_data = validated["hints"]
         if not isinstance(hints_data, list):
             warnings.warn(
-                f"R2-CSM-004: hints field is not a list (type: {type(hints_data).__name__}). "
+                f"SCHEMA: hints field is not a list (type: {type(hints_data).__name__}). "
                 "Skipping hint registry restoration."
             )
             return registry
+
         skipped_entries = 0
-        skipped_empty_tokens = 0
-        first_error_msg = ""  # Initialize before loop to avoid UnboundLocalError
+        first_error_msg = ""
         for hint_data in hints_data:
             try:
-                # R2-MIO-002: Skip entries with empty hint_tokens during deserialization
-                hint_tokens = hint_data["hint_tokens"]
-                if not hint_tokens or (isinstance(hint_tokens, list) and len(hint_tokens) == 0):
+                # Validate each entry against HINT_ENTRY_SCHEMA
+                if not isinstance(hint_data, dict):
                     skipped_entries += 1
-                    skipped_empty_tokens += 1
-                    prompt_id = hint_data.get("prompt_id", "unknown")
-                    span_id = hint_data.get("span_id", "unknown")
                     if skipped_entries == 1:
-                        warnings.warn(
-                            f"R2-MIO-002: Skipping hint entry with empty hint_tokens. "
-                            f"Prompt ID: {prompt_id}, Span ID: {span_id}. "
-                            "This creates zombie entries. Checkpoint may be corrupted."
-                        )
+                        first_error_msg = f"entry is {type(hint_data).__name__}, not dict"
                     continue
+
+                entry_validated = validate_schema(hint_data, HINT_ENTRY_SCHEMA, "hint_entry")
                 entry = HintEntry(
-                    prompt_id=hint_data["prompt_id"],
-                    span_id=hint_data["span_id"],
-                    hint_tokens=hint_tokens,
-                    mastery_at_flag=hint_data["mastery_at_flag"],
-                    flagged_step=hint_data["flagged_step"],
-                    success_count=hint_data.get("success_count", 0),
-                    total_uses=hint_data.get("total_uses", 0),
+                    prompt_id=entry_validated["prompt_id"],
+                    span_id=entry_validated["span_id"],
+                    hint_tokens=entry_validated["hint_tokens"],
+                    mastery_at_flag=entry_validated["mastery_at_flag"],
+                    flagged_step=entry_validated["flagged_step"],
+                    success_count=entry_validated["success_count"],
+                    total_uses=entry_validated["total_uses"],
                 )
                 registry._hints[(entry.prompt_id, entry.span_id)] = entry
-            except (KeyError, TypeError) as e:
+            except (TypeError, ValueError) as e:
                 skipped_entries += 1
                 if skipped_entries == 1:
                     first_error_msg = str(e)
                     warnings.warn(
-                        f"HintRegistry.from_dict: skipping corrupted entry: {e}. "
+                        f"SCHEMA: HintEntry validation failed: {e}. "
                         "Checkpoint may be corrupted or from incompatible version."
                     )
+
         if skipped_entries > 0:
-            total_entries = len(data.get("hints", []))
+            total_entries = len(hints_data)
             all_corrupted = " ALL entries corrupted — hint registry is empty!" if skipped_entries == total_entries else ""
             first_err = f" First error: {first_error_msg}" if skipped_entries > 1 else ""
-            # CT-6: Include empty token count in final restoration message
-            empty_msg = f" ({skipped_empty_tokens} with empty tokens)" if skipped_empty_tokens > 0 else ""
             warnings.warn(
-                f"HintRegistry.from_dict: skipped {skipped_entries}/{total_entries} corrupted entries{empty_msg}.{first_err}{all_corrupted}"
+                f"SCHEMA: HintRegistry skipped {skipped_entries}/{total_entries} entries.{first_err}{all_corrupted}"
             )
-            # H-3: Return empty registry with warning instead of raising
             if skipped_entries == total_entries and total_entries > 0:
                 warnings.warn(
-                    f"H-3: ALL {total_entries} hint entries corrupted. "
-                    "Returning empty registry (training will continue without hints). "
-                    "Checkpoint may be incompatible or corrupt."
+                    f"SCHEMA: ALL {total_entries} hint entries failed validation. "
+                    "Returning empty registry (training will continue without hints)."
                 )
         return registry
 

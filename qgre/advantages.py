@@ -963,6 +963,7 @@ class QGREStepAdvantageEstimator:
             prompt_ctx = batch_contexts[i] if batch_contexts and i < len(batch_contexts) else None
             pid = prompt_ctx.prompt_id if prompt_ctx is not None else batch_prompt_ids[i]
             warmup = getattr(prompt_ctx, 'aspiration_warmup', 1.0) if prompt_ctx else 1.0
+            warmup = max(0.0, min(1.0, warmup))  # Clamp to [0, 1] to prevent double application
 
             quality_advs: dict[str, float] = {}
 

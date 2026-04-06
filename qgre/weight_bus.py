@@ -76,6 +76,12 @@ class WeightBus:
                     from qgre.lora_dropout import apply_lora_dropout
                     dropout_active = getattr(apply_lora_dropout, '_dropout_active', False)
                 except ImportError:
+                    # SFH-003: Log import failure so users know dropout checking is disabled
+                    import warnings
+                    warnings.warn(
+                        "SFH-003: lora_dropout module not available — dropout_active check disabled. "
+                        "If you expect LoRA dropout to be active, verify qgre.lora_dropout module exists."
+                    )
                     dropout_active = False
 
                 loader.sync_lora_direct(model, ctx, first_call=not self._initialized)
@@ -83,10 +89,9 @@ class WeightBus:
                 loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save), ctx)
                 # WS-R3-04: Only mark sync_executed if dropout wasn't active
                 sync_executed = not dropout_active
-
-            # W16: Always set initialized=True after first sync attempt, even if dropout active
-            # (prevents re-registration on every sync when dropout is active on step 0)
-            self._initialized = True
+                # WS-R3-04: Only set initialized if sync actually executed (dropout not active)
+                if sync_executed:
+                    self._initialized = True
         except Exception as e:
             # Don't set initialized=True on failure — next sync will retry first_call path
             raise RuntimeError(f"Weight sync failed: {e}") from e

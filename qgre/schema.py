@@ -246,15 +246,29 @@ def positive(value: Any) -> bool:
     return True
 
 
+def positive_finite(value: Any) -> bool:
+    """Validate that numeric value is positive and finite."""
+    if isinstance(value, (int, float)):
+        return value > 0 and math.isfinite(value)
+    return True
+
+
+def non_negative_finite(value: Any) -> bool:
+    """Validate that numeric value is non-negative and finite."""
+    if isinstance(value, (int, float)):
+        return value >= 0 and math.isfinite(value)
+    return True
+
+
 # GameState schema
 GAME_STATE_SCHEMA: dict[str, FieldSpec] = {
     "step_count": FieldSpec(int, Required.NO, default=0, validate=non_negative),
-    "mastery_threshold": FieldSpec(float, Required.NO, default=0.8),
+    "mastery_threshold": FieldSpec(float, Required.NO, default=0.8, validate=positive_finite),
     "phase_history": FieldSpec(list, Required.NO, default=[]),
     "stagnation_timeout": FieldSpec(int, Required.NO, default=200, validate=positive),
     "plateau_window": FieldSpec(int, Required.NO, default=50, validate=positive),
-    "plateau_threshold": FieldSpec(float, Required.NO, default=0.02),
-    "quality_window_size": FieldSpec(int, Required.NO, default=50, validate=positive),
+    "plateau_threshold": FieldSpec(float, Required.NO, default=0.02, validate=non_negative_finite),
+    "quality_window_size": FieldSpec(int, Required.NO, default=20, validate=positive),
     "tier_phases": FieldSpec(dict, Required.NO, default={}),
     "active_tiers": FieldSpec(list, Required.NO, default=["default"]),
     "tier_steps_at_phase_start": FieldSpec(dict, Required.NO, default={}),
@@ -271,10 +285,13 @@ TRAINER_STATE_SCHEMA: dict[str, FieldSpec] = {
     "accumulated_samples": FieldSpec(int, Required.NO, default=0, validate=non_negative),
 }
 
-# DataLoaderState schema
+# DataLoaderState schema (matches DataLoaderState dataclass fields)
 DATALOADER_STATE_SCHEMA: dict[str, FieldSpec] = {
     "epoch": FieldSpec(int, Required.NO, default=0, validate=non_negative),
-    "position": FieldSpec(int, Required.NO, default=0, validate=non_negative),
+    "step_in_epoch": FieldSpec(int, Required.NO, default=0, validate=non_negative),
+    "total_steps": FieldSpec(int, Required.NO, default=0, validate=non_negative),
+    "priority_weights": FieldSpec((list, type(None)), Required.NO, default=None),
+    "difficulty_gate": FieldSpec((tuple, type(None)), Required.NO, default=None),
 }
 
 # AdvantageEstimatorState schema
@@ -302,4 +319,32 @@ def validate_priority_weights(weights: dict) -> bool:
 
 PRIORITY_WEIGHTS_SCHEMA: dict[str, FieldSpec] = {
     "weights": FieldSpec(dict, Required.YES, validate=validate_priority_weights),
+}
+
+
+# HintEntry schema (for hints.py)
+def validate_hint_tokens(tokens: Any) -> bool:
+    """Validate hint_tokens is a non-empty list of ints."""
+    if not isinstance(tokens, list):
+        return False
+    if len(tokens) == 0:
+        return False
+    return all(isinstance(t, int) for t in tokens)
+
+
+HINT_ENTRY_SCHEMA: dict[str, FieldSpec] = {
+    "prompt_id": FieldSpec(int, Required.YES),
+    "span_id": FieldSpec(str, Required.YES),
+    "hint_tokens": FieldSpec(list, Required.YES, validate=validate_hint_tokens),
+    "mastery_at_flag": FieldSpec(float, Required.YES, validate=non_negative_finite),
+    "flagged_step": FieldSpec(int, Required.YES, validate=non_negative),
+    "success_count": FieldSpec(int, Required.NO, default=0, validate=non_negative),
+    "total_uses": FieldSpec(int, Required.NO, default=0, validate=non_negative),
+}
+
+
+HINT_REGISTRY_SCHEMA: dict[str, FieldSpec] = {
+    "mastery_threshold": FieldSpec(float, Required.NO, default=0.8, validate=positive_finite),
+    "success_streak_to_clear": FieldSpec(int, Required.NO, default=2, validate=positive),
+    "hints": FieldSpec(list, Required.NO, default=[]),
 }

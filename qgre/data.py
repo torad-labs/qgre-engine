@@ -148,6 +148,14 @@ class QGREDataLoader:
                     token_ids = token_ids.input_ids
                     if isinstance(token_ids, list) and len(token_ids) == 1:
                         token_ids = token_ids[0]
+                # After unwrap, verify token_ids is still a sequence before len() check
+                if not isinstance(token_ids, (list, tuple)):
+                    import warnings
+                    warnings.warn(
+                        f"DP-R2-UNWRAP: token_ids after unwrap is scalar {type(token_ids).__name__}, "
+                        f"wrapping back to list. Prompt text: {text[:100]}"
+                    )
+                    token_ids = [token_ids]
             else:
                 token_ids = self.tokenizer.encode(text)
 
@@ -253,6 +261,12 @@ class QGREDataLoader:
                     none_count += 1
                     weights[i] = 0.0
                     filtered_count += 1
+                    if none_count == 1:
+                        import warnings
+                        warnings.warn(
+                            f"Difficulty gate: prompt {item['prompt_id']} has difficulty=None and will be filtered. "
+                            f"Check difficulty_column '{col}' data."
+                        )
                     continue
                 # DP3-010: Explicit check — don't convert None to ""
                 if difficulty not in allowed:
@@ -384,20 +398,94 @@ class QGREDataLoader:
 
     def state_dict(self) -> dict:
         """For checkpoint resume."""
-        return {
+        state = {
             "epoch": self.epoch,
             "step_in_epoch": self.step_in_epoch,
             "total_steps": self.total_steps,
             "priority_weights": self._priorities,
         }
+        if self._difficulty_gate is not None:
+            allowed, col = self._difficulty_gate
+            state["difficulty_gate"] = {"allowed_difficulties": list(allowed), "difficulty_column": col}
+        return state
 
     def load_state_dict(self, state: dict):
         """Resume from checkpoint."""
-        self.epoch = state.get("epoch", 0)
-        self.step_in_epoch = state.get("step_in_epoch", 0)
-        self.total_steps = state.get("total_steps", 0)
-        if state.get("priority_weights"):
-            self._priorities = state["priority_weights"]
+        from qgre.schema import validate_schema, FieldSpec, Required
+        import math
+
+        # Validate state dict structure
+        validated = validate_schema(state, {
+            "epoch": FieldSpec(int, Required.NO, default=0),
+            "step_in_epoch": FieldSpec(int, Required.NO, default=0),
+            "total_steps": FieldSpec(int, Required.NO, default=0),
+            "priority_weights": FieldSpec((dict, type(None)), Required.NO, default=None),
+            "difficulty_gate": FieldSpec((dict, type(None)), Required.NO, default=None),
+        }, "dataloader_state")
+
+        self.epoch = validated["epoch"]
+        self.step_in_epoch = validated["step_in_epoch"]
+        self.total_steps = validated["total_steps"]
+
+        # Validate priority_weights if present
+        if validated.get("priority_weights"):
+            weights = validated["priority_weights"]
+            if not isinstance(weights, dict):
+                import warnings
+                warnings.warn(
+                    f"SCHEMA: priority_weights expected dict, got {type(weights).__name__}. Skipping."
+                )
+            else:
+                # Validate each weight is non-negative and finite
+                # SFH-002: Track which entries are invalid for debugging
+                invalid_entries = []
+                for prompt_id, weight in weights.items():
+                    if not isinstance(weight, (int, float)) or weight < 0 or not math.isfinite(weight):
+                        invalid_entries.append((prompt_id, weight))
+                if invalid_entries:
+                    import warnings
+                    sample = invalid_entries[:3]  # Show first 3
+                    sample_str = ", ".join(f"{pid}={w}" for pid, w in sample)
+                    warnings.warn(
+                        f"SFH-002: {len(invalid_entries)} invalid priority weights. "
+                        f"Examples: [{sample_str}]. Skipping all priority_weights."
+                    )
+                else:
+                    self._priorities = weights
+
+        # Restore difficulty_gate if present
+        # SFH-001: Add explicit warnings for each validation failure branch
+        if validated.get("difficulty_gate"):
+            gate = validated["difficulty_gate"]
+            if not isinstance(gate, dict):
+                import warnings
+                warnings.warn(
+                    f"SFH-001: difficulty_gate expected dict, got {type(gate).__name__}. "
+                    "Difficulty gate will not be restored — curriculum learning disabled."
+                )
+            elif "allowed_difficulties" not in gate or "difficulty_column" not in gate:
+                import warnings
+                warnings.warn(
+                    f"SFH-001: difficulty_gate missing required keys. Got keys: {list(gate.keys())}. "
+                    "Difficulty gate will not be restored — curriculum learning disabled."
+                )
+            else:
+                allowed = gate["allowed_difficulties"]
+                col = gate["difficulty_column"]
+                if not isinstance(allowed, list):
+                    import warnings
+                    warnings.warn(
+                        f"SFH-001: allowed_difficulties expected list, got {type(allowed).__name__}. "
+                        "Difficulty gate will not be restored — curriculum learning disabled."
+                    )
+                elif not isinstance(col, str):
+                    import warnings
+                    warnings.warn(
+                        f"SFH-001: difficulty_column expected str, got {type(col).__name__}. "
+                        "Difficulty gate will not be restored — curriculum learning disabled."
+                    )
+                else:
+                    self._difficulty_gate = (set(allowed), col)
 
 
 def load_prompts_from_parquet(path: str | Path) -> list[dict[str, Any]]:
