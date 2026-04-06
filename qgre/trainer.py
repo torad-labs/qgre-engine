@@ -262,6 +262,10 @@ class QGRETrainer:
         self._spo_filter_stats = {"total": 0, "passed": 0, "dropped": 0, "warned": False}
         self._spo_filter_idx: list[int] | None = None
 
+        # Checkpoint resume state — initialized here to avoid fragile hasattr checks
+        self._resumed_mid_accumulation = False
+        self._needs_weight_sync = False
+
         # Gradient probe — measure actual logit changes on physics tokens for advantage_scale calibration
         self._gradient_probe_steps = config.training.gradient_probe_steps
         self._gradient_probe_log = []
@@ -2494,21 +2498,27 @@ class QGRETrainer:
                                 span_outcomes[key]["failure"] += 1
 
                     # MIO-005: Majority voting for graduation
+                    # Track graduated hints to avoid race condition in multi-completion batches
+                    graduated_this_batch: set[tuple] = set()
                     for (pid, span_id), counts in span_outcomes.items():
                         total = counts["success_no_hint"] + counts["success_with_hint"] + counts["failure"]
                         if total == 0:
                             continue
+                        # Skip if hint doesn't exist or already graduated this batch
+                        if (pid, span_id) not in self.hint_registry or (pid, span_id) in graduated_this_batch:
+                            continue
                         # Majority failure: reset streak
                         if counts["failure"] > total / 2:
-                            if (pid, span_id) in self.hint_registry:
-                                self.hint_registry.record_failure(pid, span_id)
+                            self.hint_registry.record_failure(pid, span_id)
                         # Majority success without hint: can graduate
                         elif counts["success_no_hint"] > total / 2:
                             graduated = self.hint_registry.record_success(pid, span_id, hint_was_used=False)
-                            if graduated and self.global_step % 50 == 0:
-                                logging.getLogger(__name__).info(
-                                    f"EGRS: Prompt {pid} {span_id} graduated (no longer needs hints)"
-                                )
+                            if graduated:
+                                graduated_this_batch.add((pid, span_id))
+                                if self.global_step % 50 == 0:
+                                    logging.getLogger(__name__).info(
+                                        f"EGRS: Prompt {pid} {span_id} graduated (no longer needs hints)"
+                                    )
                         # Otherwise (mixed, or majority success with hint): record success with hint
                         else:
                             self.hint_registry.record_success(pid, span_id, hint_was_used=True)
