@@ -10,6 +10,7 @@ No weight deltas, no hidden state inference — just direct logit measurements.
 import json
 import sys
 from pathlib import Path
+
 import numpy as np
 
 
@@ -36,7 +37,7 @@ def analyze_probe_results(probe_file: Path):
     lora_alpha = config.get("lora_alpha", 64)
     n_steps = config["n_steps"]
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  advantage_scale: {adv_scale}")
     print(f"  learning rate: {lr}")
     print(f"  LoRA rank: {lora_rank}, alpha: {lora_alpha}")
@@ -44,7 +45,7 @@ def analyze_probe_results(probe_file: Path):
 
     # Per-step statistics
     print(f"\n{'-'*70}")
-    print(f"Per-step measurements:")
+    print("Per-step measurements:")
     print(f"{'-'*70}")
 
     for m in measurements[:5]:  # Show first 5 steps
@@ -83,7 +84,7 @@ def analyze_probe_results(probe_file: Path):
     nudge_fraction = avg_mean_delta / logit_gap
 
     print(f"\n{'-'*70}")
-    print(f"Percentage of discriminative gap:")
+    print("Percentage of discriminative gap:")
     print(f"{'-'*70}")
     print(f"  Logit gap (physics tokens): {logit_gap:.2f}")
     print(f"  Mean nudge per step: {avg_mean_delta:.6f}")
@@ -97,7 +98,7 @@ def analyze_probe_results(probe_file: Path):
 
     # Optimal advantage_scale for different target nudges
     print(f"\n{'-'*70}")
-    print(f"Optimal advantage_scale for target nudge:")
+    print("Optimal advantage_scale for target nudge:")
     print(f"{'-'*70}")
 
     if avg_mean_delta > 0:
@@ -108,7 +109,7 @@ def analyze_probe_results(probe_file: Path):
 
         # Recommendation
         print(f"\n{'-'*70}")
-        print(f"RECOMMENDATION:")
+        print("RECOMMENDATION:")
         print(f"{'-'*70}")
         target_pct = 1.0  # 1% of gap per step
         target_nudge = target_pct / 100 * logit_gap
@@ -123,7 +124,7 @@ def analyze_probe_results(probe_file: Path):
         elif nudge_fraction > 0.05:
             print(f"  → Too aggressive, scale DOWN by {1/scale_ratio:.1f}x")
         else:
-            print(f"  → Current scale is reasonable")
+            print("  → Current scale is reasonable")
 
 
 def main():
@@ -132,7 +133,9 @@ def main():
     if not probe_file.exists():
         print(f"ERROR: Probe results not found at {probe_file}")
         print("Run the gradient probe training first:")
-        print("  python -m qgre train --config examples/hamiltonian/config_smoke.yaml --reward examples.hamiltonian.reward_fn:hamiltonian_reward")
+        print(
+            "  python -m qgre train --config examples/hamiltonian/config_smoke.yaml --reward examples.hamiltonian.reward_fn:hamiltonian_reward"
+        )
         return 1
 
     analyze_probe_results(probe_file)

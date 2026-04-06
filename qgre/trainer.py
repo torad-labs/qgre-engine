@@ -3,13 +3,17 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
-import torch.nn as nn
+from torch import nn
 
-from qgre.advantages import QGREStepAdvantageEstimator, build_phase_qualities
-from qgre.advantages import apply_egrs_matrix, compute_span_correctness
+from qgre.advantages import (
+    QGREStepAdvantageEstimator,
+    apply_egrs_matrix,
+    build_phase_qualities,
+    compute_span_correctness,
+)
 from qgre.attention_bonds import (
     compute_bond_strength,
     compute_entropy_importance,
@@ -21,17 +25,13 @@ from qgre.checkpoint import (
     load_checkpoint,
     save_checkpoint,
 )
-from qgre.config import QGREConfig
-from qgre.data import PromptBatch, QGREDataLoader
-from qgre.logging import CompletionLogger, log_step_metrics, log_training_params
+from qgre.logging import log_step_metrics, log_training_params
 from qgre.nemo_extracted.kl import masked_mean
 from qgre.nemo_extracted.llds import compute_llds_loss
 from qgre.nemo_extracted.logits import logprobs_from_logits
 from qgre.nemo_extracted.loss_functions import ClippedPGLossFn
 from qgre.segments import Segmenter, uniform_segmenter
 from qgre.types import (
-    CHECKPOINT_SCHEMA_VERSION,
-    CheckpointState,
     GameState,
     RewardResult,
     SampleData,
@@ -41,17 +41,21 @@ from qgre.types import (
 )
 
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from qgre.config import QGREConfig
+    from qgre.data import PromptBatch, QGREDataLoader
+
+
 class GenerationBackend(Protocol):
     """Abstract generation interface — shields trainer from Unsloth internals."""
 
-    def generate(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs) -> Any:
-        ...
+    def generate(self, input_ids: torch.Tensor, attention_mask: torch.Tensor, **kwargs) -> Any: ...
 
-    def save_weights(self, path: str | Path) -> None:
-        ...
+    def save_weights(self, path: str | Path) -> None: ...
 
-    def load_weights(self, path: str | Path) -> None:
-        ...
+    def load_weights(self, path: str | Path) -> None: ...
 
 
 class QGRETrainer:
@@ -98,9 +102,13 @@ class QGRETrainer:
                 data_cfg.initial_tiers = [self._tier_order[0]]
             # Type check: ensure lists, not strings
             if not isinstance(data_cfg.initial_tiers, list):
-                raise ValueError(f"initial_tiers must be list[str], got {type(data_cfg.initial_tiers).__name__}")
+                raise ValueError(
+                    f"initial_tiers must be list[str], got {type(data_cfg.initial_tiers).__name__}"
+                )
             if not isinstance(self._tier_order, list):
-                raise ValueError(f"tier_order must be list[str], got {type(self._tier_order).__name__}")
+                raise ValueError(
+                    f"tier_order must be list[str], got {type(self._tier_order).__name__}"
+                )
             self.game_state.active_tiers = list(data_cfg.initial_tiers)
             for t in data_cfg.initial_tiers:
                 self.game_state.tier_phases.setdefault(t, 1)
@@ -115,7 +123,7 @@ class QGRETrainer:
                 "  algorithm:\n"
                 "    step_qualities:\n"
                 "      1: [q_format]\n"
-                "      2: [q_accuracy]"
+                "      2: [q_accuracy]",
             )
         self.step_qualities = sq
         self.phase_qualities = build_phase_qualities(sq)
@@ -126,7 +134,7 @@ class QGRETrainer:
             raise ValueError(
                 "weight_sync_strategy='merge' is incompatible with load_in_4bit=True. "
                 "MERGE creates new tensors and breaks shared memory with vLLM. "
-                "Use weight_sync_strategy='direct_copy' (default) for 4-bit training."
+                "Use weight_sync_strategy='direct_copy' (default) for 4-bit training.",
             )
 
         # Algorithm setup
@@ -138,28 +146,40 @@ class QGRETrainer:
         if segmenter is None and alg.segmenter != "uniform":
             if alg.segmenter == "qwen3_xml":
                 from qgre.segments import qwen3_xml_segmenter
+
                 segmenter = qwen3_xml_segmenter
             elif alg.segmenter == "hif_json":
                 from qgre.segments import make_hif_json_segmenter
+
                 segmenter = make_hif_json_segmenter(tokenizer)
             elif alg.segmenter == "hamiltonian":
                 from qgre.segments import make_hamiltonian_segmenter
+
                 segmenter = make_hamiltonian_segmenter(tokenizer)
             elif alg.segmenter == "label":
                 from qgre.segments import make_label_segmenter
+
                 if alg.label_segmenter is None or not alg.label_segmenter.patterns:
-                    raise ValueError("segmenter='label' requires algorithm.label_segmenter.patterns in config")
+                    raise ValueError(
+                        "segmenter='label' requires algorithm.label_segmenter.patterns in config"
+                    )
                 segmenter = make_label_segmenter(tokenizer, alg.label_segmenter)
             elif ":" in alg.segmenter:
                 import importlib
+
                 mod_path, fn_name = alg.segmenter.rsplit(":", 1)
                 segmenter = getattr(importlib.import_module(mod_path), fn_name)
 
         spo_cfg = alg.spo
         # Target-aware aspiration gap uses mastery threshold as default target
-        aspiration_target = spo_cfg.aspiration_target if spo_cfg.aspiration_target > 0 else config.training.mastery_threshold
+        aspiration_target = (
+            spo_cfg.aspiration_target
+            if spo_cfg.aspiration_target > 0
+            else config.training.mastery_threshold
+        )
         self.advantage_estimator = QGREStepAdvantageEstimator(
-            lr=spo_lr, mode=mode,
+            lr=spo_lr,
+            mode=mode,
             step_qualities=sq,
             segmenter=segmenter or uniform_segmenter,
             normalize_advantages=alg.loss_type != "dr_grpo",
@@ -186,7 +206,12 @@ class QGRETrainer:
         self.hint_registry = None
         self.hint_extractor = None
         if config.egrs.enabled and config.egrs.hint_enabled:
-            from qgre.hints import HintRegistry, make_hamiltonian_hint_extractor, make_generic_hint_extractor
+            from qgre.hints import (
+                HintRegistry,
+                make_generic_hint_extractor,
+                make_hamiltonian_hint_extractor,
+            )
+
             self.hint_registry = HintRegistry(
                 mastery_threshold=config.egrs.mastery_threshold,
             )
@@ -195,44 +220,50 @@ class QGRETrainer:
                 self.hint_extractor = make_hamiltonian_hint_extractor()
                 logging.getLogger(__name__).info(
                     "EGRS: Hint registry initialized with Hamiltonian extractor. "
-                    "Q4 hints will use T_expr, V_expr, H_expr from metadata."
+                    "Q4 hints will use T_expr, V_expr, H_expr from metadata.",
                 )
             elif config.egrs.hint_extractor == "generic" and config.egrs.hint_extractor_mapping:
-                self.hint_extractor = make_generic_hint_extractor(config.egrs.hint_extractor_mapping)
+                self.hint_extractor = make_generic_hint_extractor(
+                    config.egrs.hint_extractor_mapping
+                )
                 logging.getLogger(__name__).info(
                     f"EGRS: Hint registry initialized with generic extractor. "
-                    f"Mapping: {config.egrs.hint_extractor_mapping}"
+                    f"Mapping: {config.egrs.hint_extractor_mapping}",
                 )
             elif config.egrs.hint_extractor == "generic" and not config.egrs.hint_extractor_mapping:
                 # R3-CSM-007: Warn if generic extractor requested but mapping is empty
                 logging.getLogger(__name__).warning(
                     "R3-CSM-007: hint_extractor='generic' but hint_extractor_mapping is empty/None. "
-                    "Generic extractor requires mapping. Falling back to no extractor (generic hints only)."
+                    "Generic extractor requires mapping. Falling back to no extractor (generic hints only).",
                 )
                 self.hint_extractor = None
             else:
                 logging.getLogger(__name__).info(
                     "EGRS: Hint registry initialized without extractor. "
-                    "Q4 hints will be generic ('Focus on STEP_N')."
+                    "Q4 hints will be generic ('Focus on STEP_N').",
                 )
 
         # Loss function (NeMo RL extracted)
-        self.loss_fn = ClippedPGLossFn({
-            "reference_policy_kl_penalty": alg.kl_cov_ratio if alg.loss_mode == "kl_cov" else 0.0,
-            "reference_policy_kl_type": alg.reference_policy_kl_type,
-            "kl_input_clamp_value": alg.kl_input_clamp,
-            "kl_output_clamp_value": alg.kl_output_clamp,
-            "ratio_clip_min": alg.clip_ratio_low,
-            "ratio_clip_max": alg.clip_ratio_high,
-            "ratio_clip_c": None,
-            "use_on_policy_kl_approximation": True,
-            "use_importance_sampling_correction": False,
-            "truncated_importance_sampling_ratio": None,
-            "token_level_loss": True,
-            "force_on_policy_ratio": False,
-            "remove_length_normalization": alg.loss_type == "dr_grpo",
-            "lambda_return": alg.lambda_return,
-        })
+        self.loss_fn = ClippedPGLossFn(
+            {
+                "reference_policy_kl_penalty": alg.kl_cov_ratio
+                if alg.loss_mode == "kl_cov"
+                else 0.0,
+                "reference_policy_kl_type": alg.reference_policy_kl_type,
+                "kl_input_clamp_value": alg.kl_input_clamp,
+                "kl_output_clamp_value": alg.kl_output_clamp,
+                "ratio_clip_min": alg.clip_ratio_low,
+                "ratio_clip_max": alg.clip_ratio_high,
+                "ratio_clip_c": None,
+                "use_on_policy_kl_approximation": True,
+                "use_importance_sampling_correction": False,
+                "truncated_importance_sampling_ratio": None,
+                "token_level_loss": True,
+                "force_on_policy_ratio": False,
+                "remove_length_normalization": alg.loss_type == "dr_grpo",
+                "lambda_return": alg.lambda_return,
+            }
+        )
 
         # LLDS requires stored generation-time logprobs to be meaningful.
         # Without them, old_logprob == curr_logprob and all LLDS gates return zero.
@@ -292,6 +323,7 @@ class QGRETrainer:
         """Lazy completion logger — creates on first access, handles resume."""
         if self._completion_logger is None:
             from qgre.logging import CompletionLogger
+
             self._completion_logger = CompletionLogger(self._completion_logger_path)
         return self._completion_logger
 
@@ -300,6 +332,7 @@ class QGRETrainer:
         if self._vprm_initialized:
             return
         from qgre.critic import VPRMCritic
+
         self.vprm_critic = VPRMCritic(
             hidden_dim=hidden_dim,
             step_qualities=self._vprm_sq,
@@ -339,13 +372,17 @@ class QGRETrainer:
         ]
 
         if embedding_params:
-            print(f"Optimizer: {len(other_params)} params at lr={base_lr}, "
-                  f"{len(embedding_params)} embedding params at lr={embed_lr}")
+            print(
+                f"Optimizer: {len(other_params)} params at lr={base_lr}, "
+                f"{len(embedding_params)} embedding params at lr={embed_lr}"
+            )
         else:
             import warnings
+
             warnings.warn(
                 "No embedding/lm_head params with requires_grad=True found. "
-                "If using modules_to_save=['lm_head'], this means PEFT adapter init failed."
+                "If using modules_to_save=['lm_head'], this means PEFT adapter init failed.",
+                stacklevel=2,
             )
             # Remove empty param group — optimizer doesn't like empty groups
             param_groups = [{"params": other_params, "lr": base_lr}]
@@ -355,15 +392,19 @@ class QGRETrainer:
         if trainable_count == 0:
             raise RuntimeError(
                 "Model has no trainable parameters. Cannot start training. "
-                "Check PEFT adapter configuration and requires_grad settings."
+                "Check PEFT adapter configuration and requires_grad settings.",
             )
 
         # AdamW8bit saves ~4x memory on optimizer states (PLAN.md line 323)
         use_8bit = False
         try:
-            device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
+            device = next(
+                (p.device for p in self.model.parameters() if p.device.type != "cpu"),
+                next(self.model.parameters()).device,
+            )
             if device.type == "cuda":
                 from bitsandbytes.optim import AdamW8bit
+
                 self.optimizer = AdamW8bit(param_groups)
                 use_8bit = True
         except ImportError:
@@ -378,19 +419,29 @@ class QGRETrainer:
             # eta_min = base_lr * 0.1. This means embedding group (base_lr/10) has
             # flat LR — intentional, embeddings need stable learning rate.
             main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer, T_max=cfg.total_steps, eta_min=cfg.lr * 0.1,
+                self.optimizer,
+                T_max=cfg.total_steps,
+                eta_min=cfg.lr * 0.1,
             )
         elif cfg.lr_scheduler == "linear":
             main_scheduler = torch.optim.lr_scheduler.LinearLR(
-                self.optimizer, start_factor=1.0, end_factor=0.1, total_iters=cfg.total_steps,
+                self.optimizer,
+                start_factor=1.0,
+                end_factor=0.1,
+                total_iters=cfg.total_steps,
             )
 
         if main_scheduler is not None and cfg.warmup_steps > 0:
             warmup = torch.optim.lr_scheduler.LinearLR(
-                self.optimizer, start_factor=0.01, end_factor=1.0, total_iters=cfg.warmup_steps,
+                self.optimizer,
+                start_factor=0.01,
+                end_factor=1.0,
+                total_iters=cfg.warmup_steps,
             )
             self.scheduler = torch.optim.lr_scheduler.SequentialLR(
-                self.optimizer, schedulers=[warmup, main_scheduler], milestones=[cfg.warmup_steps],
+                self.optimizer,
+                schedulers=[warmup, main_scheduler],
+                milestones=[cfg.warmup_steps],
             )
         else:
             self.scheduler = main_scheduler
@@ -443,7 +494,7 @@ class QGRETrainer:
             if not self.phase_qualities:
                 raise ValueError(
                     "step_qualities must not be empty. "
-                    "Provide at least one phase with quality keys."
+                    "Provide at least one phase with quality keys.",
                 )
             # Check for phases with empty quality lists — they contribute no keys and
             # produce zero gradients for any sample in that phase.
@@ -452,7 +503,7 @@ class QGRETrainer:
                 raise ValueError(
                     f"step_qualities phases {sorted(empty_phases)} have empty quality lists. "
                     "Each phase must declare at least one quality key. "
-                    "An empty list produces zero gradients for all samples in that phase."
+                    "An empty list produces zero gradients for all samples in that phase.",
                 )
             # Validate against ALL reward_results — use intersection of score keys so that
             # any sample missing a required key is caught (not just sample[0]).
@@ -470,7 +521,7 @@ class QGRETrainer:
                     f"step_qualities keys {sorted(missing)} not found in reward_fn output "
                     f"for all samples (checked {len(reward_results)} samples). "
                     f"Keys present in ALL samples: {sorted(available_keys)}. "
-                    "This would cause silent zero learning signal."
+                    "This would cause silent zero learning signal.",
                 )
             self._sq_validated = True
 
@@ -483,8 +534,14 @@ class QGRETrainer:
             meta = batch.metadata[i] if i < len(batch.metadata) else {}
             tier = self._get_prompt_tier(meta)
             tier_phase = self.game_state.tier_phases.get(tier, 1)
-            fallback = max(p for p in self.phase_qualities if p <= tier_phase) if any(p <= tier_phase for p in self.phase_qualities) else min(self.phase_qualities)
-            active_qualities.append(self.phase_qualities.get(tier_phase, self.phase_qualities[fallback]))
+            fallback = (
+                max(p for p in self.phase_qualities if p <= tier_phase)
+                if any(p <= tier_phase for p in self.phase_qualities)
+                else min(self.phase_qualities)
+            )
+            active_qualities.append(
+                self.phase_qualities.get(tier_phase, self.phase_qualities[fallback])
+            )
 
         # Compute frontier steps — steps blocking phase advancement (below mastery threshold).
         # These get amplified advantages to focus gradient on the bottleneck.
@@ -513,10 +570,11 @@ class QGRETrainer:
         if not use_spans:
             logging.getLogger(__name__).warning(
                 f"Step {self.global_step}: No scored_spans in batch. "
-                f"scored_spans counts: {[len(rr.scored_spans) if rr.scored_spans else 0 for rr in reward_results]}"
+                f"scored_spans counts: {[len(rr.scored_spans) if rr.scored_spans else 0 for rr in reward_results]}",
             )
         if use_spans:
             from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
+
             # Build per-sample token masks from scored_spans
             batch_token_masks: list[dict[str, torch.Tensor]] = []
             for i, rr in enumerate(reward_results):
@@ -530,12 +588,16 @@ class QGRETrainer:
                             _log.error(
                                 f"SPAN VALIDATION FAILED sample {i}: decoded text != reward_fn text. "
                                 f"Decoded len={len(our_decode)}, reward_fn len={len(reward_fn_text)}. "
-                                f"Character positions will be WRONG. Falling back to segmenter."
+                                f"Character positions will be WRONG. Falling back to segmenter.",
                             )
                             # Find first difference for debugging
-                            for j, (a, b) in enumerate(zip(our_decode, reward_fn_text)):
+                            for j, (a, b) in enumerate(
+                                zip(our_decode, reward_fn_text, strict=False)
+                            ):
                                 if a != b:
-                                    _log.error(f"  First diff at char {j}: decoded='{a}' vs reward_fn='{b}'")
+                                    _log.error(
+                                        f"  First diff at char {j}: decoded='{a}' vs reward_fn='{b}'"
+                                    )
                                     break
                             batch_token_masks.append({})  # Skip spans for this sample
                             continue
@@ -543,30 +605,51 @@ class QGRETrainer:
                     # Build char→token map directly from original token_ids (no re-encoding)
                     char_map = build_char_to_token_map(completions[i], self.tokenizer)
                     if char_map is not None:
-                        masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]), self.ctx)
+                        masks = scored_spans_to_token_masks(
+                            rr.scored_spans, char_map, len(completions[i]), self.ctx
+                        )
 
                         # SPAN CONTENT LOGGING: Write to separate file for verification
                         # Check output/hamiltonian/spans.log to verify spans are correct
                         if self.global_step % self.config.logging.log_freq == 0 and i == 0:
-                            text = completion_texts[i] if completion_texts and i < len(completion_texts) else None
+                            text = (
+                                completion_texts[i]
+                                if completion_texts and i < len(completion_texts)
+                                else None
+                            )
                             if text:
-                                span_log_path = Path(self.config.logging.checkpoint_dir).parent / "spans.log"
+                                span_log_path = (
+                                    Path(self.config.logging.checkpoint_dir).parent / "spans.log"
+                                )
                                 with open(span_log_path, "a") as f:
                                     f.write(f"\n=== Step {self.global_step} Sample {i} ===\n")
                                     for q_name, spans in rr.scored_spans.items():
                                         for span_idx, (cs, ce) in enumerate(spans):
-                                            span_text = text[cs:ce] if cs < len(text) else "<OUT_OF_BOUNDS>"
-                                            tok_indices = sorted(set(
-                                                char_map[c] for c in range(max(0, cs), min(ce, len(char_map)))
-                                                if char_map[c] >= 0
-                                            ))
-                                            tok_range = f"{tok_indices[0]}-{tok_indices[-1]}" if tok_indices else "NONE"
+                                            span_text = (
+                                                text[cs:ce] if cs < len(text) else "<OUT_OF_BOUNDS>"
+                                            )
+                                            tok_indices = sorted(
+                                                {
+                                                    char_map[c]
+                                                    for c in range(
+                                                        max(0, cs), min(ce, len(char_map))
+                                                    )
+                                                    if char_map[c] >= 0
+                                                }
+                                            )
+                                            tok_range = (
+                                                f"{tok_indices[0]}-{tok_indices[-1]}"
+                                                if tok_indices
+                                                else "NONE"
+                                            )
                                             display_text = span_text[:80].replace("\n", "\\n")
-                                            f.write(f"  {q_name}[{span_idx}]: chars({cs},{ce}) → toks({tok_range}) '{display_text}'\n")
+                                            f.write(
+                                                f"  {q_name}[{span_idx}]: chars({cs},{ce}) → toks({tok_range}) '{display_text}'\n"
+                                            )
                     else:
                         logging.getLogger(__name__).error(
                             f"char_to_token_map returned None for sample {i} — cannot map scored_spans to tokens. "
-                            "Falling back to uniform advantage (no span signal). Check tokenizer decode consistency."
+                            "Falling back to uniform advantage (no span signal). Check tokenizer decode consistency.",
                         )
                         masks = {}  # Mapping failed — fall back to segmenter
                 else:
@@ -581,7 +664,7 @@ class QGRETrainer:
                 n_without = len(mask_statuses) - n_with
                 logging.getLogger(__name__).warning(
                     f"A4: Heterogeneous batch — {n_with} samples have span masks, {n_without} don't. "
-                    f"Clearing all masks to use uniform segmenter mode (no mixed mode)."
+                    f"Clearing all masks to use uniform segmenter mode (no mixed mode).",
                 )
                 batch_token_masks = [{} for _ in batch_token_masks]  # Clear all masks
 
@@ -591,19 +674,23 @@ class QGRETrainer:
             if non_empty_masks == 0:
                 logging.getLogger(__name__).warning(
                     f"All span mappings failed: {len(batch_token_masks)} samples, "
-                    f"scored_spans present: {[bool(rr.scored_spans) for rr in reward_results]}"
+                    f"scored_spans present: {[bool(rr.scored_spans) for rr in reward_results]}",
                 )
             if any(m for m in batch_token_masks):
-                token_advantages, _quality_metrics = self.advantage_estimator.compute_advantages_with_spans(
-                    batch_prompt_ids=batch.prompt_ids,
-                    batch_token_ids=completions,
-                    batch_reward_results=reward_results,
-                    batch_active_qualities=active_qualities,
-                    batch_token_masks=batch_token_masks,
-                    group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
-                    frontier_steps=frontier_steps,
-                    batch_contexts=batch_contexts,
-                    ctx=self.ctx,
+                token_advantages, _quality_metrics = (
+                    self.advantage_estimator.compute_advantages_with_spans(
+                        batch_prompt_ids=batch.prompt_ids,
+                        batch_token_ids=completions,
+                        batch_reward_results=reward_results,
+                        batch_active_qualities=active_qualities,
+                        batch_token_masks=batch_token_masks,
+                        group_size=self.config.algorithm.grpo.n
+                        if self.config.algorithm.mode == "grpo"
+                        else None,
+                        frontier_steps=frontier_steps,
+                        batch_contexts=batch_contexts,
+                        ctx=self.ctx,
+                    )
                 )
                 # Still run segmenter for KL region weights (THINK/FORMAT multipliers).
                 # VPRM critic now uses spans directly via compute_advantages_from_spans.
@@ -617,7 +704,9 @@ class QGRETrainer:
                 batch_token_ids=completions,
                 batch_reward_results=reward_results,
                 batch_active_qualities=active_qualities,
-                group_size=self.config.algorithm.grpo.n if self.config.algorithm.mode == "grpo" else None,
+                group_size=self.config.algorithm.grpo.n
+                if self.config.algorithm.mode == "grpo"
+                else None,
                 frontier_steps=frontier_steps,
                 batch_contexts=batch_contexts,
                 ctx=self.ctx,
@@ -625,12 +714,15 @@ class QGRETrainer:
 
         # Build full sequences on model device.
         # modules_to_save offloads original_module to CPU — skip CPU params for device detection.
-        device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
+        device = next(
+            (p.device for p in self.model.parameters() if p.device.type != "cpu"),
+            next(self.model.parameters()).device,
+        )
         max_comp_len = max(len(adv) for adv in token_advantages)
 
         padded_advs = torch.zeros(len(completions), max_comp_len, device=device)
         for i, adv in enumerate(token_advantages):
-            padded_advs[i, :len(adv)] = adv.to(device)
+            padded_advs[i, : len(adv)] = adv.to(device)
 
         # Build per-sample KL region weights from segmenter regions (THR-style, PLAN.md lines 798-802)
         # These go into SampleData for clean SPO filter reindexing.
@@ -655,19 +747,23 @@ class QGRETrainer:
         per_sample_gen_logprobs: list[torch.Tensor | None] = []
         if generation_logprobs is not None:
             valid = True
-            for i, (lps, comp) in enumerate(zip(generation_logprobs, completions)):
+            for i, (lps, comp) in enumerate(zip(generation_logprobs, completions, strict=False)):
                 if len(lps) != len(comp):
                     import warnings
+
                     warnings.warn(
                         f"T3: Logprobs length ({len(lps)}) != completion length ({len(comp)}) "
                         f"for sample {i}. LLDS is disabled for this step due to length mismatch. "
-                        "Check generation backend configuration."
+                        "Check generation backend configuration.",
+                        stacklevel=2,
                     )
                     valid = False
                     break
             if valid:
                 for lps in generation_logprobs:
-                    per_sample_gen_logprobs.append(torch.tensor(lps, dtype=torch.float32, device=device))
+                    per_sample_gen_logprobs.append(
+                        torch.tensor(lps, dtype=torch.float32, device=device)
+                    )
             else:
                 self._has_stored_logprobs = False
                 per_sample_gen_logprobs = [None] * len(completions)
@@ -684,7 +780,9 @@ class QGRETrainer:
                 context=batch_contexts[i],
                 active_qualities=active_qualities[i],
                 regions=batch_regions[i] if batch_regions else None,
-                token_masks=batch_token_masks[i] if batch_token_masks and i < len(batch_token_masks) else None,
+                token_masks=batch_token_masks[i]
+                if batch_token_masks and i < len(batch_token_masks)
+                else None,
                 kl_region_weights=per_sample_kl_weights[i],
                 gen_logprobs=per_sample_gen_logprobs[i],
             )
@@ -694,7 +792,7 @@ class QGRETrainer:
         # Build padded batch tensors for model input
         comp_tensor = torch.zeros(len(completions), max_comp_len, dtype=torch.long, device=device)
         for i, c in enumerate(completions):
-            comp_tensor[i, :len(c)] = torch.tensor(c, dtype=torch.long, device=device)
+            comp_tensor[i, : len(c)] = torch.tensor(c, dtype=torch.long, device=device)
 
         # Attention mask: 1 for real tokens, 0 for padding beyond completion length.
         # Uses actual completion lengths, NOT token values — token ID 0 is a valid
@@ -702,7 +800,7 @@ class QGRETrainer:
         # silently mask real tokens, corrupting hidden states and gradients.
         comp_attention_mask = torch.zeros_like(comp_tensor, dtype=torch.long)
         for i, c in enumerate(completions):
-            comp_attention_mask[i, :len(c)] = 1
+            comp_attention_mask[i, : len(c)] = 1
 
         # Bundle all step-level state into TrainingStep — eliminates reindexing bugs.
         # SPO filter becomes step.filter(idx) which atomically reindexes ALL fields.
@@ -722,7 +820,9 @@ class QGRETrainer:
         # R2-MTO-005: Track original batch size separately from filtered batch size
         original_batch_size = len(step)
         if self.config.algorithm.mode == "spo":
-            useful = (step.padded_advs.abs() > self.config.algorithm.spo_filter_threshold).any(dim=-1)
+            useful = (step.padded_advs.abs() > self.config.algorithm.spo_filter_threshold).any(
+                dim=-1
+            )
             # Track filter stats for data starvation detection
             batch_total = len(step)
             batch_passed = useful.sum().item()
@@ -730,29 +830,41 @@ class QGRETrainer:
             self._spo_filter_stats["passed"] += batch_passed
             self._spo_filter_stats["dropped"] += batch_total - batch_passed
             # Warn if drop rate exceeds 50% after 100+ samples
-            if (
-                not self._spo_filter_stats["warned"]
-                and self._spo_filter_stats["total"] >= 100
-            ):
+            if not self._spo_filter_stats["warned"] and self._spo_filter_stats["total"] >= 100:
                 drop_rate = self._spo_filter_stats["dropped"] / self._spo_filter_stats["total"]
                 if drop_rate > 0.5:
                     import warnings
+
                     warnings.warn(
                         f"SPO filter drop rate {drop_rate:.1%} exceeds 50% "
                         f"(dropped {self._spo_filter_stats['dropped']}/{self._spo_filter_stats['total']}). "
                         "Model may be stuck — reward function returns near-zero signal for most samples. "
-                        "Check reward function thresholds and phase gating."
+                        "Check reward function thresholds and phase gating.",
+                        stacklevel=2,
                     )
                     self._spo_filter_stats["warned"] = True
             if useful.sum() == 0:
                 # All advantages near-zero — skip backward pass but still record mastery + log completions
-                metrics = {"loss": 0.0, "reward/mean": sum(rr.reward for rr in step.reward_results) / len(step),
-                           "global_step": self.global_step, "phase": self.game_state.phase, "skipped": True}
-                self._record_mastery_and_advance(step.reward_results, step.active_qualities, batch, metrics, batch_contexts=step.batch_contexts)
+                metrics = {
+                    "loss": 0.0,
+                    "reward/mean": sum(rr.reward for rr in step.reward_results) / len(step),
+                    "global_step": self.global_step,
+                    "phase": self.game_state.phase,
+                    "skipped": True,
+                }
+                self._record_mastery_and_advance(
+                    step.reward_results,
+                    step.active_qualities,
+                    batch,
+                    metrics,
+                    batch_contexts=step.batch_contexts,
+                )
                 # Log completions even on skipped steps
                 for i, sample in enumerate(step.samples):
                     if self.tokenizer is not None:
-                        comp_text = self.tokenizer.decode(sample.completion, skip_special_tokens=True)
+                        comp_text = self.tokenizer.decode(
+                            sample.completion, skip_special_tokens=True
+                        )
                     else:
                         comp_text = str(sample.completion)
                     self.completion_logger.log_completion(
@@ -781,7 +893,9 @@ class QGRETrainer:
         # Rebuild gen_logprobs_padded from samples
         has_gen_lp = any(s.gen_logprobs is not None for s in step.samples)
         if has_gen_lp:
-            gen_logprobs_padded = torch.zeros(len(step), max_comp_len, device=device, dtype=torch.float32)
+            gen_logprobs_padded = torch.zeros(
+                len(step), max_comp_len, device=device, dtype=torch.float32
+            )
             for i, s in enumerate(step.samples):
                 if s.gen_logprobs is not None:
                     lp_len = min(len(s.gen_logprobs), max_comp_len)
@@ -810,7 +924,7 @@ class QGRETrainer:
 
         if response_mask.sum() == 0:
             raise RuntimeError(
-                f"Step {self.global_step}: no response tokens in any completion — cannot compute loss."
+                f"Step {self.global_step}: no response tokens in any completion — cannot compute loss.",
             )
 
         # TL-R2-06: Verify alignment between response_mask and advantages
@@ -818,7 +932,7 @@ class QGRETrainer:
             raise RuntimeError(
                 f"TL-R2-06: Response mask shape mismatch with advantages. "
                 f"response_mask.shape={response_mask.shape} vs padded_advs.shape={padded_advs.shape}. "
-                "Check LLDS shift logic."
+                "Check LLDS shift logic.",
             )
 
         # Micro-batched forward + backward — avoids OOM on logits tensor
@@ -827,7 +941,11 @@ class QGRETrainer:
         # At 4096 tokens, Unsloth MLP activation = 2 × 4096 × 8960 × 2B = 140MB per seq.
         # micro_batch_size=1 for seq ≥ 2048, micro_batch_size=2 for shorter.
         actual_batch = step.comp_tensor.shape[0]  # May differ after SPO filter
-        micro_batch_size = 1 if max_comp_len >= self.config.training.micro_batch_seq_threshold else max(1, min(2, actual_batch))
+        micro_batch_size = (
+            1
+            if max_comp_len >= self.config.training.micro_batch_seq_threshold
+            else max(1, min(2, actual_batch))
+        )
         n_micro = (actual_batch + micro_batch_size - 1) // micro_batch_size
         total_loss = 0.0
         all_metrics = {}
@@ -843,63 +961,81 @@ class QGRETrainer:
             # Ensure Unsloth training mode before EACH forward pass (not just at init).
             # Unsloth's inplace attention kernels require this transition before backward.
             # Source: Unsloth #895, #2434 — "modified by inplace operation" fix.
-            if hasattr(self, '_FastLanguageModel'):
+            if hasattr(self, "_FastLanguageModel"):
                 self._FastLanguageModel.for_training(self.model)
-            elif self.generation_backend and hasattr(self.generation_backend, '_FastLanguageModel'):
+            elif self.generation_backend and hasattr(self.generation_backend, "_FastLanguageModel"):
                 self.generation_backend._FastLanguageModel.for_training(self.model)
             else:
                 try:
                     from unsloth import FastLanguageModel as FLM
+
                     FLM.for_training(self.model)
                 except ImportError:
                     import warnings
+
                     warnings.warn(
                         "Could not call FastLanguageModel.for_training() — Unsloth not importable. "
-                        "If using Unsloth models, inplace attention kernels may cause backward errors."
+                        "If using Unsloth models, inplace attention kernels may cause backward errors.",
+                        stacklevel=2,
                     )
 
             # Forward pass: fused (chunked lm_head + checkpoint) or non-fused (full lm_head)
             # Both paths start from hidden states (UNSLOTH_RETURN_HIDDEN_STATES=1 is global).
             # Fused saves ~2GB VRAM via chunking. Non-fused materializes full logit tensor.
             if self._use_fused_logprobs:
-                from qgre.fused_logprobs import get_hidden_states_and_lm_head, chunked_logprobs_from_hidden
+                from qgre.fused_logprobs import (
+                    chunked_logprobs_from_hidden,
+                    get_hidden_states_and_lm_head,
+                )
+
                 # Optionally extract attentions for bond strength computation
                 # NOTE: Unsloth's fast forward asserts output_attentions=False (inplace attention kernels
                 # don't produce attention matrices). Heuristic detection is unreliable (Unsloth patches
                 # methods without changing class names), so we try the call and catch the AssertionError.
                 # IMPORTANT: Cache the decision so we don't retry every iteration.
-                if not hasattr(self, '_attention_output_attentions'):
-                    self._attention_output_attentions = self.config.algorithm.attention_constrained_advantage
+                if not hasattr(self, "_attention_output_attentions"):
+                    self._attention_output_attentions = (
+                        self.config.algorithm.attention_constrained_advantage
+                    )
                 output_attentions = self._attention_output_attentions
                 if output_attentions:
                     try:
                         hidden_states, lm_head, attentions = get_hidden_states_and_lm_head(
-                            self.model, mb_ids, output_attentions=True, attention_mask=mb_attn_mask
+                            self.model,
+                            mb_ids,
+                            output_attentions=True,
+                            attention_mask=mb_attn_mask,
                         )
                     except (AssertionError, NotImplementedError) as _attn_err:
                         # Unsloth's fast forward asserts output_attentions=False.
                         # Fall back to hidden state + entropy proxy for importance.
                         logging.getLogger(__name__).warning(
                             f"Attention extraction failed ({type(_attn_err).__name__}), "
-                            f"using hidden state + entropy proxy for importance constraint"
+                            f"using hidden state + entropy proxy for importance constraint",
                         )
                         self._attention_output_attentions = False
                         self._attention_disabled_reason = "unsloth_incompatible"
                         self._use_importance_proxy = True  # Use proxy instead
                         # Retry without attention extraction
                         hidden_states, lm_head = get_hidden_states_and_lm_head(
-                            self.model, mb_ids, attention_mask=mb_attn_mask
+                            self.model,
+                            mb_ids,
+                            attention_mask=mb_attn_mask,
                         )
                         attentions = None
                 else:
                     hidden_states, lm_head = get_hidden_states_and_lm_head(
-                        self.model, mb_ids, attention_mask=mb_attn_mask
+                        self.model,
+                        mb_ids,
+                        attention_mask=mb_attn_mask,
                     )
                     attentions = None
                 if hidden_states is not None and lm_head is not None:
                     # Fused path: chunked lm_head + checkpoint avoids full [seq, vocab] logit tensor.
                     mb_lp = chunked_logprobs_from_hidden(
-                        hidden_states[:, :-1, :], lm_head, mb_ids[:, 1:],
+                        hidden_states[:, :-1, :],
+                        lm_head,
+                        mb_ids[:, 1:],
                         chunk_size=self._fused_chunk_size,
                     )
                     # One-time validation: chunking correctness only.
@@ -909,18 +1045,25 @@ class QGRETrainer:
                         if mb_lp.grad_fn is None:
                             raise RuntimeError(
                                 "Fused logprobs has no grad_fn — autograd graph is broken. "
-                                "Set algorithm.use_fused_logprobs=false to fall back."
+                                "Set algorithm.use_fused_logprobs=false to fall back.",
                             )
                         with torch.no_grad():
                             manual_logits = lm_head(hidden_states[:, :-1, :]).float()
                             std_lp = logprobs_from_logits(manual_logits, mb_ids[:, 1:])
                             del manual_logits
                             min_len_v = min(mb_lp.shape[1], std_lp.shape[1])
-                            if not torch.allclose(mb_lp[:, :min_len_v].detach(), std_lp[:, :min_len_v], atol=1e-3):
-                                max_diff = (mb_lp[:, :min_len_v].detach() - std_lp[:, :min_len_v]).abs().max().item()
+                            if not torch.allclose(
+                                mb_lp[:, :min_len_v].detach(), std_lp[:, :min_len_v], atol=1e-3
+                            ):
+                                max_diff = (
+                                    (mb_lp[:, :min_len_v].detach() - std_lp[:, :min_len_v])
+                                    .abs()
+                                    .max()
+                                    .item()
+                                )
                                 raise RuntimeError(
                                     f"Fused logprobs diverge from full projection (max diff: {max_diff:.6f}). "
-                                    f"Set algorithm.use_fused_logprobs=false to fall back."
+                                    f"Set algorithm.use_fused_logprobs=false to fall back.",
                                 )
                             del std_lp
                         self._fused_validated = True
@@ -930,12 +1073,12 @@ class QGRETrainer:
                         # VRAM fix: sample ONE layer only, not all layers
                         layer_idx = self.config.algorithm.attention_sample_layer
                         attention_single = select_attention_layer(attentions, layer_idx)
-                        if self.global_step == 0 and not getattr(self, '_attn_logged', False):
+                        if self.global_step == 0 and not getattr(self, "_attn_logged", False):
                             shape = attention_single.shape
                             vram_mb = shape[0] * shape[1] * shape[2] * shape[3] * 4 / 1024 / 1024
                             logging.getLogger(__name__).info(
                                 f"Attention constraint enabled (attention mode): layer={layer_idx}, "
-                                f"shape={list(shape)}, estimated_vram={vram_mb:.1f}MB"
+                                f"shape={list(shape)}, estimated_vram={vram_mb:.1f}MB",
                             )
                             self._attn_logged = True
                         bond_strength = compute_bond_strength(
@@ -947,13 +1090,16 @@ class QGRETrainer:
                         )
                         mb_token_entropy = None  # EGRS not supported with attention mode
                         del attentions
-                    elif getattr(self, '_use_importance_proxy', False) and self.config.algorithm.attention_constrained_advantage:
+                    elif (
+                        getattr(self, "_use_importance_proxy", False)
+                        and self.config.algorithm.attention_constrained_advantage
+                    ):
                         # Attention unavailable but constraint enabled — use ERIC (entropy-regulated importance)
                         # Compute completion logits for entropy (no_grad, just for importance signal)
-                        if self.global_step == 0 and not getattr(self, '_proxy_logged', False):
+                        if self.global_step == 0 and not getattr(self, "_proxy_logged", False):
                             logging.getLogger(__name__).info(
                                 f"Attention constraint enabled (ERIC mode): entropy_position with "
-                                f"decay={self.config.algorithm.attention_position_decay}"
+                                f"decay={self.config.algorithm.attention_position_decay}",
                             )
                             self._proxy_logged = True
                         # Get completion portion of hidden states for entropy computation
@@ -985,47 +1131,57 @@ class QGRETrainer:
                         f"Step {self.global_step}: fused logprobs unavailable — "
                         f"UNSLOTH_RETURN_HIDDEN_STATES did not take effect. "
                         f"Delete unsloth_compiled_cache/ and restart. "
-                        f"To disable fused logprobs entirely, set algorithm.use_fused_logprobs=false."
+                        f"To disable fused logprobs entirely, set algorithm.use_fused_logprobs=false.",
                     )
             else:
                 # Non-fused path: full lm_head projection without chunking.
                 # Costs ~2GB more VRAM than fused (materializes full [seq, vocab] tensor).
                 # This is the degraded-but-correct escape hatch.
                 from qgre.fused_logprobs import get_hidden_states_and_lm_head
+
                 # Optionally extract attentions for bond strength computation
                 # NOTE: Unsloth's fast forward asserts output_attentions=False. Uses same cached
                 # decision as fused path (try call, catch AssertionError, disable and retry).
-                if not hasattr(self, '_attention_output_attentions'):
-                    self._attention_output_attentions = self.config.algorithm.attention_constrained_advantage
+                if not hasattr(self, "_attention_output_attentions"):
+                    self._attention_output_attentions = (
+                        self.config.algorithm.attention_constrained_advantage
+                    )
                 output_attentions = self._attention_output_attentions
                 if output_attentions:
                     try:
                         hs, lm_head_nf, attentions = get_hidden_states_and_lm_head(
-                            self.model, mb_ids, output_attentions=True, attention_mask=mb_attn_mask
+                            self.model,
+                            mb_ids,
+                            output_attentions=True,
+                            attention_mask=mb_attn_mask,
                         )
                     except (AssertionError, NotImplementedError) as _attn_err:
                         # Same as fused path: fall back to proxy
                         logging.getLogger(__name__).warning(
                             f"Attention extraction failed ({type(_attn_err).__name__}), "
-                            f"using hidden state + entropy proxy for importance constraint"
+                            f"using hidden state + entropy proxy for importance constraint",
                         )
                         self._attention_output_attentions = False
                         self._attention_disabled_reason = "unsloth_incompatible"
                         self._use_importance_proxy = True
                         hs, lm_head_nf = get_hidden_states_and_lm_head(
-                            self.model, mb_ids, attention_mask=mb_attn_mask
+                            self.model,
+                            mb_ids,
+                            attention_mask=mb_attn_mask,
                         )
                         attentions = None
                 else:
                     hs, lm_head_nf = get_hidden_states_and_lm_head(
-                        self.model, mb_ids, attention_mask=mb_attn_mask
+                        self.model,
+                        mb_ids,
+                        attention_mask=mb_attn_mask,
                     )
                     attentions = None
                 if hs is None or lm_head_nf is None:
                     raise RuntimeError(
                         f"Step {self.global_step}: model did not return hidden states. "
                         f"UNSLOTH_RETURN_HIDDEN_STATES did not take effect. "
-                        f"Delete unsloth_compiled_cache/ and restart."
+                        f"Delete unsloth_compiled_cache/ and restart.",
                     )
                 mb_logits = lm_head_nf(hs[:, :-1, :]).float()
                 # Compute token entropy for EGRS
@@ -1038,12 +1194,12 @@ class QGRETrainer:
                 if attentions is not None:
                     layer_idx = self.config.algorithm.attention_sample_layer
                     attention_single = select_attention_layer(attentions, layer_idx)
-                    if self.global_step == 0 and not getattr(self, '_attn_logged', False):
+                    if self.global_step == 0 and not getattr(self, "_attn_logged", False):
                         shape = attention_single.shape
                         vram_mb = shape[0] * shape[1] * shape[2] * shape[3] * 4 / 1024 / 1024
                         logging.getLogger(__name__).info(
                             f"Attention constraint enabled (attention mode): layer={layer_idx}, "
-                            f"shape={list(shape)}, estimated_vram={vram_mb:.1f}MB"
+                            f"shape={list(shape)}, estimated_vram={vram_mb:.1f}MB",
                         )
                         self._attn_logged = True
                     bond_strength = compute_bond_strength(
@@ -1054,13 +1210,16 @@ class QGRETrainer:
                         device=mb_ids.device,
                     )
                     del attentions
-                elif getattr(self, '_use_importance_proxy', False) and self.config.algorithm.attention_constrained_advantage:
+                elif (
+                    getattr(self, "_use_importance_proxy", False)
+                    and self.config.algorithm.attention_constrained_advantage
+                ):
                     # Attention unavailable but constraint enabled — use ERIC (entropy-regulated importance)
                     # mb_logits already computed above, reuse for entropy
-                    if self.global_step == 0 and not getattr(self, '_proxy_logged', False):
+                    if self.global_step == 0 and not getattr(self, "_proxy_logged", False):
                         logging.getLogger(__name__).info(
                             f"Attention constraint enabled (ERIC mode): entropy_position with "
-                            f"decay={self.config.algorithm.attention_position_decay}"
+                            f"decay={self.config.algorithm.attention_position_decay}",
                         )
                         self._proxy_logged = True
                     # mb_logits is [batch, seq-1, vocab] from line 923
@@ -1081,12 +1240,16 @@ class QGRETrainer:
             # Generation-time logprobs are shifted: gen_logprobs[t] = log P(token[t] | token[<t]),
             # so they align with mb_lp which is logprobs_from_logits(logits[:, :-1], ids[:, 1:]).
             if gen_logprobs_padded is not None:
-                mb_gen_lp = gen_logprobs_padded[mb_start:mb_end, 1:]  # Shift to match mb_lp indexing
+                mb_gen_lp = gen_logprobs_padded[
+                    mb_start:mb_end, 1:
+                ]  # Shift to match mb_lp indexing
                 min_lp_len = min(mb_lp.shape[1], mb_gen_lp.shape[1])
                 mb_old_lp = mb_gen_lp[:, :min_lp_len]
                 # L5: Use -100 instead of -1e9 to prevent exp(inf) in KL computation
                 if mb_lp.shape[1] > min_lp_len:
-                    pad = torch.full((mb_lp.shape[0], mb_lp.shape[1] - min_lp_len), -100.0, device=device)
+                    pad = torch.full(
+                        (mb_lp.shape[0], mb_lp.shape[1] - min_lp_len), -100.0, device=device
+                    )
                     mb_old_lp = torch.cat([mb_old_lp, pad], dim=1)
             else:
                 mb_old_lp = mb_lp.detach()
@@ -1096,6 +1259,7 @@ class QGRETrainer:
             mb_critic_count = 0
             if self.config.vprm.enabled and mb_hidden_states is not None:
                 from qgre.advantages import compute_advantages_vprm
+
                 # Lazy init critic on first forward pass (now we know hidden_dim)
                 if not self._vprm_initialized:
                     self._init_vprm_critic(
@@ -1105,12 +1269,14 @@ class QGRETrainer:
 
                 # TL-R3-07: Validate hidden_dim matches checkpoint (only on first forward after resume)
                 # Don't delete _vprm_checkpoint_hidden_dim to allow check after resume
-                if hasattr(self, "_vprm_checkpoint_hidden_dim") and not getattr(self, "_vprm_checkpoint_validated", False):
+                if hasattr(self, "_vprm_checkpoint_hidden_dim") and not getattr(
+                    self, "_vprm_checkpoint_validated", False
+                ):
                     actual_hidden_dim = mb_hidden_states.shape[-1]
                     if self._vprm_checkpoint_hidden_dim != actual_hidden_dim:
                         raise RuntimeError(
                             f"VPRM critic hidden_dim mismatch: checkpoint has {self._vprm_checkpoint_hidden_dim} "
-                            f"but model produces {actual_hidden_dim}. Model architecture changed between checkpoints."
+                            f"but model produces {actual_hidden_dim}. Model architecture changed between checkpoints.",
                         )
                     self._vprm_checkpoint_validated = True  # Only check once per resume
 
@@ -1134,9 +1300,11 @@ class QGRETrainer:
                         comp_len = len(step.completions[filtered_i])
                         if comp_len > sample_hs.shape[0]:
                             import warnings
+
                             warnings.warn(
                                 f"VPRM: completion length ({comp_len}) > hidden states length ({sample_hs.shape[0]}) "
-                                f"for sample orig_i={orig_i}. Clamping to hidden states length."
+                                f"for sample orig_i={orig_i}. Clamping to hidden states length.",
+                                stacklevel=2,
                             )
                             comp_len = sample_hs.shape[0]
                         sample_hs_trimmed = sample_hs[:comp_len]
@@ -1156,7 +1324,7 @@ class QGRETrainer:
                                 logging.getLogger(__name__).warning(
                                     f"Step {self.global_step} bond_strength: "
                                     f"min={bs.min().item():.4f}, max={bs.max().item():.4f}, "
-                                    f"mean={bs.mean().item():.4f}, nonzero={(bs > 0).sum().item()}/{len(bs)}"
+                                    f"mean={bs.mean().item():.4f}, nonzero={(bs > 0).sum().item()}/{len(bs)}",
                                 )
 
                         vprm_advs, vprm_loss, used_critic = compute_advantages_vprm(
@@ -1171,7 +1339,8 @@ class QGRETrainer:
                             frontier_amplification=self.config.algorithm.frontier_amplification,
                             min_regions=self.config.vprm.spo_fallback_min_regions,
                             # Use step.batch_contexts (already reindexed after filter)
-                            aspiration_beta=self.advantage_estimator._aspiration_beta * step.batch_contexts[filtered_i].aspiration_warmup,
+                            aspiration_beta=self.advantage_estimator._aspiration_beta
+                            * step.batch_contexts[filtered_i].aspiration_warmup,
                             aspiration_target=step.batch_contexts[filtered_i].aspiration_target,
                             ctx=self.ctx,
                             token_masks=sample_token_masks,  # Pass span masks for span-aware critic
@@ -1191,7 +1360,7 @@ class QGRETrainer:
                             mb_critic_count += 1
                 finally:
                     # TL-5: Guaranteed cleanup of mb_hidden_states
-                    if 'mb_hidden_states' in locals():
+                    if "mb_hidden_states" in locals():
                         del mb_hidden_states
 
             # EGRS 2x2 matrix: modify advantages based on (correct/wrong) x (confident/uncertain)
@@ -1211,21 +1380,25 @@ class QGRETrainer:
                     if sample_rr is None:
                         logging.getLogger(__name__).warning(
                             f"EGRS: reward_results[{orig_i}] is None — sample skipped. "
-                            "Check if reward_fn returned None instead of RewardResult."
+                            "Check if reward_fn returned None instead of RewardResult.",
                         )
                         continue
                     # Compute span correctness from reward result
                     span_correct = compute_span_correctness(
-                        sample_rr, self.step_qualities, egrs_cfg.reward_threshold
+                        sample_rr,
+                        self.step_qualities,
+                        egrs_cfg.reward_threshold,
                     )
                     # R3-MTO-002: Use sample_regions length to slice mb_token_entropy, not the other way around
                     comp_len = len(sample_regions)
                     # Clamp to available entropy if sample longer than entropy tensor
                     if mb_token_entropy.shape[1] < comp_len:
                         import warnings
+
                         warnings.warn(
                             f"R3-MTO-002: sample_regions length ({comp_len}) exceeds mb_token_entropy.shape[1] "
-                            f"({mb_token_entropy.shape[1]}). Clamping to entropy length."
+                            f"({mb_token_entropy.shape[1]}). Clamping to entropy length.",
+                            stacklevel=2,
                         )
                         comp_len = mb_token_entropy.shape[1]
                     sample_entropy = mb_token_entropy[mb_i, :comp_len]
@@ -1252,7 +1425,9 @@ class QGRETrainer:
                     # Flag hints for registry (if enabled)
                     # Extract hint tokens using hint_extractor if available
                     if self.hint_registry is not None and hint_flags:
-                        prompt_id = batch.prompt_ids[orig_i] if orig_i < len(batch.prompt_ids) else -1
+                        prompt_id = (
+                            batch.prompt_ids[orig_i] if orig_i < len(batch.prompt_ids) else -1
+                        )
                         sample_meta = batch.metadata[orig_i] if orig_i < len(batch.metadata) else {}
                         for step_num, t in hint_flags:
                             span_id = f"STEP_{step_num}" if step_num > 0 else "THINK"
@@ -1263,12 +1438,17 @@ class QGRETrainer:
                                 if hint_text:
                                     # Tokenize hint text (limit to hint_token_count)
                                     hint_tokens = self.tokenizer.encode(
-                                        hint_text, add_special_tokens=False
-                                    )[:self.config.egrs.hint_token_count * 10]  # Allow more tokens for math
+                                        hint_text,
+                                        add_special_tokens=False,
+                                    )[
+                                        : self.config.egrs.hint_token_count * 10
+                                    ]  # Allow more tokens for math
                             # Skip flagging if hint_tokens is empty
                             if hint_tokens:
                                 self.hint_registry.flag_for_hint(
-                                    prompt_id, span_id, hint_tokens,
+                                    prompt_id,
+                                    span_id,
+                                    hint_tokens,
                                     current_mastery=0.0,
                                     current_step=self.global_step,
                                 )
@@ -1278,8 +1458,12 @@ class QGRETrainer:
             # Shift advantages and KL weights by 1 to match logprob indexing
             mb_advs_shifted = mb_advs[:, 1:]  # advantage for token being predicted
             # kl_region_weights already reindexed by SPO filter if applied
-            mb_kl_shifted = kl_region_weights[mb_start:mb_end, 1:] if kl_region_weights is not None else None
-            min_len = min(mb_lp.shape[1], mb_old_lp.shape[1], mb_advs_shifted.shape[1], mb_mask.shape[1])
+            mb_kl_shifted = (
+                kl_region_weights[mb_start:mb_end, 1:] if kl_region_weights is not None else None
+            )
+            min_len = min(
+                mb_lp.shape[1], mb_old_lp.shape[1], mb_advs_shifted.shape[1], mb_mask.shape[1]
+            )
             mb_kl_weights = mb_kl_shifted[:, :min_len] if mb_kl_shifted is not None else None
             # Request per-token loss when computing per-quality metrics
             need_per_token = use_spans and batch_token_masks
@@ -1333,24 +1517,36 @@ class QGRETrainer:
                                     # MTO-006: Warn when padding is needed (indicates tokenization mismatch)
                                     pad_len = min_len - q_mask_shifted.shape[0]
                                     import warnings
+
                                     warnings.warn(
                                         f"MTO-006: q_mask for {q_name} length {q_mask_shifted.shape[0]} < min_len {min_len}. "
-                                        f"Padding with {pad_len} zeros. This indicates tokenization mismatch."
+                                        f"Padding with {pad_len} zeros. This indicates tokenization mismatch.",
+                                        stacklevel=2,
                                     )
-                                    q_mask_shifted = torch.cat([
-                                        q_mask_shifted,
-                                        torch.zeros(pad_len, device=q_mask.device, dtype=q_mask.dtype)
-                                    ])
+                                    q_mask_shifted = torch.cat(
+                                        [
+                                            q_mask_shifted,
+                                            torch.zeros(
+                                                pad_len, device=q_mask.device, dtype=q_mask.dtype
+                                            ),
+                                        ]
+                                    )
                                 q_mask_shifted = q_mask_shifted.to(mb_per_token_loss.device)
                                 # Sum actual per-token loss contribution for this quality's span
-                                q_loss = (mb_per_token_loss[mb_i_inner] * q_mask_shifted[:min_len]).sum()
+                                q_loss = (
+                                    mb_per_token_loss[mb_i_inner] * q_mask_shifted[:min_len]
+                                ).sum()
                                 q_count = q_mask_shifted[:min_len].sum()
                                 if q_count > 0:
                                     # Accumulate sum and count separately for proper averaging later
                                     loss_key = f"loss/{q_name}"
                                     count_key = f"_loss_count/{q_name}"
-                                    mb_metrics[loss_key] = mb_metrics.get(loss_key, 0.0) + q_loss.item()
-                                    mb_metrics[count_key] = mb_metrics.get(count_key, 0.0) + q_count.item()
+                                    mb_metrics[loss_key] = (
+                                        mb_metrics.get(loss_key, 0.0) + q_loss.item()
+                                    )
+                                    mb_metrics[count_key] = (
+                                        mb_metrics.get(count_key, 0.0) + q_count.item()
+                                    )
 
             # Dynamic length control (Huawei): penalize length when group accuracy is high
             lp_coef = self.config.algorithm.length_penalty_coef
@@ -1358,7 +1554,9 @@ class QGRETrainer:
                 lp_thresh = self.config.algorithm.length_penalty_threshold
                 # Compute group_correctness using step.reward_results (already reindexed after filter)
                 mb_reward_results = step.reward_results[mb_start:mb_end]
-                group_correctness = sum(rr.reward for rr in mb_reward_results) / len(mb_reward_results)
+                group_correctness = sum(rr.reward for rr in mb_reward_results) / len(
+                    mb_reward_results
+                )
                 if group_correctness > lp_thresh:
                     # High correctness → add length penalty to encourage efficiency
                     seq_lengths = mb_mask[:, :min_len].sum(dim=-1)
@@ -1380,7 +1578,9 @@ class QGRETrainer:
                 )
                 mb_loss = mb_loss + llds_coef * llds_loss
                 mb_metrics["llds_loss"] = llds_loss.item()
-                mb_metrics["llds_mask_ratio"] = llds_mask.sum().item() / max(mb_mask[:, :min_len].sum().item(), 1)
+                mb_metrics["llds_mask_ratio"] = llds_mask.sum().item() / max(
+                    mb_mask[:, :min_len].sum().item(), 1
+                )
 
             # VPRM critic loss: weight by sample count and add to policy loss
             # T2-5: Guard div by zero to prevent NaN
@@ -1394,7 +1594,11 @@ class QGRETrainer:
             # EGRS entropy loss: maximize entropy for Q3 (confident+wrong) tokens
             # Formula: loss += -sum(adjustment * entropy) where adjustment > 0 for Q3
             # Minimizing negative entropy = maximizing entropy (shakes confidence)
-            if self.config.egrs.enabled and mb_entropy_adjustments is not None and mb_token_entropy is not None:
+            if (
+                self.config.egrs.enabled
+                and mb_entropy_adjustments is not None
+                and mb_token_entropy is not None
+            ):
                 # Align with shifted positions (entropy_adjustments[t] applies to token t)
                 adj_shifted = mb_entropy_adjustments[:, 1:]
                 ent_shifted = mb_token_entropy[:, 1:]
@@ -1402,9 +1606,11 @@ class QGRETrainer:
                 # MTO-003: Validate entropy_adjustments and mask have same sequence length
                 if adj_shifted.shape[1] != mb_mask.shape[1]:
                     import warnings
+
                     warnings.warn(
                         f"MTO-003: EGRS entropy_adjustments shape[1]={adj_shifted.shape[1]} != "
-                        f"mb_mask shape[1]={mb_mask.shape[1]}. Misalignment may apply loss to wrong positions."
+                        f"mb_mask shape[1]={mb_mask.shape[1]}. Misalignment may apply loss to wrong positions.",
+                        stacklevel=2,
                     )
                 # Mask to completion tokens only
                 egrs_mask = mb_mask[:, :adj_min_len].float()
@@ -1430,23 +1636,23 @@ class QGRETrainer:
                 mb_idx = mb_start // micro_batch_size + 1
                 raise RuntimeError(
                     f"Step {self.global_step} micro-batch {mb_idx}/{n_micro}: "
-                    f"loss is NaN — aborting before backward() to prevent gradient corruption."
+                    f"loss is NaN — aborting before backward() to prevent gradient corruption.",
                 )
             # TRN-R1-2: Check loss for NaN/inf BEFORE backward() to prevent optimizer corruption
             if not torch.isfinite(mb_loss):
                 mb_idx = mb_start // micro_batch_size + 1
                 raise RuntimeError(
                     f"Step {self.global_step} micro-batch {mb_idx}/{n_micro}: "
-                    f"loss is {mb_loss.item()} — aborting before backward() to prevent gradient corruption."
+                    f"loss is {mb_loss.item()} — aborting before backward() to prevent gradient corruption.",
                 )
 
             try:
                 (mb_loss / n_micro).backward()
             except Exception as bwd_exc:
                 # TL-2: Zero gradients on backward failure to prevent corrupted state
-                logging.getLogger(__name__).error(
+                logging.getLogger(__name__).exception(
                     f"TL-2: backward() raised exception at step {self.global_step}: {bwd_exc}. "
-                    "Zeroing gradients to prevent gradient corruption."
+                    "Zeroing gradients to prevent gradient corruption.",
                 )
                 self.optimizer.zero_grad()
                 # Clear accumulated loss from successful micro-batches to prevent corrupt update
@@ -1468,7 +1674,7 @@ class QGRETrainer:
             self._per_token_metrics = {"kl", "llds_loss", "llds_mask_ratio", "critic_loss"}
             # TL-R2-05: Accumulate per_token_metrics across micro-batches
             if not all_metrics:
-                all_metrics = {k: v for k, v in mb_metrics.items()}
+                all_metrics = dict(mb_metrics.items())
             else:
                 for k, v in mb_metrics.items():
                     all_metrics[k] = all_metrics.get(k, 0) + v
@@ -1508,15 +1714,23 @@ class QGRETrainer:
         # Optimizer step (backward already done in micro-batches above)
         if (self.global_step + 1) % self.config.training.gradient_accumulation_steps == 0:
             # TL-8: Guard gradient probe initialization with batch size check
-            if self._gradient_probe_steps > 0 and self.global_step < self._gradient_probe_steps and self._gradient_probe_prompt_ids is None:
+            if (
+                self._gradient_probe_steps > 0
+                and self.global_step < self._gradient_probe_steps
+                and self._gradient_probe_prompt_ids is None
+            ):
                 if batch.input_ids.shape[0] == 0:
-                    logging.getLogger(__name__).warning("TL-8: Cannot initialize gradient probe with empty batch")
+                    logging.getLogger(__name__).warning(
+                        "TL-8: Cannot initialize gradient probe with empty batch"
+                    )
                 else:
                     # Get model device
                     model_device = next(self.model.parameters()).device
 
                     # Use first batch prompt as fixed measurement prompt
-                    self._gradient_probe_prompt_ids = batch.input_ids[0:1].clone().to(model_device)  # [1, seq_len]
+                    self._gradient_probe_prompt_ids = (
+                        batch.input_ids[0:1].clone().to(model_device)
+                    )  # [1, seq_len]
 
                     # Physics tokens: p, V, T, H, x, m
                     physics_strs = ["p", "V", "T", "H", "x", "m"]
@@ -1532,7 +1746,11 @@ class QGRETrainer:
 
             # Gradient probe: capture logits BEFORE optimizer step
             logits_before = None
-            if self._gradient_probe_steps > 0 and self.global_step < self._gradient_probe_steps and self._gradient_probe_prompt_ids is not None:
+            if (
+                self._gradient_probe_steps > 0
+                and self.global_step < self._gradient_probe_steps
+                and self._gradient_probe_prompt_ids is not None
+            ):
                 with torch.no_grad():
                     self.model.eval()
                     # TL-11: Move probe tensor to model device each time
@@ -1540,11 +1758,15 @@ class QGRETrainer:
                     probe_ids = self._gradient_probe_prompt_ids.to(model_device)
                     probe_outputs = self.model(probe_ids)
                     # Get logits for last position, physics tokens only
-                    physics_tokens_tensor = torch.tensor(self._gradient_probe_physics_tokens, device=probe_outputs.logits.device)
+                    physics_tokens_tensor = torch.tensor(
+                        self._gradient_probe_physics_tokens, device=probe_outputs.logits.device
+                    )
                     logits_before = probe_outputs.logits[0, -1, physics_tokens_tensor].clone()
                     self.model.train()
 
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.config.training.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), max_norm=self.config.training.max_grad_norm
+            )
 
             # Gradient coherence monitoring — detect laminar→turbulent transitions
             # Measures "eddies forming": layers disagreeing, energy dissipating into noise
@@ -1558,8 +1780,12 @@ class QGRETrainer:
                 # Diagnostic: check if near-zero cosine is real or artifact
                 if self.global_step < 100 and self.global_step % 30 == 0:
                     print(f"[GRADIENT DEBUG step {self.global_step}]")
-                    print(f"  Layers: {coherence_stats['n_layers']}, Comparisons: {coherence_stats['n_comparisons']}, Nonzero norms: {coherence_stats['nonzero_norms']}")
-                    print(f"  Cosine range: [{coherence_stats['min_cosine']:.6f}, {coherence_stats['max_cosine']:.6f}], mean={coherence_stats['mean_cosine']:.6f}")
+                    print(
+                        f"  Layers: {coherence_stats['n_layers']}, Comparisons: {coherence_stats['n_comparisons']}, Nonzero norms: {coherence_stats['nonzero_norms']}"
+                    )
+                    print(
+                        f"  Cosine range: [{coherence_stats['min_cosine']:.6f}, {coherence_stats['max_cosine']:.6f}], mean={coherence_stats['mean_cosine']:.6f}"
+                    )
                     print(f"  First 5 layer norms: {coherence_stats['per_layer_norms'][:5]}")
                     print(f"  First 5 cosines: {coherence_stats['per_layer_cosines'][:5]}")
 
@@ -1577,8 +1803,9 @@ class QGRETrainer:
                 metrics["grad/mean_norm"] = coherence_stats["mean_grad_norm"]
 
                 # Turbulence detection (if detector initialized)
-                if not hasattr(self, '_turbulence_detector'):
+                if not hasattr(self, "_turbulence_detector"):
                     from qgre.gradient_coherence import TurbulenceDetector
+
                     self._turbulence_detector = TurbulenceDetector(
                         calibration_steps=50,
                         cosine_threshold_low=0.3,
@@ -1587,16 +1814,27 @@ class QGRETrainer:
                     )
 
                 state = self._turbulence_detector.update(self.global_step, coherence_stats)
-                metrics["grad/turbulence_state"] = {"CALIBRATING": 0, "LAMINAR": 1, "TRANSITIONAL": 2, "TURBULENT": 3}.get(state, 0)
+                metrics["grad/turbulence_state"] = {
+                    "CALIBRATING": 0,
+                    "LAMINAR": 1,
+                    "TRANSITIONAL": 2,
+                    "TURBULENT": 3,
+                }.get(state, 0)
 
             self.optimizer.step()
 
             # Gradient probe: capture logits AFTER optimizer step and compute delta
-            if self._gradient_probe_steps > 0 and self.global_step < self._gradient_probe_steps and logits_before is not None:
+            if (
+                self._gradient_probe_steps > 0
+                and self.global_step < self._gradient_probe_steps
+                and logits_before is not None
+            ):
                 with torch.no_grad():
                     self.model.eval()
                     probe_outputs = self.model(self._gradient_probe_prompt_ids)
-                    physics_tokens_tensor = torch.tensor(self._gradient_probe_physics_tokens, device=probe_outputs.logits.device)
+                    physics_tokens_tensor = torch.tensor(
+                        self._gradient_probe_physics_tokens, device=probe_outputs.logits.device
+                    )
                     logits_after = probe_outputs.logits[0, -1, physics_tokens_tensor].clone()
                     self.model.train()
 
@@ -1605,36 +1843,46 @@ class QGRETrainer:
                     mean_delta = logit_delta.mean().item()
                     max_delta = logit_delta.max().item()
 
-                    self._gradient_probe_log.append({
-                        "step": self.global_step,
-                        "loss": total_loss,
-                        "advantage_scale": self.config.algorithm.advantage_scale,
-                        "mean_logit_delta": mean_delta,
-                        "max_logit_delta": max_delta,
-                        "per_token_deltas": logit_delta.cpu().tolist(),
-                    })
+                    self._gradient_probe_log.append(
+                        {
+                            "step": self.global_step,
+                            "loss": total_loss,
+                            "advantage_scale": self.config.algorithm.advantage_scale,
+                            "mean_logit_delta": mean_delta,
+                            "max_logit_delta": max_delta,
+                            "per_token_deltas": logit_delta.cpu().tolist(),
+                        }
+                    )
             # Clear optimizer momentum state to prevent double-stepping on resume
-            if hasattr(self, '_resumed_mid_accumulation') and self._resumed_mid_accumulation:
+            if hasattr(self, "_resumed_mid_accumulation") and self._resumed_mid_accumulation:
                 for group in self.optimizer.param_groups:
-                    for p in group['params']:
+                    for p in group["params"]:
                         state = self.optimizer.state[p]
-                        if 'exp_avg' in state:
-                            state['exp_avg'].zero_()
-                        if 'exp_avg_sq' in state:
-                            state['exp_avg_sq'].zero_()
+                        if "exp_avg" in state:
+                            state["exp_avg"].zero_()
+                        if "exp_avg_sq" in state:
+                            state["exp_avg_sq"].zero_()
             self.optimizer.zero_grad()
             # Clear flag AFTER momentum clearing
-            if hasattr(self, '_resumed_mid_accumulation'):
+            if hasattr(self, "_resumed_mid_accumulation"):
                 self._resumed_mid_accumulation = False
             # VPRM critic optimizer steps at same cadence as policy optimizer
             if self.vprm_critic is not None and self.vprm_optimizer is not None:
-                has_grad = any(p.grad is not None and p.grad.abs().sum() > 0 for p in self.vprm_critic.parameters())
+                has_grad = any(
+                    p.grad is not None and p.grad.abs().sum() > 0
+                    for p in self.vprm_critic.parameters()
+                )
                 if has_grad:
-                    torch.nn.utils.clip_grad_norm_(self.vprm_critic.parameters(), max_norm=self.config.training.max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(
+                        self.vprm_critic.parameters(), max_norm=self.config.training.max_grad_norm
+                    )
                     self.vprm_optimizer.step()
                     # Polyak-average target network (or hard-sync during warmup)
                     if self._vprm_config.use_target_network:
-                        if self.global_step < self._vprm_config.target_warmup_steps and self.global_step % 100 == 0:
+                        if (
+                            self.global_step < self._vprm_config.target_warmup_steps
+                            and self.global_step % 100 == 0
+                        ):
                             self.vprm_critic.sync_target_to_online()
                         elif self.global_step >= self._vprm_config.target_warmup_steps:
                             self.vprm_critic.update_target_network(tau=self._vprm_config.polyak_tau)
@@ -1647,11 +1895,19 @@ class QGRETrainer:
                         divergence = sum(
                             (op.data - tp.data).pow(2).mean()
                             for q in self.vprm_critic.quality_names
-                            for op, tp in zip(self.vprm_critic.heads[q].parameters(), self.vprm_critic.target_heads[q].parameters())
+                            for op, tp in zip(
+                                self.vprm_critic.heads[q].parameters(),
+                                self.vprm_critic.target_heads[q].parameters(),
+                                strict=False,
+                            )
                         ).item()
                         if not math.isfinite(divergence):
                             import warnings
-                            warnings.warn(f"Step {self.global_step}: target_divergence={divergence} — critic may contain NaN")
+
+                            warnings.warn(
+                                f"Step {self.global_step}: target_divergence={divergence} — critic may contain NaN",
+                                stacklevel=2,
+                            )
                         metrics["target_divergence"] = divergence
             if self.scheduler is not None:
                 self.scheduler.step()
@@ -1661,12 +1917,9 @@ class QGRETrainer:
             self._accumulated_loss = 0.0
             self._accumulation_count = 0
             self._accumulated_samples = 0
-        else:
-            # Track accumulated loss even for non-optimizer steps
-            # Only log if we have accumulated samples (avoid fake 0.0 at accumulation boundaries)
-            if self._accumulated_samples > 0:
-                actual_samples = self._accumulated_samples
-                metrics["accumulated_loss"] = self._accumulated_loss / actual_samples
+        elif self._accumulated_samples > 0:
+            actual_samples = self._accumulated_samples
+            metrics["accumulated_loss"] = self._accumulated_loss / actual_samples
 
         # KL-adaptive SPO learning rate (SPO paper Algorithm 1)
         spo_cfg = self.config.algorithm.spo
@@ -1697,7 +1950,13 @@ class QGRETrainer:
             metrics["completion_length/max"] = 0.0
             metrics["completion_length/min"] = 0.0
 
-        self._record_mastery_and_advance(step.reward_results, step.active_qualities, batch, metrics, batch_contexts=step.batch_contexts)
+        self._record_mastery_and_advance(
+            step.reward_results,
+            step.active_qualities,
+            batch,
+            metrics,
+            batch_contexts=step.batch_contexts,
+        )
 
         # Log completions — use get_original_idx to map filtered→original for batch.raw_prompts
         completions_text = []
@@ -1733,9 +1992,9 @@ class QGRETrainer:
             accumulated_loss=self._accumulated_loss,
             accumulation_count=self._accumulation_count,
             accumulated_samples=self._accumulated_samples,
-            resumed_mid_accumulation=getattr(self, '_resumed_mid_accumulation', False),
-            fused_validated=getattr(self, '_fused_validated', False),
-            needs_weight_sync=getattr(self, '_needs_weight_sync', False),
+            resumed_mid_accumulation=getattr(self, "_resumed_mid_accumulation", False),
+            fused_validated=getattr(self, "_fused_validated", False),
+            needs_weight_sync=getattr(self, "_needs_weight_sync", False),
             rng_state=torch.get_rng_state(),
             cuda_rng_state=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
         )
@@ -1768,7 +2027,7 @@ class QGRETrainer:
 
         if not checkpoint.model_state_dict:
             raise RuntimeError(
-                f"Checkpoint {latest} missing model_state_dict — cannot resume with random weights"
+                f"Checkpoint {latest} missing model_state_dict — cannot resume with random weights",
             )
         # Filter out bitsandbytes quantization metadata keys that don't exist in
         # a freshly initialized model (absmax, quant_map, quant_state, etc.)
@@ -1780,7 +2039,11 @@ class QGRETrainer:
         skipped = len(state_dict) - len(filtered)
         if skipped > 0:
             import warnings
-            warnings.warn(f"Checkpoint resume: skipped {skipped} keys not in model (bnb quant metadata)")
+
+            warnings.warn(
+                f"Checkpoint resume: skipped {skipped} keys not in model (bnb quant metadata)",
+                stacklevel=2,
+            )
         self.model.load_state_dict(filtered, strict=False)
 
         # Validate optimizer compatibility before loading
@@ -1788,11 +2051,17 @@ class QGRETrainer:
         if checkpoint.optimizer_state_dict and self.optimizer:
             ckpt_opt = checkpoint.optimizer_state_dict
             # R2-CSM-002: Validate optimizer state dict structure before load
-            if not isinstance(ckpt_opt, dict) or "state" not in ckpt_opt or "param_groups" not in ckpt_opt:
+            if (
+                not isinstance(ckpt_opt, dict)
+                or "state" not in ckpt_opt
+                or "param_groups" not in ckpt_opt
+            ):
                 import warnings
+
                 warnings.warn(
                     "R2-CSM-002: Malformed optimizer_state_dict (missing 'state' or 'param_groups'). "
-                    "Skipping optimizer restore, momentum lost."
+                    "Skipping optimizer restore, momentum lost.",
+                    stacklevel=2,
                 )
             else:
                 ckpt_groups = len(ckpt_opt.get("param_groups", []))
@@ -1802,8 +2071,12 @@ class QGRETrainer:
                     print(f"┌{'─'*60}┐")
                     print(f"│{'⚠️  CHECKPOINT CONFIG MISMATCH':^60}│")
                     print(f"├{'─'*60}┤")
-                    print(f"│  Checkpoint optimizer: {ckpt_groups} param groups{' '*(35-len(str(ckpt_groups)))}│")
-                    print(f"│  Current optimizer:    {model_groups} param groups{' '*(35-len(str(model_groups)))}│")
+                    print(
+                        f"│  Checkpoint optimizer: {ckpt_groups} param groups{' '*(35-len(str(ckpt_groups)))}│"
+                    )
+                    print(
+                        f"│  Current optimizer:    {model_groups} param groups{' '*(35-len(str(model_groups)))}│"
+                    )
                     print(f"│  (modules_to_save likely changed){' '*24}│")
                     print(f"├{'─'*60}┤")
                     print(f"│  Model weights: ✓ LOADED{' '*34}│")
@@ -1815,44 +2088,50 @@ class QGRETrainer:
                     self.optimizer.load_state_dict(ckpt_opt)
                     optimizer_loaded = True
 
-        scheduler_loaded = False
         if checkpoint.scheduler_state_dict and self.scheduler:
             # R2-CSM-003: Validate scheduler state dict is non-empty before load
-            if not isinstance(checkpoint.scheduler_state_dict, dict) or not checkpoint.scheduler_state_dict:
+            if (
+                not isinstance(checkpoint.scheduler_state_dict, dict)
+                or not checkpoint.scheduler_state_dict
+            ):
                 import warnings
+
                 warnings.warn(
                     "R2-CSM-003: Empty or invalid scheduler_state_dict. "
-                    "Skipping scheduler restore, learning rate schedule will restart."
+                    "Skipping scheduler restore, learning rate schedule will restart.",
+                    stacklevel=2,
                 )
             elif optimizer_loaded:
+                import warnings  # Import here for use in all branches below
+
                 # Check if T_max changed (indicating new schedule)
                 if hasattr(self.scheduler, "T_max"):
                     ckpt_T_max = checkpoint.scheduler_state_dict.get("T_max")
                     current_T_max = self.scheduler.T_max
                     if ckpt_T_max is not None and ckpt_T_max != current_T_max:
-                        import warnings
                         warnings.warn(
                             f"Scheduler T_max changed: checkpoint={ckpt_T_max}, config={current_T_max}. "
                             "Skipping scheduler state restore — learning rate schedule will restart. "
-                            "This is expected if you changed total_steps in config."
+                            "This is expected if you changed total_steps in config.",
+                            stacklevel=2,
                         )
                     else:
                         try:
                             self.scheduler.load_state_dict(checkpoint.scheduler_state_dict)
-                            scheduler_loaded = True
                         except (ValueError, KeyError) as e:
                             warnings.warn(
                                 f"Scheduler state incompatible with current config, resetting: {e}. "
-                                "Learning rate schedule will restart from step 0."
+                                "Learning rate schedule will restart from step 0.",
+                                stacklevel=2,
                             )
                 else:
                     try:
                         self.scheduler.load_state_dict(checkpoint.scheduler_state_dict)
-                        scheduler_loaded = True
                     except (ValueError, KeyError) as e:
                         warnings.warn(
                             f"Scheduler state incompatible with current config, resetting: {e}. "
-                            "Learning rate schedule will restart from step 0."
+                            "Learning rate schedule will restart from step 0.",
+                            stacklevel=2,
                         )
             # If optimizer wasn't loaded, scheduler starts fresh too
         if checkpoint.game_state:
@@ -1863,14 +2142,20 @@ class QGRETrainer:
         # CP3-003: Warn if checkpoint has critic but config disabled
         if checkpoint.vprm_critic_state and not self.config.vprm.enabled:
             import warnings
+
             warnings.warn(
                 "CP3-003: Checkpoint contains VPRM critic state but config.vprm.enabled=False. "
-                "Critic will not be restored. Set vprm.enabled=True to restore critic."
+                "Critic will not be restored. Set vprm.enabled=True to restore critic.",
+                stacklevel=2,
             )
         # Restore VPRM critic + optimizer (if saved)
         if checkpoint.vprm_critic_state and self.config.vprm.enabled:
             from qgre.critic import VPRMCritic
-            device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
+
+            device = next(
+                (p.device for p in self.model.parameters() if p.device.type != "cpu"),
+                next(self.model.parameters()).device,
+            )
 
             # R2-CSM-001: Validate required keys exist before access
             required_keys = {"hidden_dim", "step_qualities", "model_state"}
@@ -1879,7 +2164,7 @@ class QGRETrainer:
                 raise KeyError(
                     f"R2-CSM-001: VPRM critic state missing required keys: {missing_keys}. "
                     f"Available keys: {list(checkpoint.vprm_critic_state.keys())}. "
-                    "Checkpoint may be corrupted or from incompatible version."
+                    "Checkpoint may be corrupted or from incompatible version.",
                 )
 
             # CSM-007: Validate step_qualities match between checkpoint and config (raise, not warn)
@@ -1890,12 +2175,11 @@ class QGRETrainer:
                     f"CSM-007: step_qualities mismatch between checkpoint and config. "
                     f"Checkpoint: {ckpt_step_qualities}, Config: {config_step_qualities}. "
                     "Cannot restore VPRM critic with different step_qualities (shape mismatch). "
-                    "Update config to match checkpoint, or start fresh training."
+                    "Update config to match checkpoint, or start fresh training.",
                 )
 
             # C14: Restore with intermediate_dim from current config, not checkpoint
             # (allows config changes without breaking restore)
-            from qgre.critic import VPRMCritic
             self.vprm_critic = VPRMCritic(
                 hidden_dim=checkpoint.vprm_critic_state["hidden_dim"],
                 step_qualities=config_step_qualities,  # Use current config
@@ -1903,7 +2187,9 @@ class QGRETrainer:
                 step_region_map=checkpoint.vprm_critic_state.get("step_region_map"),
             )
             # Load weights with strict=False to handle architecture mismatches
-            self.vprm_critic.load_state_dict(checkpoint.vprm_critic_state["model_state"], strict=False)
+            self.vprm_critic.load_state_dict(
+                checkpoint.vprm_critic_state["model_state"], strict=False
+            )
             self.vprm_critic.to(device)
 
             # Store checkpoint hidden_dim for validation on first forward pass
@@ -1914,11 +2200,17 @@ class QGRETrainer:
             )
             if checkpoint.vprm_optimizer_state:
                 # R2-CSM-006: Validate vprm_optimizer_state has required structure
-                if not isinstance(checkpoint.vprm_optimizer_state, dict) or "state" not in checkpoint.vprm_optimizer_state or "param_groups" not in checkpoint.vprm_optimizer_state:
+                if (
+                    not isinstance(checkpoint.vprm_optimizer_state, dict)
+                    or "state" not in checkpoint.vprm_optimizer_state
+                    or "param_groups" not in checkpoint.vprm_optimizer_state
+                ):
                     import warnings
+
                     warnings.warn(
                         "R2-CSM-006: Malformed vprm_optimizer_state (missing 'state' or 'param_groups'). "
-                        "Skipping VPRM optimizer restore."
+                        "Skipping VPRM optimizer restore.",
+                        stacklevel=2,
                     )
                 else:
                     self.vprm_optimizer.load_state_dict(checkpoint.vprm_optimizer_state)
@@ -1926,29 +2218,34 @@ class QGRETrainer:
         # Restore EGRS hint registry (if saved)
         if checkpoint.hint_registry_state and self.config.egrs.enabled:
             from qgre.hints import HintRegistry
+
             self.hint_registry = HintRegistry.from_dict(checkpoint.hint_registry_state)
             logging.getLogger(__name__).info(
-                f"EGRS: Restored hint registry with {len(self.hint_registry)} entries"
+                f"EGRS: Restored hint registry with {len(self.hint_registry)} entries",
             )
         # CSM-003: Warn if hint_registry_state exists but EGRS disabled
         elif checkpoint.hint_registry_state and not self.config.egrs.enabled:
             # H-5: Check isinstance before .get() to avoid AttributeError on non-dict
             if isinstance(checkpoint.hint_registry_state, dict):
-                hint_count = len(checkpoint.hint_registry_state.get('hints', []))
+                hint_count = len(checkpoint.hint_registry_state.get("hints", []))
             else:
                 hint_count = 0
             import warnings
+
             warnings.warn(
                 f"CT-1: Checkpoint contains {hint_count} hint entries but EGRS is disabled in config. "
                 f"All {hint_count} flagged hints will be LOST. "
-                "Set egrs.enabled=True to restore hint registry."
+                "Set egrs.enabled=True to restore hint registry.",
+                stacklevel=2,
             )
         # CheckpointState: RNG state is in trainer
         if checkpoint.trainer.rng_state is not None:
             import warnings
+
             warnings.warn(
                 "Restoring RNG state from checkpoint. Note: this overrides config.training.seed. "
-                "If you changed the seed in config after this checkpoint, it will be ignored."
+                "If you changed the seed in config after this checkpoint, it will be ignored.",
+                stacklevel=2,
             )
             torch.set_rng_state(checkpoint.trainer.rng_state)
         if checkpoint.trainer.cuda_rng_state is not None and torch.cuda.is_available():
@@ -1959,10 +2256,14 @@ class QGRETrainer:
 
         # TRN-R2-1: Restore accumulated loss from TrainerState
         # Reset partial accumulation to avoid mixing batch sizes
-        if checkpoint.trainer.accumulation_count > 0 and checkpoint.trainer.accumulation_count < self.config.training.gradient_accumulation_steps:
+        if (
+            checkpoint.trainer.accumulation_count > 0
+            and checkpoint.trainer.accumulation_count
+            < self.config.training.gradient_accumulation_steps
+        ):
             logging.getLogger(__name__).warning(
                 f"Checkpoint saved mid-accumulation (count={checkpoint.trainer.accumulation_count}). "
-                "Resetting accumulated loss to avoid batch size inconsistency."
+                "Resetting accumulated loss to avoid batch size inconsistency.",
             )
             self._accumulated_loss = 0.0
             self._accumulated_samples = 0
@@ -1974,7 +2275,10 @@ class QGRETrainer:
         # DI1: Store dataloader state for restore in train() when dataloader is available
         # CheckpointState: dataloader is now DataLoaderState dataclass
         from dataclasses import asdict
-        self._pending_dataloader_state = asdict(checkpoint.dataloader) if checkpoint.dataloader else None
+
+        self._pending_dataloader_state = (
+            asdict(checkpoint.dataloader) if checkpoint.dataloader else None
+        )
 
         # Restore training context (device, dtype, step)
         if checkpoint.training_context:
@@ -1993,13 +2297,17 @@ class QGRETrainer:
         # This flag means "we JUST resumed mid-accumulation, clear momentum on next step"
         # Must be determined by current resume state, not restored from checkpoint
         n_accum = self.config.training.gradient_accumulation_steps
-        self._resumed_mid_accumulation = (self.global_step % n_accum != 0)
+        self._resumed_mid_accumulation = self.global_step % n_accum != 0
 
         # Restore fused_validated from checkpoint — same weights, same validation status
         self._fused_validated = checkpoint.trainer.fused_validated
 
         # W11: Restore WeightLoaderState to backend.weight_loader
-        if checkpoint.weight_loader and hasattr(self, 'backend') and hasattr(self.backend, 'weight_loader'):
+        if (
+            checkpoint.weight_loader
+            and hasattr(self, "backend")
+            and hasattr(self.backend, "weight_loader")
+        ):
             wl_state = checkpoint.weight_loader
             self.backend.weight_loader._direct_ready = wl_state.initialized
             self.backend.weight_loader._load_lora_called = wl_state.load_lora_called
@@ -2013,7 +2321,7 @@ class QGRETrainer:
         else:
             raise RuntimeError(
                 "Optimizer is None after checkpoint resume. "
-                "Check that optimizer was saved and restored correctly."
+                "Check that optimizer was saved and restored correctly.",
             )
         if self.vprm_optimizer is not None:
             self.vprm_optimizer.zero_grad()
@@ -2027,21 +2335,26 @@ class QGRETrainer:
                 pass  # Expected — Unsloth not installed
             else:
                 import warnings
-                warnings.warn(f"LoRA verification import failed unexpectedly: {e}")
+
+                warnings.warn(f"LoRA verification import failed unexpectedly: {e}", stacklevel=2)
         else:
             try:
                 is_active = LoRAVerifier.verify_active(self.model, self.tokenizer)
                 if not is_active:
                     import warnings
+
                     warnings.warn(
                         "LoRA verification returned False after resume. "
-                        "LoRA adapters may not be active. Check model state."
+                        "LoRA adapters may not be active. Check model state.",
+                        stacklevel=2,
                     )
-            except Exception as e:
+            except (RuntimeError, ValueError, AttributeError) as e:
                 import warnings
+
                 warnings.warn(
                     f"LoRA verification failed after resume: {e}. "
-                    f"LoRA adapters may not be active. Check model state."
+                    f"LoRA adapters may not be active. Check model state.",
+                    stacklevel=2,
                 )
 
         # WS2: Flag that vLLM needs weight sync (model weights restored but vLLM has stale weights)
@@ -2055,10 +2368,13 @@ class QGRETrainer:
             return metadata.get(self._difficulty_column, "default")
         return "default"
 
-    def _record_mastery_and_advance(self, reward_results, active_qualities, batch, metrics, batch_contexts):
+    def _record_mastery_and_advance(
+        self, reward_results, active_qualities, batch, metrics, batch_contexts
+    ):
         """Record per-tier mastery scores, check per-tier phase advancement, check tier unlock."""
-        import numpy as np
         from collections import defaultdict
+
+        import numpy as np
 
         max_phase = max(self.step_qualities.keys())
 
@@ -2090,18 +2406,32 @@ class QGRETrainer:
                 # Reset SPO baselines for ALL prompts in this tier (not just current batch)
                 col = self._difficulty_column
                 if self._dataloader and col:
-                    tier_pids = [item["prompt_id"] for item in self._dataloader.items
-                                 if item.get("metadata", {}).get(col, "default") == tier]
+                    tier_pids = [
+                        item["prompt_id"]
+                        for item in self._dataloader.items
+                        if item.get("metadata", {}).get(col, "default") == tier
+                    ]
                     import warnings
-                    warnings.warn(f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, dataloader path, found {len(tier_pids)} prompts")
+
+                    warnings.warn(
+                        f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, dataloader path, found {len(tier_pids)} prompts",
+                        stacklevel=2,
+                    )
                 else:
-                    tier_pids = [batch_contexts[i].prompt_id for i in range(len(reward_results))
-                                 if batch_contexts[i].tier == tier]
+                    tier_pids = [
+                        batch_contexts[i].prompt_id
+                        for i in range(len(reward_results))
+                        if batch_contexts[i].tier == tier
+                    ]
                     import warnings
-                    warnings.warn(f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, batch path, found {len(tier_pids)} prompts")
+
+                    warnings.warn(
+                        f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, batch path, found {len(tier_pids)} prompts",
+                        stacklevel=2,
+                    )
                 self.advantage_estimator.on_tier_advance(
                     new_tier=new_phase,
-                    prompt_tier_map={pid: new_phase for pid in tier_pids},
+                    prompt_tier_map=dict.fromkeys(tier_pids, new_phase),
                 )
 
         # Check tier unlock — tutorial gates tier advancement
@@ -2117,7 +2447,9 @@ class QGRETrainer:
             # Only attempt unlock if tutorial allows it
             if candidate_tier is None or self.game_state.can_tier_unlock(candidate_tier):
                 new_tier = self.game_state.check_tier_unlock(
-                    self._tier_order, self._tier_advance_phase, self._tier_advance_threshold,
+                    self._tier_order,
+                    self._tier_advance_phase,
+                    self._tier_advance_threshold,
                 )
                 if new_tier:
                     metrics["tier_unlocked"] = new_tier
@@ -2134,13 +2466,18 @@ class QGRETrainer:
                     col = self._difficulty_column
                     if self._dataloader and col:
                         active_set = set(self.game_state.active_tiers)
-                        all_active_pids = [item["prompt_id"] for item in self._dataloader.items
-                                           if item.get("metadata", {}).get(col, "default") in active_set]
+                        all_active_pids = [
+                            item["prompt_id"]
+                            for item in self._dataloader.items
+                            if item.get("metadata", {}).get(col, "default") in active_set
+                        ]
                     else:
-                        all_active_pids = [batch_contexts[i].prompt_id for i in range(len(reward_results))]
+                        all_active_pids = [
+                            batch_contexts[i].prompt_id for i in range(len(reward_results))
+                        ]
                     self.advantage_estimator.on_tier_advance(
                         new_tier=0,  # Not used anymore — full reset for all affected pids
-                        prompt_tier_map={pid: 0 for pid in all_active_pids},
+                        prompt_tier_map=dict.fromkeys(all_active_pids, 0),
                     )
 
         # Tutorial skill tree: record per-skill mastery score
@@ -2194,6 +2531,7 @@ class QGRETrainer:
             tutorial_tracked_pids = set(self.game_state._prompt_to_skill.keys())
 
         from collections import Counter
+
         tier_counts = Counter(
             item["metadata"].get(col, "default") for item in self._dataloader.items
         )
@@ -2209,10 +2547,8 @@ class QGRETrainer:
                     tier_weights[pid] = 1.0 / max(tier_counts.get(tier, 1), 1)
                 else:
                     tier_weights[pid] = 0.0  # Locked skill
-            else:
-                # Untracked prompt: tier gate decides
-                if tier in allowed:
-                    tier_weights[pid] = 1.0 / max(tier_counts[tier], 1)
+            elif tier in allowed:
+                tier_weights[pid] = 1.0 / max(tier_counts[tier], 1)
                 # else: difficulty gate already zeros it out
 
         if tier_weights:
@@ -2225,7 +2561,7 @@ class QGRETrainer:
         print(f"├{'─'*60}┤")
         print(f"│  Tiers: {', '.join(sorted(allowed)):<50}│")
         print(f"│  Active prompts: {active_count:<41}│")
-        print(f"│  Tutorial active: {str(tut_count):<40}│")
+        print(f"│  Tutorial active: {tut_count!s:<40}│")
         if active_count == 0:
             print(f"│  ⚠ ZERO PROMPTS — falling back to uniform{' '*17}│")
         print(f"└{'─'*60}┘")
@@ -2249,11 +2585,12 @@ class QGRETrainer:
         backend = generation_backend or self.generation_backend
         if backend is None:
             raise RuntimeError(
-                "No generation backend provided. Pass to train() or QGRETrainer constructor."
+                "No generation backend provided. Pass to train() or QGRETrainer constructor.",
             )
 
         # Weight Sync Bus — coordinates weight transfer between training and vLLM
-        from qgre.weight_bus import WeightBus, SyncStrategy
+        from qgre.weight_bus import SyncStrategy, WeightBus
+
         weight_bus = WeightBus(strategy=SyncStrategy(self.config.model.weight_sync_strategy))
 
         self._dataloader = dataloader  # Store ref for difficulty gate updates
@@ -2263,7 +2600,8 @@ class QGRETrainer:
             all_prompt_ids = [str(item["prompt_id"]) for item in dataloader.items]
             self.game_state.default_aspiration_target = self.advantage_estimator._aspiration_target
             self.game_state.init_tutorial(
-                self.config.tutorial, all_prompt_ids,
+                self.config.tutorial,
+                all_prompt_ids,
                 dataloader_items=dataloader.items,
                 difficulty_column=self._difficulty_column,
             )
@@ -2275,18 +2613,28 @@ class QGRETrainer:
         # MLflow experiment setup (PILLARS.md line 128)
         try:
             import mlflow
+
             mlflow.set_experiment(self.config.logging.mlflow_experiment)
             mlflow.start_run(run_name=f"qgre-step-{self.global_step}")
-            log_training_params({
-                "model": {"path": self.config.model.path, "lora_rank": self.config.model.lora_rank},
-                "algorithm": {"mode": self.config.algorithm.mode, "loss_type": self.config.algorithm.loss_type},
-                "training": {"lr": cfg.lr, "total_steps": cfg.total_steps},
-            })
+            log_training_params(
+                {
+                    "model": {
+                        "path": self.config.model.path,
+                        "lora_rank": self.config.model.lora_rank,
+                    },
+                    "algorithm": {
+                        "mode": self.config.algorithm.mode,
+                        "loss_type": self.config.algorithm.loss_type,
+                    },
+                    "training": {"lr": cfg.lr, "total_steps": cfg.total_steps},
+                }
+            )
         except ImportError:
             pass  # MLflow not installed
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError) as e:
             import warnings
-            warnings.warn(f"MLflow setup failed: {e}. Metrics will not be tracked.")
+
+            warnings.warn(f"MLflow setup failed: {e}. Metrics will not be tracked.", stacklevel=2)
 
         # Try to resume from checkpoint
         self.resume(self.config.logging.checkpoint_dir)
@@ -2297,13 +2645,17 @@ class QGRETrainer:
                 dataloader.load_state_dict(self._pending_dataloader_state)
             else:
                 import warnings
-                warnings.warn("T3-5: Pending dataloader state lost - dataloader is None on resume")
+
+                warnings.warn(
+                    "T3-5: Pending dataloader state lost - dataloader is None on resume",
+                    stacklevel=2,
+                )
             self._pending_dataloader_state = None
 
         # Difficulty-gated curriculum: set initial gate based on current phase
         self._apply_difficulty_gate()
 
-        for epoch in range(10000):  # Outer epoch loop — stops when total_steps reached
+        for _epoch in range(10000):  # Outer epoch loop — stops when total_steps reached
             for batch in dataloader:
                 if self.global_step >= cfg.total_steps:
                     break
@@ -2313,7 +2665,7 @@ class QGRETrainer:
                     raise RuntimeError(
                         f"Step {self.global_step}: empty batch received. "
                         "This indicates data pipeline issues (exhausted dataset, filter dropped all samples, "
-                        "or dynamic batch sizing failure). Check data loading and filtering logic."
+                        "or dynamic batch sizing failure). Check data loading and filtering logic.",
                     )
 
                 # 1. Generate (inference mode) with optional LoRA dropout for exploration
@@ -2325,14 +2677,19 @@ class QGRETrainer:
                 restore_lora = None
                 if gen_cfg.lora_dropout_rate > 0:
                     from qgre.lora_dropout import apply_lora_dropout, compute_dropout_rate
+
                     current_rate = compute_dropout_rate(
-                        gen_cfg.lora_dropout_rate, gen_cfg.lora_dropout_anneal_steps, self.global_step,
+                        gen_cfg.lora_dropout_rate,
+                        gen_cfg.lora_dropout_anneal_steps,
+                        self.global_step,
                     )
                     if current_rate > 0:
                         restore_lora = apply_lora_dropout(self.model, current_rate)
                         # Sync noisy weights to vLLM via Weight Sync Bus
                         weight_bus.sync(
-                            backend.weight_exporter, backend.weight_loader, self.model,
+                            backend.weight_exporter,
+                            backend.weight_loader,
+                            self.model,
                             ctx=self.ctx,
                             modules_to_save=self.config.model.modules_to_save,
                         )
@@ -2346,7 +2703,9 @@ class QGRETrainer:
                     and gen_cfg.lora_dropout_rate == 0
                 ):
                     weight_bus.sync(
-                        backend.weight_exporter, backend.weight_loader, self.model,
+                        backend.weight_exporter,
+                        backend.weight_loader,
+                        self.model,
                         ctx=self.ctx,
                         modules_to_save=self.config.model.modules_to_save,
                     )
@@ -2371,7 +2730,7 @@ class QGRETrainer:
                         # Create mastery lookup function for this prompt's tier
                         # Maps span_id (e.g., "STEP_1") -> mastery from tier_mastery[tier][step_num]
                         # Track malformed span_ids to warn once per pattern
-                        if not hasattr(self, '_egrs_malformed_span_ids'):
+                        if not hasattr(self, "_egrs_malformed_span_ids"):
                             self._egrs_malformed_span_ids = set()
 
                         def make_mastery_fn(t: str, malformed_set: set):
@@ -2380,9 +2739,15 @@ class QGRETrainer:
                                     try:
                                         step_num = int(span_id.split("_")[1])
                                         # Read current state each time, don't capture tier_mastery values
-                                        mastery = self.game_state.get_tier_step_mastery(tier, step_num)
+                                        mastery = self.game_state.get_tier_step_mastery(
+                                            tier, step_num
+                                        )
                                         # H-1: If step not in tier_mastery (new tier/phase), return high mastery to force hint decay
-                                        if mastery == 0.0 and step_num not in self.game_state.tier_mastery.get(tier, {}):
+                                        if (
+                                            mastery == 0.0
+                                            and step_num
+                                            not in self.game_state.tier_mastery.get(tier, {})
+                                        ):
                                             return 1.0
                                         return mastery
                                     except (IndexError, ValueError):
@@ -2390,18 +2755,20 @@ class QGRETrainer:
                                             malformed_set.add(span_id)
                                             logging.getLogger(__name__).warning(
                                                 f"EGRS: Malformed span_id '{span_id}' in mastery_fn. "
-                                                "Cannot parse step number. Using mastery=0.0 (100% hint probability)."
+                                                "Cannot parse step number. Using mastery=0.0 (100% hint probability).",
                                             )
                                         return 0.0
                                 elif span_id == "THINK":
                                     # Read current state each time, don't capture tier_mastery values
                                     return self.game_state.get_tier_step_mastery(tier, 0)
                                 return 1.0  # H-1: Unknown spans get high mastery (no hints)
+
                             return mastery_fn
 
                         # Query hints with per-span mastery lookup
                         sample_hints = self.hint_registry.get_hints_for_prompt(
-                            pid, mastery_fn=make_mastery_fn(tier, self._egrs_malformed_span_ids)
+                            pid,
+                            mastery_fn=make_mastery_fn(tier, self._egrs_malformed_span_ids),
                         )
                         if sample_hints:
                             # Convert token hints to text hints
@@ -2409,12 +2776,14 @@ class QGRETrainer:
                             for span_id, tokens in sample_hints.items():
                                 if tokens:
                                     # Decode hint tokens to text
-                                    hint_text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                                    hint_text = self.tokenizer.decode(
+                                        tokens, skip_special_tokens=True
+                                    )
                                     # MIO-007: Validate hint text length
                                     if len(hint_text) > 512:
                                         logging.getLogger(__name__).warning(
                                             f"MIO-007: Hint text for {span_id} exceeds 512 chars ({len(hint_text)}). "
-                                            "May exceed max_prompt_length. Truncating."
+                                            "May exceed max_prompt_length. Truncating.",
                                         )
                                         hint_text = hint_text[:512]
                                     text_hints[span_id] = f"Hint for {span_id}: {hint_text}"
@@ -2426,27 +2795,34 @@ class QGRETrainer:
                             if text_hints:
                                 prompt_hints[i] = text_hints
                     # Warn if all hints are generic (indicates extractor not configured or metadata missing)
-                    if generic_hint_count > 0 and real_hint_count == 0 and self.global_step % 100 == 0:
+                    if (
+                        generic_hint_count > 0
+                        and real_hint_count == 0
+                        and self.global_step % 100 == 0
+                    ):
                         extractor_status = "configured" if self.hint_extractor else "not configured"
                         logging.getLogger(__name__).warning(
                             f"EGRS: All {generic_hint_count} hints are generic (empty tokens). "
                             f"Hint extractor: {extractor_status}. "
-                            "Check egrs.hint_extractor config and metadata columns."
+                            "Check egrs.hint_extractor config and metadata columns.",
                         )
 
                 try:
-                    _dev = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
+                    _dev = next(
+                        (p.device for p in self.model.parameters() if p.device.type != "cpu"),
+                        next(self.model.parameters()).device,
+                    )
                     output = backend.generate(
                         batch.input_ids.to(_dev),
                         batch.attention_mask.to(_dev),
                         prompt_hints=prompt_hints,
                     )
                     generation_succeeded = True
-                except Exception as gen_exc:
+                except Exception:
                     # TL-1: Clear CUDA cache on generate failure to prevent tensor leaks
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                    raise gen_exc
+                    raise
                 finally:
                     # Always restore clean weights — even if generate crashes
                     # Don't sync to vLLM here — step-end sync (after training) handles it
@@ -2464,8 +2840,9 @@ class QGRETrainer:
                     reward_results.append(rr)
 
                 # Validate: reward_results must match completions length after batch expansion
-                assert len(reward_results) == len(output.token_ids), \
-                    f"reward_results length ({len(reward_results)}) != completions length ({len(output.token_ids)})"
+                assert (
+                    len(reward_results) == len(output.token_ids)
+                ), f"reward_results length ({len(reward_results)}) != completions length ({len(output.token_ids)})"
 
                 # EGRS Phase 5: Track hint success/failure for registry clearing
                 # With n_completions > 1, same prompt_id appears multiple times.
@@ -2475,33 +2852,47 @@ class QGRETrainer:
                 # - ALL succeeded but some WITH hint → don't graduate yet
                 if self.hint_registry is not None and self.config.egrs.hint_enabled:
                     # Validate hints_used length matches batch size
-                    if output.hints_used is not None and len(output.hints_used) != len(batch.prompt_ids):
+                    if output.hints_used is not None and len(output.hints_used) != len(
+                        batch.prompt_ids
+                    ):
                         logging.getLogger(__name__).warning(
                             f"hints_used length mismatch: got {len(output.hints_used)}, expected {len(batch.prompt_ids)}. "
-                            "Skipping hint success/failure tracking for this batch."
+                            "Skipping hint success/failure tracking for this batch.",
                         )
                     # Validate batch.prompt_ids and reward_results have same length
                     if len(batch.prompt_ids) != len(reward_results):
                         logging.getLogger(__name__).warning(
                             f"Length mismatch: batch.prompt_ids={len(batch.prompt_ids)}, reward_results={len(reward_results)}. "
-                            "Truncating to shorter length for hint tracking."
+                            "Truncating to shorter length for hint tracking.",
                         )
                     # Aggregate: (prompt_id, span_id) -> {successes_without_hint, successes_with_hint, failures}
                     span_outcomes: dict[tuple[int, str], dict[str, int]] = {}
-                    for i, (pid, rr) in enumerate(zip(batch.prompt_ids, reward_results)):
+                    for i, (pid, rr) in enumerate(
+                        zip(batch.prompt_ids, reward_results, strict=False)
+                    ):
                         # MIO-001: hints_used is now dict[str, bool] mapping span_id → was_injected
                         hints_dict = {}
-                        if output.hints_used is not None and len(output.hints_used) == len(batch.prompt_ids) and i < len(output.hints_used):
+                        if (
+                            output.hints_used is not None
+                            and len(output.hints_used) == len(batch.prompt_ids)
+                            and i < len(output.hints_used)
+                        ):
                             hints_dict = output.hints_used[i]
                         span_correct = compute_span_correctness(
-                            rr, self.step_qualities, self.config.egrs.reward_threshold
+                            rr,
+                            self.step_qualities,
+                            self.config.egrs.reward_threshold,
                         )
                         for step_num, is_correct in span_correct.items():
                             span_id = f"STEP_{step_num}" if step_num > 0 else "THINK"
                             hint_was_used = hints_dict.get(span_id, False)
                             key = (pid, span_id)
                             if key not in span_outcomes:
-                                span_outcomes[key] = {"success_no_hint": 0, "success_with_hint": 0, "failure": 0}
+                                span_outcomes[key] = {
+                                    "success_no_hint": 0,
+                                    "success_with_hint": 0,
+                                    "failure": 0,
+                                }
                             if is_correct:
                                 if hint_was_used:
                                     span_outcomes[key]["success_with_hint"] += 1
@@ -2514,23 +2905,32 @@ class QGRETrainer:
                     # Track graduated hints to avoid race condition in multi-completion batches
                     graduated_this_batch: set[tuple] = set()
                     for (pid, span_id), counts in span_outcomes.items():
-                        total = counts["success_no_hint"] + counts["success_with_hint"] + counts["failure"]
+                        total = (
+                            counts["success_no_hint"]
+                            + counts["success_with_hint"]
+                            + counts["failure"]
+                        )
                         if total == 0:
                             continue
                         # Skip if hint doesn't exist or already graduated this batch
-                        if (pid, span_id) not in self.hint_registry or (pid, span_id) in graduated_this_batch:
+                        if (pid, span_id) not in self.hint_registry or (
+                            pid,
+                            span_id,
+                        ) in graduated_this_batch:
                             continue
                         # Majority failure: reset streak
                         if counts["failure"] > total / 2:
                             self.hint_registry.record_failure(pid, span_id)
                         # Majority success without hint: can graduate
                         elif counts["success_no_hint"] > total / 2:
-                            graduated = self.hint_registry.record_success(pid, span_id, hint_was_used=False)
+                            graduated = self.hint_registry.record_success(
+                                pid, span_id, hint_was_used=False
+                            )
                             if graduated:
                                 graduated_this_batch.add((pid, span_id))
                                 if self.global_step % 50 == 0:
                                     logging.getLogger(__name__).info(
-                                        f"EGRS: Prompt {pid} {span_id} graduated (no longer needs hints)"
+                                        f"EGRS: Prompt {pid} {span_id} graduated (no longer needs hints)",
                                     )
                         # Otherwise (mixed, or majority success with hint): record success with hint
                         else:
@@ -2541,14 +2941,16 @@ class QGRETrainer:
                     backend.set_training_mode()
                 try:
                     metrics = self.step(
-                        batch, output.token_ids, reward_results,
+                        batch,
+                        output.token_ids,
+                        reward_results,
                         generation_logprobs=output.logprobs,
                         completion_texts=output.texts,  # Pass for span validation
                     )
                 except Exception as e:
-                    logging.getLogger(__name__).error(
+                    logging.getLogger(__name__).exception(
                         f"TL-6: step() raised exception: {e}. "
-                        "Advancing global_step to maintain dataloader consistency."
+                        "Advancing global_step to maintain dataloader consistency.",
                     )
                     self.global_step += 1
                     raise
@@ -2560,13 +2962,16 @@ class QGRETrainer:
                         dataloader.set_priorities(priorities)
 
                 # 4. Log progress + MLflow
-                step_rewards = {int(k.split("_")[-1]): v for k, v in metrics.items()
-                               if k.startswith("mastery/step_")}
+                step_rewards = {
+                    int(k.split("_")[-1]): v
+                    for k, v in metrics.items()
+                    if k.startswith("mastery/step_")
+                }
                 # Log mastery and phase to stdout for debugging curriculum
                 if self.global_step % self.config.logging.log_freq == 0:
                     tiers_str = "/".join(self.game_state.active_tiers)
                     reward_mean = metrics.get("reward/mean", 0.0)
-                    critic_val = metrics.get("critic_loss", 0)
+                    metrics.get("critic_loss", 0)
                     loss_val = metrics.get("loss", 0.0)
 
                     # Build quality score rows
@@ -2574,40 +2979,82 @@ class QGRETrainer:
                     if reward_results:
                         last_scores = reward_results[-1].scores
                         groups = [
-                            ("Format",    [("format", "q_format"), ("has_math", "q_has_math")]),
-                            ("Physics",   [("V_correct", "q_V_correct"), ("correct_H", "q_correct_H"), ("T_uses_p", "q_T_uses_p"), ("momentum_def", "q_momentum_defined")]),
-                            ("Equations", [("dq/dt", "q_correct_dqdt"), ("dp/dt", "q_correct_dpdt"), ("consistency", "q_consistency"), ("coefficient", "q_correct_coefficient"), ("derivative", "q_derivative_correct")]),
-                            ("Momentum",  [("defines_p", "q_defines_momentum"), ("T_in_p", "q_T_in_momentum"), ("H_in_p", "q_H_in_momentum")]),
+                            ("Format", [("format", "q_format"), ("has_math", "q_has_math")]),
+                            (
+                                "Physics",
+                                [
+                                    ("V_correct", "q_V_correct"),
+                                    ("correct_H", "q_correct_H"),
+                                    ("T_uses_p", "q_T_uses_p"),
+                                    ("momentum_def", "q_momentum_defined"),
+                                ],
+                            ),
+                            (
+                                "Equations",
+                                [
+                                    ("dq/dt", "q_correct_dqdt"),
+                                    ("dp/dt", "q_correct_dpdt"),
+                                    ("consistency", "q_consistency"),
+                                    ("coefficient", "q_correct_coefficient"),
+                                    ("derivative", "q_derivative_correct"),
+                                ],
+                            ),
+                            (
+                                "Momentum",
+                                [
+                                    ("defines_p", "q_defines_momentum"),
+                                    ("T_in_p", "q_T_in_momentum"),
+                                    ("H_in_p", "q_H_in_momentum"),
+                                ],
+                            ),
                         ]
                         for group_name, fields in groups:
-                            vals = " │ ".join(f"{name:>12s} {last_scores.get(key, 0):.1f}" for name, key in fields)
+                            vals = " │ ".join(
+                                f"{name:>12s} {last_scores.get(key, 0):.1f}" for name, key in fields
+                            )
                             rows.append((group_name, vals))
 
                     # Per-quality loss row (from span-based computation)
-                    quality_losses = {k.replace("loss/", ""): v for k, v in metrics.items() if k.startswith("loss/")}
+                    quality_losses = {
+                        k.replace("loss/", ""): v
+                        for k, v in metrics.items()
+                        if k.startswith("loss/")
+                    }
                     if quality_losses:
                         loss_items = sorted(quality_losses.items())[:6]  # Top 6 for space
                         loss_vals = " │ ".join(f"{q[:10]:>10s} {v:.4f}" for q, v in loss_items)
                         rows.append(("SpanLoss", loss_vals))
 
                     # Learning coefficients (learnability from advantage estimator)
-                    if hasattr(self.advantage_estimator, '_reward_var') and self.advantage_estimator._reward_var:
+                    if (
+                        hasattr(self.advantage_estimator, "_reward_var")
+                        and self.advantage_estimator._reward_var
+                    ):
                         # Get learnability for last prompt's qualities
                         last_pid = batch.prompt_ids[-1] if batch.prompt_ids else None
-                        if last_pid is not None and last_pid in self.advantage_estimator._reward_var:
+                        if (
+                            last_pid is not None
+                            and last_pid in self.advantage_estimator._reward_var
+                        ):
                             vars_dict = self.advantage_estimator._reward_var[last_pid]
                             # Learnability = p(1-p), approximated from variance
-                            learn_items = [(q, min(v, 0.25)) for q, v in vars_dict.items() if v > 0][:5]
+                            learn_items = [
+                                (q, min(v, 0.25)) for q, v in vars_dict.items() if v > 0
+                            ][:5]
                             if learn_items:
-                                learn_vals = " │ ".join(f"{q[:8]:>8s} {v:.3f}" for q, v in learn_items)
+                                learn_vals = " │ ".join(
+                                    f"{q[:8]:>8s} {v:.3f}" for q, v in learn_items
+                                )
                                 rows.append(("Learning", learn_vals))
 
                     if self.game_state.tutorial_enabled:
                         tut = self.game_state.get_tutorial_metrics()
-                        tut_vals = (f"{'active':>12s} {tut.get('tutorial/active_skills', 0)}   │ "
-                                   f"{'mastered':>12s} {tut.get('tutorial/mastered_skills', 0)}   │ "
-                                   f"{'locked':>12s} {tut.get('tutorial/locked_skills', 0)}   │ "
-                                   f"{'pool':>12s} {tut.get('tutorial/active_prompt_pool_size', 0)}")
+                        tut_vals = (
+                            f"{'active':>12s} {tut.get('tutorial/active_skills', 0)}   │ "
+                            f"{'mastered':>12s} {tut.get('tutorial/mastered_skills', 0)}   │ "
+                            f"{'locked':>12s} {tut.get('tutorial/locked_skills', 0)}   │ "
+                            f"{'pool':>12s} {tut.get('tutorial/active_prompt_pool_size', 0)}"
+                        )
                         rows.append(("Tutorial", tut_vals))
 
                     # Gradient coherence metrics (laminar→turbulent detection)
@@ -2616,9 +3063,11 @@ class QGRETrainer:
                         norm_ratio = metrics["grad/norm_ratio"]
                         turb_state = metrics.get("grad/turbulence_state", 0)
                         state_names = {0: "CALIB", 1: "LAMINAR", 2: "TRANS", 3: "TURB"}
-                        grad_vals = (f"{'cosine':>10s} {cosine:+.3f}   │ "
-                                    f"{'norm_ratio':>10s} {norm_ratio:.1f}   │ "
-                                    f"{'state':>10s} {state_names[turb_state]}")
+                        grad_vals = (
+                            f"{'cosine':>10s} {cosine:+.3f}   │ "
+                            f"{'norm_ratio':>10s} {norm_ratio:.1f}   │ "
+                            f"{'state':>10s} {state_names[turb_state]}"
+                        )
                         rows.append(("Gradients", grad_vals))
 
                     # Compute column widths
@@ -2648,23 +3097,35 @@ class QGRETrainer:
                         print(f"│{'COMPLETION':^{header_w}}│")
                         print(f"├{'─' * header_w}┤")
                         for line in comp.split("\n"):
-                            print(f"│ {line:<{header_w - 2}} │" if len(line) <= header_w - 2 else f"│ {line[:header_w - 2]}│")
+                            print(
+                                f"│ {line:<{header_w - 2}} │"
+                                if len(line) <= header_w - 2
+                                else f"│ {line[:header_w - 2]}│"
+                            )
                         print(f"└{'─' * header_w}┘")
                 try:
                     log_step_metrics(
                         step=self.global_step - 1,
                         reward_mean=metrics.get("reward/mean", 0.0),
                         loss=metrics.get("loss", 0.0),
-                        step_rewards=step_rewards if step_rewards else None,
-                        extra={k: v for k, v in metrics.items() if k in ("phase",) or k.startswith("grad/")},
+                        step_rewards=step_rewards or None,
+                        extra={
+                            k: v
+                            for k, v in metrics.items()
+                            if k == "phase" or k.startswith("grad/")
+                        },
                     )
                 except ImportError:
                     pass  # MLflow not installed
-                except Exception as e:
+                except (RuntimeError, ValueError, OSError) as e:
                     # Warn once per unique error, don't spam logs
                     if not hasattr(self, "_mlflow_warned"):
                         import warnings
-                        warnings.warn(f"MLflow logging failed: {e}. Further errors will be silent.")
+
+                        warnings.warn(
+                            f"MLflow logging failed: {e}. Further errors will be silent.",
+                            stacklevel=2,
+                        )
                         self._mlflow_warned = True
 
                 # 5. Save checkpoint
@@ -2675,7 +3136,9 @@ class QGRETrainer:
                 # Skip if generation failed — stale weights shouldn't be synced
                 if backend.weight_loader is not None and generation_succeeded:
                     weight_bus.sync(
-                        backend.weight_exporter, backend.weight_loader, self.model,
+                        backend.weight_exporter,
+                        backend.weight_loader,
+                        self.model,
                         ctx=self.ctx,
                         modules_to_save=self.config.model.modules_to_save,
                     )
@@ -2686,11 +3149,13 @@ class QGRETrainer:
                     if backend.weight_loader is not None:
                         try:
                             backend.weight_loader.flush_kv_cache()
-                        except Exception as e:
+                        except (RuntimeError, AttributeError) as e:
                             import warnings
+
                             warnings.warn(
                                 f"Step {self.global_step}: KV cache flush failed: {e}. "
-                                f"VRAM leak may accumulate. Monitor GPU memory."
+                                f"VRAM leak may accumulate. Monitor GPU memory.",
+                                stacklevel=2,
                             )
 
             if self.global_step >= cfg.total_steps:
@@ -2700,19 +3165,24 @@ class QGRETrainer:
         if self._gradient_probe_log:
             import json
             from pathlib import Path
+
             output_dir = Path("output/hamiltonian/study/gradient_probe")
             output_dir.mkdir(parents=True, exist_ok=True)
             with open(output_dir / "probe_results.json", "w") as f:
-                json.dump({
-                    "config": {
-                        "advantage_scale": self.config.algorithm.advantage_scale,
-                        "lr": self.config.training.lr,
-                        "lora_rank": self.config.model.lora_rank,
-                        "lora_alpha": self.config.model.lora_alpha,
-                        "n_steps": len(self._gradient_probe_log),
+                json.dump(
+                    {
+                        "config": {
+                            "advantage_scale": self.config.algorithm.advantage_scale,
+                            "lr": self.config.training.lr,
+                            "lora_rank": self.config.model.lora_rank,
+                            "lora_alpha": self.config.model.lora_alpha,
+                            "n_steps": len(self._gradient_probe_log),
+                        },
+                        "measurements": self._gradient_probe_log,
                     },
-                    "measurements": self._gradient_probe_log,
-                }, f, indent=2)
+                    f,
+                    indent=2,
+                )
             print(f"\n{'='*70}")
             print(f"Gradient probe results saved to {output_dir / 'probe_results.json'}")
             print(f"{'='*70}")
@@ -2721,16 +3191,21 @@ class QGRETrainer:
         if self._attention_log:
             import json
             from pathlib import Path
+
             output_dir = Path(self.config.logging.checkpoint_dir).parent / "gradient_coherence"
             output_dir.mkdir(parents=True, exist_ok=True)
             with open(output_dir / "coherence_log.json", "w") as f:
-                json.dump({
-                    "config": {
-                        "log_freq": self._attention_log_freq,
-                        "n_measurements": len(self._attention_log),
+                json.dump(
+                    {
+                        "config": {
+                            "log_freq": self._attention_log_freq,
+                            "n_measurements": len(self._attention_log),
+                        },
+                        "measurements": self._attention_log,
                     },
-                    "measurements": self._attention_log,
-                }, f, indent=2)
+                    f,
+                    indent=2,
+                )
             print(f"\n{'='*70}")
             print(f"Gradient coherence log saved to {output_dir / 'coherence_log.json'}")
             print(f"{'='*70}")
@@ -2740,5 +3215,5 @@ class QGRETrainer:
             # Final checkpoint
             self.save()
         finally:
-            if hasattr(self, 'completion_logger'):
+            if hasattr(self, "completion_logger"):
                 self.completion_logger.close()

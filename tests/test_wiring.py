@@ -83,6 +83,7 @@ def test_lora_sync_changes_output():
     """
     import tempfile
     from pathlib import Path
+
     from qgre.config import GenerationConfig, ModelConfig
     from qgre.generation import UnslothBackend
 
@@ -124,6 +125,7 @@ def test_reward_result_type():
 def test_stub_reward_fn_returns_correct_type():
     """Stub reward_fn from examples returns RewardResult."""
     import sys
+
     sys.path.insert(0, "examples/hypergraph")
     from reward_fn import reward_fn
 

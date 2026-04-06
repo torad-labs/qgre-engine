@@ -63,7 +63,7 @@ def test_per_span_mastery_decay():
     def mastery_fn(span_id: str) -> float:
         if span_id == "STEP_1":
             return 0.8  # Mastered → no hint
-        elif span_id == "STEP_2":
+        if span_id == "STEP_2":
             return 0.0  # Not mastered → always hint
         return 0.0
 

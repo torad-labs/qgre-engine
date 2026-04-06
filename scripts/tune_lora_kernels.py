@@ -29,11 +29,16 @@ def get_gpu_name() -> str:
 
 
 def bench_lora_shrink(
-    M: int, K: int, N: int, num_loras: int, num_slices: int,
-    dtype: torch.dtype, config: dict,
+    M: int,
+    K: int,
+    N: int,
+    num_loras: int,
+    num_slices: int,
+    dtype: torch.dtype,
+    config: dict,
 ) -> float:
     """Benchmark a single LoRA shrink config. Returns time in ms."""
-    from vllm.lora.ops.triton_ops import lora_shrink, LoRAKernelMeta
+    from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_shrink
 
     # Create test tensors
     x = torch.randn(M, K, dtype=dtype, device="cuda")
@@ -49,8 +54,12 @@ def bench_lora_shrink(
             stmt="lora_shrink(x, lora_a, output, num_loras, meta, config)",
             globals={
                 "lora_shrink": lora_shrink,
-                "x": x, "lora_a": lora_a, "output": output,
-                "num_loras": num_loras, "meta": meta, "config": config,
+                "x": x,
+                "lora_a": lora_a,
+                "output": output,
+                "num_loras": num_loras,
+                "meta": meta,
+                "config": config,
             },
         )
         result = timer.blocked_autorange(min_run_time=0.5)
@@ -60,16 +69,26 @@ def bench_lora_shrink(
 
 
 def bench_lora_expand(
-    M: int, K: int, N: int, num_loras: int, num_slices: int,
-    add_inputs: bool, dtype: torch.dtype, config: dict,
+    M: int,
+    K: int,
+    N: int,
+    num_loras: int,
+    num_slices: int,
+    add_inputs: bool,
+    dtype: torch.dtype,
+    config: dict,
 ) -> float:
     """Benchmark a single LoRA expand config. Returns time in ms."""
-    from vllm.lora.ops.triton_ops import lora_expand, LoRAKernelMeta
+    from vllm.lora.ops.triton_ops import LoRAKernelMeta, lora_expand
 
     # lora_b shape: [num_loras, num_slices, hidden_size, rank]
     lora_b = torch.randn(num_loras, num_slices, N, K, dtype=dtype, device="cuda")
     x = torch.randn(M, num_slices * K, dtype=dtype, device="cuda")
-    output = torch.randn(M, N, dtype=dtype, device="cuda") if add_inputs else torch.zeros(M, N, dtype=dtype, device="cuda")
+    output = (
+        torch.randn(M, N, dtype=dtype, device="cuda")
+        if add_inputs
+        else torch.zeros(M, N, dtype=dtype, device="cuda")
+    )
     indices = torch.zeros(M, dtype=torch.long, device="cuda")
     output_slices = tuple(N // num_slices for _ in range(num_slices))
 
@@ -80,9 +99,14 @@ def bench_lora_expand(
             stmt="lora_expand(x, lora_b, output, num_loras, output_slices, add_inputs, meta, config)",
             globals={
                 "lora_expand": lora_expand,
-                "x": x, "lora_b": lora_b, "output": output,
-                "num_loras": num_loras, "output_slices": output_slices,
-                "add_inputs": add_inputs, "meta": meta, "config": config,
+                "x": x,
+                "lora_b": lora_b,
+                "output": output,
+                "num_loras": num_loras,
+                "output_slices": output_slices,
+                "add_inputs": add_inputs,
+                "meta": meta,
+                "config": config,
             },
         )
         result = timer.blocked_autorange(min_run_time=0.5)
@@ -121,11 +145,20 @@ def tune_shrink(hidden_sizes, lora_ranks, batch_sizes, dtype) -> dict:
 
         # Reduced search: test key combinations
         for bm, bn, bk, nw, ns, sk in product(
-            BLOCK_M, BLOCK_N[:3], BLOCK_K[:3], NUM_WARPS, NUM_STAGES[:2], SPLIT_K_SHRINK[:3]
+            BLOCK_M,
+            BLOCK_N[:3],
+            BLOCK_K[:3],
+            NUM_WARPS,
+            NUM_STAGES[:2],
+            SPLIT_K_SHRINK[:3],
         ):
             config = {
-                "BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk,
-                "num_warps": nw, "num_stages": ns, "split_k": sk,
+                "BLOCK_M": bm,
+                "BLOCK_N": bn,
+                "BLOCK_K": bk,
+                "num_warps": nw,
+                "num_stages": ns,
+                "split_k": sk,
             }
             t = bench_lora_shrink(m, k, n, MAX_LORAS, num_slices, dtype, config)
             if t < best_time:
@@ -136,10 +169,12 @@ def tune_shrink(hidden_sizes, lora_ranks, batch_sizes, dtype) -> dict:
         if best_config is None:
             raise RuntimeError(
                 f"All benchmark configs failed for shrink M={m} K={k} N={n} slices={num_slices}. "
-                "Check CUDA errors or reduce shape sizes."
+                "Check CUDA errors or reduce shape sizes.",
             )
         configs[key] = best_config
-        print(f"  [{done}/{total}] shrink M={m} K={k} N={n} slices={num_slices}: {best_time:.3f}ms {best_config}")
+        print(
+            f"  [{done}/{total}] shrink M={m} K={k} N={n} slices={num_slices}: {best_time:.3f}ms {best_config}"
+        )
 
     return configs
 
@@ -156,11 +191,18 @@ def tune_expand(hidden_sizes, lora_ranks, batch_sizes, add_inputs: bool, dtype) 
         best_config = None
 
         for bm, bn, bk, nw, ns in product(
-            BLOCK_M, BLOCK_N, BLOCK_K[:3], NUM_WARPS, NUM_STAGES[:2]
+            BLOCK_M,
+            BLOCK_N,
+            BLOCK_K[:3],
+            NUM_WARPS,
+            NUM_STAGES[:2],
         ):
             config = {
-                "BLOCK_M": bm, "BLOCK_N": bn, "BLOCK_K": bk,
-                "num_warps": nw, "num_stages": ns,
+                "BLOCK_M": bm,
+                "BLOCK_N": bn,
+                "BLOCK_K": bk,
+                "num_warps": nw,
+                "num_stages": ns,
             }
             t = bench_lora_expand(m, k, n, MAX_LORAS, num_slices, add_inputs, dtype, config)
             if t < best_time:
@@ -171,15 +213,19 @@ def tune_expand(hidden_sizes, lora_ranks, batch_sizes, add_inputs: bool, dtype) 
         if best_config is None:
             raise RuntimeError(
                 f"All benchmark configs failed for expand M={m} K={k} N={n} slices={num_slices}. "
-                "Check CUDA errors or reduce shape sizes."
+                "Check CUDA errors or reduce shape sizes.",
             )
         configs[key] = best_config
-        print(f"  [{done}/{total}] expand(add={add_inputs}) M={m} K={k} N={n} slices={num_slices}: {best_time:.3f}ms {best_config}")
+        print(
+            f"  [{done}/{total}] expand(add={add_inputs}) M={m} K={k} N={n} slices={num_slices}: {best_time:.3f}ms {best_config}"
+        )
 
     return configs
 
 
-def save_config(configs: dict, output_dir: Path, gpu_name: str, op_type: str, add_inputs: bool | None = None):
+def save_config(
+    configs: dict, output_dir: Path, gpu_name: str, op_type: str, add_inputs: bool | None = None
+):
     """Save configs as JSON in vLLM's expected format."""
     # Convert flat key format to nested: config[max_loras][num_slices][m][k][n]
     nested = {}
@@ -201,8 +247,11 @@ def save_config(configs: dict, output_dir: Path, gpu_name: str, op_type: str, ad
 
 def main():
     parser = argparse.ArgumentParser(description="Tune vLLM LoRA kernel configs for your GPU")
-    parser.add_argument("--output-dir", default="output/vllm_kernel_configs",
-                        help="Directory to save tuned JSON configs")
+    parser.add_argument(
+        "--output-dir",
+        default="output/vllm_kernel_configs",
+        help="Directory to save tuned JSON configs",
+    )
     parser.add_argument("--dtype", default="bfloat16", choices=["float16", "bfloat16"])
     args = parser.parse_args()
 
@@ -236,7 +285,7 @@ def main():
 
     elapsed = time.time() - start
     print(f"\nDone in {elapsed:.0f}s. Configs saved to {output_dir}/")
-    print(f"QGRE will auto-detect these on next training run.")
+    print("QGRE will auto-detect these on next training run.")
 
 
 if __name__ == "__main__":

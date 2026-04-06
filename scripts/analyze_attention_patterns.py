@@ -12,6 +12,7 @@ This helps diagnose why Phase 7 causes sudden performance collapse.
 import json
 import sys
 from pathlib import Path
+
 import numpy as np
 
 
@@ -31,7 +32,7 @@ def detect_transitions(measurements: list) -> list:
 
     # Compute deltas between consecutive measurements
     for i in range(1, len(measurements)):
-        prev = measurements[i-1]
+        prev = measurements[i - 1]
         curr = measurements[i]
 
         # Detect sudden entropy changes (±50% or more)
@@ -50,29 +51,31 @@ def detect_transitions(measurements: list) -> list:
 
         # Flag significant transitions
         is_transition = (
-            entropy_pct > 50 or
-            abs(collapse_delta) > 0.3 or
-            abs(frag_delta) > 0.3 or
-            abs(recency_delta) > 0.2 or
-            abs(loop_delta) > 0.2
+            entropy_pct > 50
+            or abs(collapse_delta) > 0.3
+            or abs(frag_delta) > 0.3
+            or abs(recency_delta) > 0.2
+            or abs(loop_delta) > 0.2
         )
 
         if is_transition:
-            transitions.append({
-                "step": curr["step"],
-                "prev_phase": prev.get("phase", "unknown"),
-                "curr_phase": curr.get("phase", "unknown"),
-                "entropy_delta": entropy_delta,
-                "entropy_pct_change": entropy_pct,
-                "collapse_delta": collapse_delta,
-                "fragmentation_delta": frag_delta,
-                "recency_delta": recency_delta,
-                "loop_delta": loop_delta,
-                "prev_reward": prev.get("reward", 0.0),
-                "curr_reward": curr.get("reward", 0.0),
-                "prev_loss": prev.get("loss", 0.0),
-                "curr_loss": curr.get("loss", 0.0),
-            })
+            transitions.append(
+                {
+                    "step": curr["step"],
+                    "prev_phase": prev.get("phase", "unknown"),
+                    "curr_phase": curr.get("phase", "unknown"),
+                    "entropy_delta": entropy_delta,
+                    "entropy_pct_change": entropy_pct,
+                    "collapse_delta": collapse_delta,
+                    "fragmentation_delta": frag_delta,
+                    "recency_delta": recency_delta,
+                    "loop_delta": loop_delta,
+                    "prev_reward": prev.get("reward", 0.0),
+                    "curr_reward": curr.get("reward", 0.0),
+                    "prev_loss": prev.get("loss", 0.0),
+                    "curr_loss": curr.get("loss", 0.0),
+                }
+            )
 
     return transitions
 
@@ -172,7 +175,7 @@ def main():
     print("ATTENTION PATTERN ANALYSIS")
     print("=" * 80)
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Log frequency: every {config['log_freq']} steps")
     print(f"  Total measurements: {config['n_measurements']}")
 
@@ -197,7 +200,7 @@ def main():
     phase_summary = summarize_by_phase(measurements)
 
     print(f"\n{'-'*80}")
-    print(f"SUMMARY BY PHASE")
+    print("SUMMARY BY PHASE")
     print(f"{'-'*80}")
 
     for phase in sorted(phase_summary.keys()):
@@ -207,20 +210,24 @@ def main():
         print(f"  Loss: {stats['loss']['mean']:.3f} ± {stats['loss']['std']:.3f}")
         print(f"  Entropy: {stats['entropy']['mean']:.3f} ± {stats['entropy']['std']:.3f}")
         print(f"  Collapse score: {stats['collapse']['mean']:.3f} ± {stats['collapse']['std']:.3f}")
-        print(f"  Fragmentation score: {stats['fragmentation']['mean']:.3f} ± {stats['fragmentation']['std']:.3f}")
+        print(
+            f"  Fragmentation score: {stats['fragmentation']['mean']:.3f} ± {stats['fragmentation']['std']:.3f}"
+        )
         print(f"  Recency bias: {stats['recency']['mean']:.3f} ± {stats['recency']['std']:.3f}")
-        print(f"  Loop strength: {stats['loop_strength']['mean']:.3f} ± {stats['loop_strength']['std']:.3f}")
+        print(
+            f"  Loop strength: {stats['loop_strength']['mean']:.3f} ± {stats['loop_strength']['std']:.3f}"
+        )
 
     # Detect laminar→turbulent transition
     print(f"\n{'-'*80}")
-    print(f"LAMINAR → TURBULENT DIAGNOSIS")
+    print("LAMINAR → TURBULENT DIAGNOSIS")
     print(f"{'-'*80}")
 
     phases_sorted = sorted(phase_summary.keys())
     if len(phases_sorted) >= 2:
         for i in range(len(phases_sorted) - 1):
             phase1 = phases_sorted[i]
-            phase2 = phases_sorted[i+1]
+            phase2 = phases_sorted[i + 1]
             stats1 = phase_summary[phase1]
             stats2 = phase_summary[phase2]
 
@@ -230,10 +237,11 @@ def main():
             frag_increase = stats2["fragmentation"]["mean"] - stats1["fragmentation"]["mean"]
             reward_drop = stats2["reward"]["mean"] - stats1["reward"]["mean"]
 
-            if (abs(entropy_increase) > 0.5 or
-                abs(collapse_increase) > 0.2 or
-                abs(frag_increase) > 0.2) and reward_drop < -0.1:
-
+            if (
+                abs(entropy_increase) > 0.5
+                or abs(collapse_increase) > 0.2
+                or abs(frag_increase) > 0.2
+            ) and reward_drop < -0.1:
                 print(f"\n⚠️  TURBULENCE DETECTED: Phase {phase1} → Phase {phase2}")
                 print(f"   Reward dropped: {reward_drop:+.3f}")
                 print(f"   Entropy changed: {entropy_increase:+.3f}")
@@ -241,14 +249,14 @@ def main():
                 print(f"   Fragmentation changed: {frag_increase:+.3f}")
 
                 if frag_increase > 0.2:
-                    print(f"   → Attention FRAGMENTATION: heads attending randomly")
-                    print(f"   → Likely cause: conflicting gradient directions")
+                    print("   → Attention FRAGMENTATION: heads attending randomly")
+                    print("   → Likely cause: conflicting gradient directions")
                 elif collapse_increase > 0.2:
-                    print(f"   → Attention COLLAPSE: all heads attending to same tokens")
-                    print(f"   → Likely cause: gradient saturation or mode collapse")
+                    print("   → Attention COLLAPSE: all heads attending to same tokens")
+                    print("   → Likely cause: gradient saturation or mode collapse")
                 elif abs(entropy_increase) > 0.5:
-                    print(f"   → Attention PATTERN SHIFT: sudden change in attention strategy")
-                    print(f"   → Likely cause: phase transition introducing new objectives")
+                    print("   → Attention PATTERN SHIFT: sudden change in attention strategy")
+                    print("   → Likely cause: phase transition introducing new objectives")
 
     print(f"\n{'='*80}")
 

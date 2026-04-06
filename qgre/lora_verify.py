@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 
 class WeightSyncable(Protocol):
@@ -57,7 +57,7 @@ class LoRAVerifier:
             raise ValueError(
                 f"LoRA weight mismatch after sync! "
                 f"Expected hash {self._last_save_hash[:16]}..., "
-                f"got {current_hash[:16]}..."
+                f"got {current_hash[:16]}...",
             )
 
         self._last_save_hash = current_hash
@@ -102,29 +102,30 @@ class LoRAVerifier:
         Raises:
             RuntimeError: On unexpected errors (not OOM or generation failures)
         """
-        import torch
         import warnings
+
+        import torch
 
         # Pre-validation: check model and tokenizer have required methods
         if not hasattr(tokenizer, "encode"):
-            warnings.warn("LoRA verify_active: tokenizer lacks encode method")
+            warnings.warn("LoRA verify_active: tokenizer lacks encode method", stacklevel=2)
             return False
         if not hasattr(model, "generate"):
-            warnings.warn("LoRA verify_active: model lacks generate method")
+            warnings.warn("LoRA verify_active: model lacks generate method", stacklevel=2)
             return False
         if not hasattr(model, "parameters"):
-            warnings.warn("LoRA verify_active: model lacks parameters method")
+            warnings.warn("LoRA verify_active: model lacks parameters method", stacklevel=2)
             return False
 
         # Pre-check: ensure model has parameters before accessing device
         try:
             params = list(model.parameters())
             if not params:
-                warnings.warn("LoRA verify_active: model has no parameters")
+                warnings.warn("LoRA verify_active: model has no parameters", stacklevel=2)
                 return False
             device = params[0].device
         except StopIteration:
-            warnings.warn("LoRA verify_active: model parameters iterator empty")
+            warnings.warn("LoRA verify_active: model parameters iterator empty", stacklevel=2)
             return False
 
         try:
@@ -137,11 +138,13 @@ class LoRAVerifier:
         except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
             # Known inference failures — return False is appropriate
             if "out of memory" in str(e).lower() or "CUDA" in str(e):
-                warnings.warn(f"LoRA verify_active: generation failed (OOM/CUDA): {e}")
+                warnings.warn(
+                    f"LoRA verify_active: generation failed (OOM/CUDA): {e}", stacklevel=2
+                )
                 return False
             # Other RuntimeError — re-raise
             raise
         except (AttributeError, TypeError) as e:
             # Model/tokenizer API issues — warn and return False
-            warnings.warn(f"LoRA verify_active: API error: {e}")
+            warnings.warn(f"LoRA verify_active: API error: {e}", stacklevel=2)
             return False

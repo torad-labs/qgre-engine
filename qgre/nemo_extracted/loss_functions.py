@@ -48,7 +48,11 @@ def apply_eligibility_traces(
         adv_t = advantages[:, t]
         if torch.isnan(adv_t).any():
             import warnings
-            warnings.warn(f"NaN detected in eligibility trace at position {t}. Replacing with 0.0")
+
+            warnings.warn(
+                f"NaN detected in eligibility trace at position {t}. Replacing with 0.0",
+                stacklevel=2,
+            )
             adv_t = torch.where(torch.isnan(adv_t), torch.zeros_like(adv_t), adv_t)
         trace = adv_t + lambda_val * trace
         traces[:, t] = trace
@@ -127,7 +131,8 @@ class ClippedPGLossFn:
             log_ratios = curr_logprobs - prev_logprobs
             ratios = log_ratios.exp()
             ratios_clamped = ratios.clamp(
-                1.0 - self.ratio_clip_min, 1.0 + self.ratio_clip_max
+                1.0 - self.ratio_clip_min,
+                1.0 + self.ratio_clip_max,
             )
 
         # GRPO-λ eligibility traces: weight advantages by accumulated log-prob traces
@@ -149,16 +154,24 @@ class ClippedPGLossFn:
         # Importance sampling correction (ratio: π_current / π_generation)
         if self.use_importance_sampling_correction:
             importance_weights = torch.exp(curr_logprobs.detach() - prev_logprobs).detach()
-            importance_weights = torch.nan_to_num(importance_weights, nan=0.0, posinf=0.0, neginf=0.0)
+            importance_weights = torch.nan_to_num(
+                importance_weights, nan=0.0, posinf=0.0, neginf=0.0
+            )
             # Clamp to prevent underflow (silent zero gradients)
             # RL3-006: Track when clamping occurs
             clamped_mask = importance_weights < 1e-8
             if clamped_mask.any():
                 import warnings
-                warnings.warn(f"RL3-006: {clamped_mask.sum().item()} importance weights clamped to minimum (1e-8). Gradients may be suppressed.")
+
+                warnings.warn(
+                    f"RL3-006: {clamped_mask.sum().item()} importance weights clamped to minimum (1e-8). Gradients may be suppressed.",
+                    stacklevel=2,
+                )
             importance_weights = importance_weights.clamp(min=1e-8)
             if self.truncated_importance_sampling_ratio is not None:
-                importance_weights = importance_weights.clamp(max=self.truncated_importance_sampling_ratio)
+                importance_weights = importance_weights.clamp(
+                    max=self.truncated_importance_sampling_ratio
+                )
         else:
             importance_weights = torch.ones_like(prev_logprobs)
 
@@ -193,12 +206,17 @@ class ClippedPGLossFn:
             # Region-specific KL: scale penalty per-token by region weights (THR-style)
             # THINK=0.1 (explore), FORMAT=2.0 (lock), STEP=1.0 (normal)
             region_scale = kl_region_weights if kl_region_weights is not None else 1.0
-            kl = kl_weights * self.reference_policy_kl_penalty * region_scale * calculate_kl(
-                logprobs=curr_logprobs,
-                logprobs_reference=reference_logprobs,
-                kl_type=self.reference_policy_kl_type,
-                input_clamp_value=self.kl_input_clamp_value,
-                output_clamp_value=self.kl_output_clamp_value,
+            kl = (
+                kl_weights
+                * self.reference_policy_kl_penalty
+                * region_scale
+                * calculate_kl(
+                    logprobs=curr_logprobs,
+                    logprobs_reference=reference_logprobs,
+                    kl_type=self.reference_policy_kl_type,
+                    input_clamp_value=self.kl_input_clamp_value,
+                    output_clamp_value=self.kl_output_clamp_value,
+                )
             )
             kl_loss = masked_mean(kl, mask, global_normalization_factor=global_valid_toks)
         else:
@@ -208,10 +226,14 @@ class ClippedPGLossFn:
 
         with torch.no_grad():
             ratio_mean = masked_mean(
-                ratios.detach(), mask, global_normalization_factor=global_valid_toks,
+                ratios.detach(),
+                mask,
+                global_normalization_factor=global_valid_toks,
             ).item()
             ratio_clamped_mean = masked_mean(
-                ratios_clamped.detach(), mask, global_normalization_factor=global_valid_toks,
+                ratios_clamped.detach(),
+                mask,
+                global_normalization_factor=global_valid_toks,
             ).item()
             metrics = {
                 "loss": loss.item(),

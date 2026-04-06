@@ -1,9 +1,10 @@
 """Tests for LLDS (Lazy Likelihood Displacement Stabilization) integration."""
 
-import torch
 import pytest
-from qgre.nemo_extracted.llds import compute_llds_loss
+import torch
+
 from qgre.generation import GenerationOutput
+from qgre.nemo_extracted.llds import compute_llds_loss
 
 
 class TestLLDSLoss:

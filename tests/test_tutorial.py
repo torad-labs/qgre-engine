@@ -1,12 +1,9 @@
 """Tests for the tutorial skill tree system."""
 
-import random
-from collections import deque
-
 import pytest
 
-from qgre.config import TutorialConfig, SkillConfig
-from qgre.types import GameState, SkillNode, SkillStatus
+from qgre.config import SkillConfig, TutorialConfig
+from qgre.types import GameState, SkillStatus
 
 
 # ─── Fixtures ───
@@ -65,8 +62,20 @@ def make_skill_tree_config():
 
 def make_game_state(config=None):
     config = config or make_skill_tree_config()
-    all_ids = ["ff_1", "ff_2", "ff_3", "sp_1", "sp_2", "sp_3",
-               "gs_1", "gs_2", "ds_1", "ds_2", "do_1", "untracked_1"]
+    all_ids = [
+        "ff_1",
+        "ff_2",
+        "ff_3",
+        "sp_1",
+        "sp_2",
+        "sp_3",
+        "gs_1",
+        "gs_2",
+        "ds_1",
+        "ds_2",
+        "do_1",
+        "untracked_1",
+    ]
     gs = GameState()
     gs.init_tutorial(config, all_ids)
     return gs
@@ -142,8 +151,10 @@ class TestDAGValidation:
             enabled=True,
             skill_tree={
                 "a": SkillConfig(
-                    prompts=["p1"], prerequisites=[],
-                    mastery_threshold=0.8, regression_threshold=0.9,
+                    prompts=["p1"],
+                    prerequisites=[],
+                    mastery_threshold=0.8,
+                    regression_threshold=0.9,
                 ),
             },
         )
@@ -156,8 +167,10 @@ class TestDAGValidation:
             enabled=True,
             skill_tree={
                 "a": SkillConfig(
-                    prompts=["p1"], prerequisites=[],
-                    mastery_threshold=0.8, regression_threshold=0.8,
+                    prompts=["p1"],
+                    prerequisites=[],
+                    mastery_threshold=0.8,
+                    regression_threshold=0.8,
                 ),
             },
         )
@@ -391,8 +404,20 @@ class TestPromptFiltering:
     def test_untracked_excluded_when_disabled(self):
         config = make_skill_tree_config()
         config.untracked_always_active = False
-        all_ids = ["ff_1", "ff_2", "ff_3", "sp_1", "sp_2", "sp_3",
-                   "gs_1", "gs_2", "ds_1", "ds_2", "do_1", "untracked_1"]
+        all_ids = [
+            "ff_1",
+            "ff_2",
+            "ff_3",
+            "sp_1",
+            "sp_2",
+            "sp_3",
+            "gs_1",
+            "gs_2",
+            "ds_1",
+            "ds_2",
+            "do_1",
+            "untracked_1",
+        ]
         gs = GameState()
         gs.init_tutorial(config, all_ids)
         active = gs.get_active_prompts()
@@ -406,9 +431,12 @@ class TestPromptFiltering:
             untracked_always_active=False,
             skill_tree={
                 "only": SkillConfig(
-                    prompts=["p1"], prerequisites=[],
-                    mastery_threshold=0.85, regression_threshold=0.65,
-                    mastery_window=2, review_probability=0.0,  # 0 review = never sampled
+                    prompts=["p1"],
+                    prerequisites=[],
+                    mastery_threshold=0.85,
+                    regression_threshold=0.65,
+                    mastery_window=2,
+                    review_probability=0.0,  # 0 review = never sampled
                 ),
             },
         )
@@ -429,9 +457,12 @@ class TestPromptFiltering:
             untracked_always_active=False,
             skill_tree={
                 "only": SkillConfig(
-                    prompts=["p1"], prerequisites=[],
-                    mastery_threshold=0.85, regression_threshold=0.65,
-                    mastery_window=2, review_probability=0.0,
+                    prompts=["p1"],
+                    prerequisites=[],
+                    mastery_threshold=0.85,
+                    regression_threshold=0.65,
+                    mastery_window=2,
+                    review_probability=0.0,
                 ),
             },
         )
@@ -449,9 +480,12 @@ class TestPromptFiltering:
             untracked_always_active=False,
             skill_tree={
                 "only": SkillConfig(
-                    prompts=["p1"], prerequisites=[],
-                    mastery_threshold=0.85, regression_threshold=0.65,
-                    mastery_window=2, review_probability=0.0,
+                    prompts=["p1"],
+                    prerequisites=[],
+                    mastery_threshold=0.85,
+                    regression_threshold=0.65,
+                    mastery_window=2,
+                    review_probability=0.0,
                 ),
             },
         )
@@ -598,12 +632,19 @@ class TestTutorialDisabled:
 
 class TestConfigParsing:
     def test_tutorial_config_from_yaml(self):
-        from qgre.config import QGREConfig
         import tempfile
+
         import yaml
 
+        from qgre.config import QGREConfig
+
         config_dict = {
-            "model": {"path": "test", "pad_token": "<pad>", "pad_token_id": 0, "lora_target_modules": ["q_proj"]},
+            "model": {
+                "path": "test",
+                "pad_token": "<pad>",
+                "pad_token_id": 0,
+                "lora_target_modules": ["q_proj"],
+            },
             "data": {"train_files": ["dummy.parquet"]},
             "generation": {"stop_token_ids": [2]},
             "tutorial": {
@@ -636,12 +677,19 @@ class TestConfigParsing:
         assert cfg.tutorial.skill_tree["skill_b"].prerequisites == ["skill_a"]
 
     def test_invalid_post_mastery_behavior_raises(self):
-        from qgre.config import QGREConfig
         import tempfile
+
         import yaml
 
+        from qgre.config import QGREConfig
+
         config_dict = {
-            "model": {"path": "test", "pad_token": "<pad>", "pad_token_id": 0, "lora_target_modules": ["q_proj"]},
+            "model": {
+                "path": "test",
+                "pad_token": "<pad>",
+                "pad_token_id": 0,
+                "lora_target_modules": ["q_proj"],
+            },
             "data": {"train_files": ["dummy.parquet"]},
             "generation": {"stop_token_ids": [2]},
             "tutorial": {
@@ -709,6 +757,7 @@ class TestConfigParsing:
 
     def test_tutorial_defaults_disabled(self):
         from qgre.config import QGREConfig
+
         cfg = QGREConfig()
         assert not cfg.tutorial.enabled
         assert cfg.tutorial.skill_tree == {}
@@ -720,23 +769,36 @@ class TestConfigParsing:
 class TestIntegration:
     def test_tutorial_with_aspiration_gap(self):
         """Per-skill aspiration targets flow through compute_advantages."""
-        import torch
         from qgre.advantages import QGREStepAdvantageEstimator
         from qgre.types import PromptContext, RewardResult
 
         step_qualities = {1: ["q_format"], 2: ["q_accuracy"]}
         estimator = QGREStepAdvantageEstimator(
-            lr=0.1, mode="spo", step_qualities=step_qualities,
+            lr=0.1,
+            mode="spo",
+            step_qualities=step_qualities,
         )
         estimator._aspiration_beta = 0.5
         estimator._aspiration_target = 0.8  # Global default
 
         # Two prompts: one from freefall (target=0.85), one from gravity_spring (target=0.75)
         contexts = [
-            PromptContext(prompt_id=1, skill_key="freefall", tier="t1",
-                         aspiration_target=0.85, aspiration_warmup=1.0, is_active=True),
-            PromptContext(prompt_id=2, skill_key="gravity_spring", tier="t1",
-                         aspiration_target=0.75, aspiration_warmup=1.0, is_active=True),
+            PromptContext(
+                prompt_id=1,
+                skill_key="freefall",
+                tier="t1",
+                aspiration_target=0.85,
+                aspiration_warmup=1.0,
+                is_active=True,
+            ),
+            PromptContext(
+                prompt_id=2,
+                skill_key="gravity_spring",
+                tier="t1",
+                aspiration_target=0.75,
+                aspiration_warmup=1.0,
+                is_active=True,
+            ),
         ]
 
         rr1 = RewardResult(reward=0.5, scores={"q_format": 0.5, "q_accuracy": 0.5})
@@ -764,20 +826,27 @@ class TestIntegration:
 
     def test_tutorial_with_aspiration_untracked_uses_global(self):
         """Untracked prompts use global aspiration target, not per-skill."""
-        import torch
         from qgre.advantages import QGREStepAdvantageEstimator
         from qgre.types import PromptContext, RewardResult
 
         step_qualities = {1: ["q_format"]}
         estimator = QGREStepAdvantageEstimator(
-            lr=0.1, mode="spo", step_qualities=step_qualities,
+            lr=0.1,
+            mode="spo",
+            step_qualities=step_qualities,
         )
         estimator._aspiration_beta = 0.5
         estimator._aspiration_target = 0.8
 
         # Untracked prompt → should use global default 0.8
-        ctx = PromptContext(prompt_id=99, skill_key=None, tier="default",
-                            aspiration_target=0.8, aspiration_warmup=1.0, is_active=True)
+        ctx = PromptContext(
+            prompt_id=99,
+            skill_key=None,
+            tier="default",
+            aspiration_target=0.8,
+            aspiration_warmup=1.0,
+            is_active=True,
+        )
         rr = RewardResult(reward=0.5, scores={"q_format": 0.5})
 
         advs, _ = estimator.compute_advantages(
@@ -872,11 +941,11 @@ class TestIntegration:
         """get_tutorial_metrics includes active_prompt_pool_size and aspiration_target."""
         gs = make_game_state()
         metrics = gs.get_tutorial_metrics()
-        assert 'tutorial/active_prompt_pool_size' in metrics
-        assert metrics['tutorial/active_prompt_pool_size'] > 0
-        assert 'tutorial/skill/freefall/aspiration_target' in metrics
-        assert metrics['tutorial/skill/freefall/aspiration_target'] == 0.85
-        assert metrics['tutorial/skill/gravity_spring/aspiration_target'] == 0.75
+        assert "tutorial/active_prompt_pool_size" in metrics
+        assert metrics["tutorial/active_prompt_pool_size"] > 0
+        assert "tutorial/skill/freefall/aspiration_target" in metrics
+        assert metrics["tutorial/skill/freefall/aspiration_target"] == 0.85
+        assert metrics["tutorial/skill/gravity_spring/aspiration_target"] == 0.75
 
 
 # ─── Learnability-Based Advancement Tests ───

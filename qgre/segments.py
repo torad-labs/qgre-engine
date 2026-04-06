@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from functools import partial
-from typing import Any, Callable
+from typing import Any
 
 import torch
+
 
 # --- Segmenter protocol ---
 # A segmenter takes token IDs and returns region labels (same length).
@@ -119,7 +121,10 @@ def _hif_json_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
     # Pre-validation: check tokenizer has decode method
     if not hasattr(tokenizer, "decode"):
         import warnings
-        warnings.warn("Segmenter: tokenizer lacks decode method — returning default regions")
+
+        warnings.warn(
+            "Segmenter: tokenizer lacks decode method — returning default regions", stacklevel=2
+        )
         return ["STEP_5"] * len(token_ids)
 
     n = len(token_ids)
@@ -143,11 +148,13 @@ def _hif_json_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
     # Build character→token index mapping
     try:
         text = tokenizer.decode(token_ids, skip_special_tokens=False)
-    except Exception as e:
+    except (ValueError, TypeError, RuntimeError) as e:
         import warnings
+
         warnings.warn(
             f"Segmenter full decode failed for {len(token_ids)} tokens: {e}. "
-            f"Falling back to think-annotated + STEP_5 default."
+            f"Falling back to think-annotated + STEP_5 default.",
+            stacklevel=2,
         )
         return regions  # If decode fails, return think-annotated + STEP_5 default
 
@@ -159,18 +166,20 @@ def _hif_json_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
             token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
         except (torch.cuda.OutOfMemoryError, MemoryError):
             raise  # Never swallow OOM — let it crash so we can diagnose
-        except Exception:
+        except (ValueError, TypeError, RuntimeError):
             token_texts.append("")
             decode_failures += 1
     # DP2-009: Track decode failure count, warn if > threshold
     if decode_failures > 0:
         import warnings
+
         failure_rate = decode_failures / len(token_ids) if token_ids else 0
         if failure_rate > 0.05:  # Warn if >5% failures
             warnings.warn(
                 f"Segmenter per-token decode: {decode_failures}/{len(token_ids)} failures "
                 f"({failure_rate*100:.1f}%). Region mapping may be inaccurate. "
-                "Check tokenizer compatibility."
+                "Check tokenizer compatibility.",
+                stacklevel=2,
             )
 
     # Build char_offset → token_index mapping
@@ -190,7 +199,7 @@ def _hif_json_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
     # Sort by position and assign regions between section markers
     section_spans.sort(key=lambda x: x[0])
 
-    for idx, (start_char, end_char, region) in enumerate(section_spans):
+    for idx, (start_char, _end_char, region) in enumerate(section_spans):
         # Region extends from this key to the next key (or end of text)
         region_end_char = section_spans[idx + 1][0] if idx + 1 < len(section_spans) else len(text)
 
@@ -203,9 +212,10 @@ def _hif_json_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
         # AE-R2-04: Log warning when truncation happens
         if truncation_occurred:
             import logging
+
             logging.getLogger(__name__).warning(
                 f"Region '{region}' truncated: region_end_char={region_end_char} > len(char_to_token)={len(char_to_token)}. "
-                "Some region tokens may be lost."
+                "Some region tokens may be lost.",
             )
 
     return regions
@@ -250,14 +260,13 @@ def _strip_markdown_prefix(line: str) -> str:
     """Strip markdown formatting from start of line (headers, bold, etc.)."""
     s = line.lstrip()
     # Strip leading # headers
-    while s.startswith('#'):
+    while s.startswith("#"):
         s = s[1:]
     s = s.lstrip()
     # Strip leading ** or * (bold/italic)
-    while s.startswith('*'):
+    while s.startswith("*"):
         s = s[1:]
-    s = s.lstrip()
-    return s
+    return s.lstrip()
 
 
 def _match_hamiltonian_label(line: str) -> tuple[str, int] | None:
@@ -273,10 +282,10 @@ def _match_hamiltonian_label(line: str) -> tuple[str, int] | None:
         for name in all_names:
             if cleaned.startswith(name):
                 # Must be followed by : (possibly with trailing ** from markdown)
-                rest = cleaned[len(name):].lstrip('*').lstrip()
-                if rest.startswith(':'):
+                rest = cleaned[len(name) :].lstrip("*").lstrip()
+                if rest.startswith(":"):
                     # Find colon position in original line
-                    colon_idx = line.find(':')
+                    colon_idx = line.find(":")
                     if colon_idx >= 0:
                         return (canonical, colon_idx)
     return None
@@ -295,7 +304,11 @@ def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[st
     # Pre-validation: check tokenizer has decode method
     if not hasattr(tokenizer, "decode"):
         import warnings
-        warnings.warn("Hamiltonian segmenter: tokenizer lacks decode method — returning default regions")
+
+        warnings.warn(
+            "Hamiltonian segmenter: tokenizer lacks decode method — returning default regions",
+            stacklevel=2,
+        )
         return ["STEP_1"] * len(token_ids)
 
     n = len(token_ids)
@@ -318,11 +331,13 @@ def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[st
     # Pass 2: Decode and find label positions
     try:
         text = tokenizer.decode(token_ids, skip_special_tokens=False)
-    except Exception as e:
+    except (ValueError, TypeError, RuntimeError) as e:
         import warnings
+
         warnings.warn(
             f"Hamiltonian segmenter full decode failed for {len(token_ids)} tokens: {e}. "
-            f"Falling back to think-annotated + STEP_1 default."
+            f"Falling back to think-annotated + STEP_1 default.",
+            stacklevel=2,
         )
         return regions
 
@@ -334,13 +349,15 @@ def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[st
             token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
         except (torch.cuda.OutOfMemoryError, MemoryError):
             raise  # Never swallow OOM — let it crash so we can diagnose
-        except Exception:
+        except (ValueError, TypeError, RuntimeError):
             token_texts.append("")
             decode_failures += 1
     if decode_failures > 0:
         import warnings
+
         warnings.warn(
-            f"Hamiltonian segmenter per-token decode: {decode_failures}/{len(token_ids)} failures."
+            f"Hamiltonian segmenter per-token decode: {decode_failures}/{len(token_ids)} failures.",
+            stacklevel=2,
         )
 
     char_to_token = []
@@ -351,7 +368,7 @@ def _hamiltonian_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[st
     # Find label positions using exact string matching (no regex)
     label_spans: list[tuple[int, str]] = []  # (start_char, region)
     char_pos = 0
-    for line in text.split('\n'):
+    for line in text.split("\n"):
         match = _match_hamiltonian_label(line)
         if match:
             canonical_label, _ = match
@@ -391,6 +408,7 @@ def make_hamiltonian_segmenter(tokenizer: Any) -> Segmenter:
 
 # --- Generic label segmenter (config-driven) ---
 
+
 def _label_segmenter_impl(
     token_ids: list[int],
     tokenizer: Any,
@@ -409,7 +427,11 @@ def _label_segmenter_impl(
     # Pre-validation: check tokenizer has decode method
     if not hasattr(tokenizer, "decode"):
         import warnings
-        warnings.warn(f"Label segmenter: tokenizer lacks decode method — returning {default_region} for all tokens")
+
+        warnings.warn(
+            f"Label segmenter: tokenizer lacks decode method — returning {default_region} for all tokens",
+            stacklevel=2,
+        )
         return [default_region] * len(token_ids)
 
     n = len(token_ids)
@@ -432,11 +454,13 @@ def _label_segmenter_impl(
     # Pass 2: Decode and find label positions
     try:
         text = tokenizer.decode(token_ids, skip_special_tokens=False)
-    except Exception as e:
+    except (ValueError, TypeError, RuntimeError) as e:
         import warnings
+
         warnings.warn(
             f"Label segmenter full decode failed for {len(token_ids)} tokens: {e}. "
-            f"Falling back to think-annotated + {default_region} default."
+            f"Falling back to think-annotated + {default_region} default.",
+            stacklevel=2,
         )
         return regions
 
@@ -448,13 +472,15 @@ def _label_segmenter_impl(
             token_texts.append(tokenizer.decode([tid], skip_special_tokens=False))
         except (torch.cuda.OutOfMemoryError, MemoryError):
             raise  # Never swallow OOM — let it crash so we can diagnose
-        except Exception:
+        except (ValueError, TypeError, RuntimeError):
             token_texts.append("")
             decode_failures += 1
     if decode_failures > 0:
         import warnings
+
         warnings.warn(
-            f"Label segmenter per-token decode: {decode_failures}/{len(token_ids)} failures."
+            f"Label segmenter per-token decode: {decode_failures}/{len(token_ids)} failures.",
+            stacklevel=2,
         )
 
     char_to_token = []
@@ -521,8 +547,13 @@ HYPERGRAPH_V1_STEP_QUALITIES: dict[int, list[str]] = {
     1: ["q_format_tags", "q_tag_content", "q_node_in_prompt", "q_node_format", "q_node_length"],
     2: ["q_chain_s2_refs_s1"],
     3: ["q_chain_s3_refs_s2", "q_self_consistency"],
-    4: ["q_step4_valid_json", "q_step4_has_keys", "q_existence_correct",
-        "q_archetype_correct", "q_node_f1"],
+    4: [
+        "q_step4_valid_json",
+        "q_step4_has_keys",
+        "q_existence_correct",
+        "q_archetype_correct",
+        "q_node_f1",
+    ],
 }
 
 # Global qualities: not step-specific, contribute to overall sequence reward only.

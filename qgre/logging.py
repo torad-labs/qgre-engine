@@ -80,12 +80,15 @@ class CompletionLogger:
             try:
                 self._file = open(path, "a")
                 self._step = step
-            except Exception as e:
+            except OSError as e:
                 # CP3-008: Restore state on failure
                 self._file = prev_file
                 self._step = prev_step
                 import warnings
-                warnings.warn(f"CP3-008: Failed to open log file {path}: {e}. Log not written.")
+
+                warnings.warn(
+                    f"CP3-008: Failed to open log file {path}: {e}. Log not written.", stacklevel=2
+                )
                 return
 
         record = {

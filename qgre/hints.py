@@ -19,8 +19,12 @@ Example: Hamiltonian maps STEP_5 → H_expr, STEP_3 → T_expr, etc.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass, field
-from typing import Any, Callable, Protocol
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class HintExtractor(Protocol):
@@ -31,13 +35,14 @@ class HintExtractor(Protocol):
 
     Returns None if no hint is available for this span.
     """
-    def __call__(self, span_id: str, metadata: dict[str, Any]) -> str | None:
-        ...
+
+    def __call__(self, span_id: str, metadata: dict[str, Any]) -> str | None: ...
 
 
 @dataclass
 class HintEntry:
     """A single hint entry in the registry."""
+
     prompt_id: int
     span_id: str  # e.g., "STEP_1", "STEP_2"
     hint_tokens: list[int]  # Token IDs to inject
@@ -74,7 +79,6 @@ class HintRegistry:
         # Key: (prompt_id, span_id) -> HintEntry
         self._hints: dict[tuple[int, str], HintEntry] = {}
         # R3-MIO-002: Add optional seed parameter, default to None for system random
-        import random
         if seed is None:
             self._random = random.Random()
         else:
@@ -172,7 +176,7 @@ class HintRegistry:
         """
         result = {}
         # H-7: Use list() copy to avoid mutation during iteration
-        for (pid, span_id), entry in list(self._hints.items()):
+        for (pid, span_id), _entry in list(self._hints.items()):
             if pid != prompt_id:
                 continue
             # Use mastery_fn to get CURRENT mastery for decay (not mastery_at_flag)
@@ -271,7 +275,8 @@ class HintRegistry:
         total_uses = sum(e.total_uses for e in self._hints.values())
         avg_success = (
             sum(e.success_count for e in self._hints.values()) / len(self._hints)
-            if self._hints else 0
+            if self._hints
+            else 0
         )
         return {
             "hint_count": len(self._hints),
@@ -282,6 +287,7 @@ class HintRegistry:
     def to_dict(self) -> dict[str, Any]:
         """Serialize registry for checkpointing."""
         import copy
+
         return {
             "mastery_threshold": self.mastery_threshold,
             "success_streak_to_clear": self.success_streak_to_clear,
@@ -307,12 +313,11 @@ class HintRegistry:
         See qgre/schema.py for HINT_REGISTRY_SCHEMA and HINT_ENTRY_SCHEMA.
         """
         import warnings
+
         from qgre.schema import (
-            validate_schema,
-            validate_field,
-            HINT_REGISTRY_SCHEMA,
             HINT_ENTRY_SCHEMA,
-            FieldSpec,
+            HINT_REGISTRY_SCHEMA,
+            validate_schema,
         )
 
         # Validate top-level registry structure
@@ -320,8 +325,8 @@ class HintRegistry:
             validated = validate_schema(data, HINT_REGISTRY_SCHEMA, "hint_registry")
         except (TypeError, ValueError) as e:
             warnings.warn(
-                f"SCHEMA: HintRegistry validation failed: {e}. "
-                "Returning empty registry."
+                f"SCHEMA: HintRegistry validation failed: {e}. " "Returning empty registry.",
+                stacklevel=2,
             )
             return cls()
 
@@ -335,7 +340,8 @@ class HintRegistry:
         if not isinstance(hints_data, list):
             warnings.warn(
                 f"SCHEMA: hints field is not a list (type: {type(hints_data).__name__}). "
-                "Skipping hint registry restoration."
+                "Skipping hint registry restoration.",
+                stacklevel=2,
             )
             return registry
 
@@ -367,20 +373,27 @@ class HintRegistry:
                     first_error_msg = str(e)
                     warnings.warn(
                         f"SCHEMA: HintEntry validation failed: {e}. "
-                        "Checkpoint may be corrupted or from incompatible version."
+                        "Checkpoint may be corrupted or from incompatible version.",
+                        stacklevel=2,
                     )
 
         if skipped_entries > 0:
             total_entries = len(hints_data)
-            all_corrupted = " ALL entries corrupted — hint registry is empty!" if skipped_entries == total_entries else ""
+            all_corrupted = (
+                " ALL entries corrupted — hint registry is empty!"
+                if skipped_entries == total_entries
+                else ""
+            )
             first_err = f" First error: {first_error_msg}" if skipped_entries > 1 else ""
             warnings.warn(
-                f"SCHEMA: HintRegistry skipped {skipped_entries}/{total_entries} entries.{first_err}{all_corrupted}"
+                f"SCHEMA: HintRegistry skipped {skipped_entries}/{total_entries} entries.{first_err}{all_corrupted}",
+                stacklevel=2,
             )
             if skipped_entries == total_entries and total_entries > 0:
                 warnings.warn(
                     f"SCHEMA: ALL {total_entries} hint entries failed validation. "
-                    "Returning empty registry (training will continue without hints)."
+                    "Returning empty registry (training will continue without hints).",
+                    stacklevel=2,
                 )
         return registry
 
@@ -408,6 +421,7 @@ def make_hamiltonian_hint_extractor() -> HintExtractor:
     Returns:
         HintExtractor function that extracts hint text from metadata.
     """
+
     def extractor(span_id: str, metadata: dict[str, Any]) -> str | None:
         if not metadata:
             return None
@@ -417,17 +431,17 @@ def make_hamiltonian_hint_extractor() -> HintExtractor:
             t_expr = metadata.get("T_expr")
             return f"T = {t_expr}" if t_expr else None
 
-        elif span_id == "STEP_4":
+        if span_id == "STEP_4":
             # POTENTIAL: V = ...
             v_expr = metadata.get("V_expr")
             return f"V = {v_expr}" if v_expr else None
 
-        elif span_id == "STEP_5":
+        if span_id == "STEP_5":
             # HAMILTONIAN: H = ...
             h_expr = metadata.get("H_expr")
             return f"H = {h_expr}" if h_expr else None
 
-        elif span_id == "STEP_6":
+        if span_id == "STEP_6":
             # EQUATIONS: extract dq/dt and dp/dt from ground_truth
             gt = metadata.get("ground_truth", "")
             if not gt:
@@ -464,6 +478,7 @@ def make_generic_hint_extractor(
             "STEP_2": "section_2_answer",
         }, field_format="Hint: {value}")
     """
+
     def extractor(span_id: str, metadata: dict[str, Any]) -> str | None:
         if not metadata:
             return None

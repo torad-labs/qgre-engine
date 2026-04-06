@@ -11,6 +11,7 @@ This diagnoses the "eddies forming" phenomenon in Phase 7.
 import json
 import sys
 from pathlib import Path
+
 import numpy as np
 
 
@@ -29,7 +30,7 @@ def detect_transitions(measurements: list) -> list:
     transitions = []
 
     for i in range(1, len(measurements)):
-        prev = measurements[i-1]
+        prev = measurements[i - 1]
         curr = measurements[i]
 
         # Detect sudden cosine drops (layers disagreeing)
@@ -42,25 +43,27 @@ def detect_transitions(measurements: list) -> list:
 
         # Flag significant transitions
         is_transition = (
-            cosine_delta < -0.2 or  # Large cosine drop
-            cosine_pct > 50 or  # Large relative change
-            norm_pct > 100  # Norm ratio doubled
+            cosine_delta < -0.2  # Large cosine drop
+            or cosine_pct > 50  # Large relative change
+            or norm_pct > 100  # Norm ratio doubled
         )
 
         if is_transition:
-            transitions.append({
-                "step": curr["step"],
-                "prev_phase": prev.get("phase", "unknown"),
-                "curr_phase": curr.get("phase", "unknown"),
-                "cosine_delta": cosine_delta,
-                "cosine_pct_change": cosine_pct,
-                "norm_ratio_delta": norm_delta,
-                "norm_ratio_pct_change": norm_pct,
-                "prev_reward": prev.get("reward", 0.0),
-                "curr_reward": curr.get("reward", 0.0),
-                "prev_loss": prev.get("loss", 0.0),
-                "curr_loss": curr.get("loss", 0.0),
-            })
+            transitions.append(
+                {
+                    "step": curr["step"],
+                    "prev_phase": prev.get("phase", "unknown"),
+                    "curr_phase": curr.get("phase", "unknown"),
+                    "cosine_delta": cosine_delta,
+                    "cosine_pct_change": cosine_pct,
+                    "norm_ratio_delta": norm_delta,
+                    "norm_ratio_pct_change": norm_pct,
+                    "prev_reward": prev.get("reward", 0.0),
+                    "curr_reward": curr.get("reward", 0.0),
+                    "prev_loss": prev.get("loss", 0.0),
+                    "curr_loss": curr.get("loss", 0.0),
+                }
+            )
 
     return transitions
 
@@ -143,7 +146,7 @@ def main():
     print("GRADIENT COHERENCE ANALYSIS — Laminar→Turbulent Detection")
     print("=" * 80)
 
-    print(f"\nConfiguration:")
+    print("\nConfiguration:")
     print(f"  Log frequency: every {config['log_freq']} steps")
     print(f"  Total measurements: {config['n_measurements']}")
 
@@ -165,7 +168,7 @@ def main():
     phase_summary = summarize_by_phase(measurements)
 
     print(f"\n{'-'*80}")
-    print(f"SUMMARY BY PHASE")
+    print("SUMMARY BY PHASE")
     print(f"{'-'*80}")
 
     for phase in sorted(phase_summary.keys()):
@@ -173,20 +176,26 @@ def main():
         print(f"\nPhase {phase} ({stats['n_measurements']} measurements):")
         print(f"  Reward: {stats['reward']['mean']:.3f} ± {stats['reward']['std']:.3f}")
         print(f"  Loss: {stats['loss']['mean']:.3f} ± {stats['loss']['std']:.3f}")
-        print(f"  Gradient alignment (cosine): {stats['cosine']['mean']:.3f} ± {stats['cosine']['std']:.3f}")
-        print(f"  Gradient norm ratio: {stats['norm_ratio']['mean']:.1f} ± {stats['norm_ratio']['std']:.1f}")
-        print(f"  Mean gradient norm: {stats['grad_norm']['mean']:.6f} ± {stats['grad_norm']['std']:.6f}")
+        print(
+            f"  Gradient alignment (cosine): {stats['cosine']['mean']:.3f} ± {stats['cosine']['std']:.3f}"
+        )
+        print(
+            f"  Gradient norm ratio: {stats['norm_ratio']['mean']:.1f} ± {stats['norm_ratio']['std']:.1f}"
+        )
+        print(
+            f"  Mean gradient norm: {stats['grad_norm']['mean']:.6f} ± {stats['grad_norm']['std']:.6f}"
+        )
 
     # Detect laminar→turbulent transition
     print(f"\n{'-'*80}")
-    print(f"LAMINAR → TURBULENT DIAGNOSIS")
+    print("LAMINAR → TURBULENT DIAGNOSIS")
     print(f"{'-'*80}")
 
     phases_sorted = sorted(phase_summary.keys())
     if len(phases_sorted) >= 2:
         for i in range(len(phases_sorted) - 1):
             phase1 = phases_sorted[i]
-            phase2 = phases_sorted[i+1]
+            phase2 = phases_sorted[i + 1]
             stats1 = phase_summary[phase1]
             stats2 = phase_summary[phase2]
 
@@ -202,11 +211,11 @@ def main():
                 print(f"   Norm ratio increased: {norm_ratio_increase:+.1f}")
 
                 if cosine_drop < -0.3:
-                    print(f"   → LAYERS DISAGREEING: gradients misaligned")
-                    print(f"   → \"Eddies forming\" — conflicting gradient directions")
+                    print("   → LAYERS DISAGREEING: gradients misaligned")
+                    print('   → "Eddies forming" — conflicting gradient directions')
                 if norm_ratio_increase > 20:
-                    print(f"   → GRADIENT INSTABILITY: some layers exploding, others vanishing")
-                    print(f"   → \"Energy dissipating\" — unstable optimization dynamics")
+                    print("   → GRADIENT INSTABILITY: some layers exploding, others vanishing")
+                    print('   → "Energy dissipating" — unstable optimization dynamics')
 
     print(f"\n{'='*80}")
 

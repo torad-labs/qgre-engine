@@ -3,7 +3,7 @@
 import torch
 
 from qgre.advantages import apply_egrs_matrix, compute_span_correctness
-from qgre.attention_bonds import compute_confidence_gate, compute_normalized_entropy
+from qgre.attention_bonds import compute_normalized_entropy
 from qgre.config import EGRSConfig, QGREConfig
 from qgre.hints import HintRegistry
 from qgre.types import RewardResult
@@ -49,7 +49,9 @@ def test_egrs_full_pipeline():
     )
     step_qualities = {1: ["q_step1"], 2: ["q_step2"], 3: ["q_step3"]}
     span_correctness = compute_span_correctness(
-        reward_result, step_qualities, threshold=egrs_cfg.reward_threshold
+        reward_result,
+        step_qualities,
+        threshold=egrs_cfg.reward_threshold,
     )
     assert span_correctness[1] is True, "Step 1 correct (0.8 >= 0.5)"
     assert span_correctness[2] is False, "Step 2 wrong (0.3 < 0.5)"
@@ -85,7 +87,7 @@ def test_egrs_full_pipeline():
 
     # Tokens 6-8: STEP_3 (correct), uncertain → Q1 (scaled advantage)
     assert modified_advs[8].item() > 0.5, f"Q1 should have scaled adv, got {modified_advs[8]}"
-    assert entropy_adj[8].item() == 0.0, f"Q1 should have no entropy adj"
+    assert entropy_adj[8].item() == 0.0, "Q1 should have no entropy adj"
 
     # No hint flags (Q3 doesn't flag, only Q4 does)
     assert len(hint_flags) == 0, f"No Q4 tokens expected, got {hint_flags}"
@@ -146,15 +148,19 @@ def test_egrs_entropy_loss_computation():
     """Test entropy loss computation matches expected formula."""
     batch, seq = 2, 5
     # Mock entropy adjustments (only Q3 tokens have non-zero)
-    entropy_adj = torch.tensor([
-        [0.0, 0.0, 0.1, 0.1, 0.0],  # Q3 at positions 2,3
-        [0.1, 0.0, 0.0, 0.0, 0.1],  # Q3 at positions 0,4
-    ])
+    entropy_adj = torch.tensor(
+        [
+            [0.0, 0.0, 0.1, 0.1, 0.0],  # Q3 at positions 2,3
+            [0.1, 0.0, 0.0, 0.0, 0.1],  # Q3 at positions 0,4
+        ]
+    )
     # Mock token entropy
-    token_entropy = torch.tensor([
-        [0.2, 0.5, 0.3, 0.4, 0.8],
-        [0.1, 0.6, 0.7, 0.2, 0.3],
-    ])
+    token_entropy = torch.tensor(
+        [
+            [0.2, 0.5, 0.3, 0.4, 0.8],
+            [0.1, 0.6, 0.7, 0.2, 0.3],
+        ]
+    )
     # Mask (all tokens valid)
     mask = torch.ones(batch, seq)
 
@@ -165,14 +171,14 @@ def test_egrs_entropy_loss_computation():
     # Sample 0: -0.1*0.3 + -0.1*0.4 = -0.07
     # Sample 1: -0.1*0.1 + -0.1*0.3 = -0.04
     # Total: -0.11
-    expected = -(0.1*0.3 + 0.1*0.4 + 0.1*0.1 + 0.1*0.3)
+    expected = -(0.1 * 0.3 + 0.1 * 0.4 + 0.1 * 0.1 + 0.1 * 0.3)
     assert abs(egrs_loss.item() - expected) < 0.001, f"Expected {expected}, got {egrs_loss.item()}"
 
 
 def test_egrs_mastery_decay_with_game_state():
     """Test that hint decay uses GameState tier_mastery for per-span decay."""
-    from qgre.types import GameState
     from qgre.hints import HintRegistry
+    from qgre.types import GameState
 
     # Create GameState with mastery data
     game_state = GameState()
@@ -203,6 +209,7 @@ def test_egrs_mastery_decay_with_game_state():
                 except (IndexError, ValueError):
                     return 0.0
             return 0.0
+
         return mastery_fn
 
     # Get hints with mastery decay (seed=42 ensures deterministic random)
@@ -234,7 +241,7 @@ def test_n_completions_aggregation():
     # Simulate n_completions=4 for same prompt
     # 3 succeed without hint, 1 fails
     outcomes = {
-        (1, "STEP_1"): {"success_no_hint": 3, "success_with_hint": 0, "failure": 1}
+        (1, "STEP_1"): {"success_no_hint": 3, "success_with_hint": 0, "failure": 1},
     }
 
     # ANY failure should trigger record_failure
@@ -248,11 +255,15 @@ def test_n_completions_aggregation():
     # Now simulate all 4 succeeding without hint
     registry.flag_for_hint(1, "STEP_1", [100], 0.0, 0)  # Re-flag
     outcomes2 = {
-        (1, "STEP_1"): {"success_no_hint": 4, "success_with_hint": 0, "failure": 0}
+        (1, "STEP_1"): {"success_no_hint": 4, "success_with_hint": 0, "failure": 0},
     }
 
     for (pid, span_id), counts in outcomes2.items():
-        if counts["failure"] == 0 and counts["success_no_hint"] > 0 and counts["success_with_hint"] == 0:
+        if (
+            counts["failure"] == 0
+            and counts["success_no_hint"] > 0
+            and counts["success_with_hint"] == 0
+        ):
             registry.record_success(pid, span_id, hint_was_used=False)
 
     assert registry._hints[(1, "STEP_1")].success_count == 1, "Should increment streak"
@@ -307,8 +318,9 @@ def test_hint_registry_checkpoint_roundtrip():
 
 def test_hint_extractor_with_tokenizer():
     """Test hint extraction produces valid tokens that can be decoded."""
-    from qgre.hints import make_hamiltonian_hint_extractor
     from transformers import AutoTokenizer
+
+    from qgre.hints import make_hamiltonian_hint_extractor
 
     # Use a real tokenizer (or mock if not available)
     try:
@@ -316,6 +328,7 @@ def test_hint_extractor_with_tokenizer():
     except Exception:
         # Skip if tokenizer not available
         import pytest
+
         pytest.skip("Tokenizer not available")
 
     extractor = make_hamiltonian_hint_extractor()
@@ -362,7 +375,7 @@ def test_egrs_config_hint_extractor_options():
     # Generic extractor with mapping
     cfg3 = EGRSConfig(
         hint_extractor="generic",
-        hint_extractor_mapping={"STEP_1": "answer_1", "STEP_2": "answer_2"}
+        hint_extractor_mapping={"STEP_1": "answer_1", "STEP_2": "answer_2"},
     )
     assert cfg3.hint_extractor == "generic"
     assert cfg3.hint_extractor_mapping["STEP_1"] == "answer_1"
@@ -370,8 +383,9 @@ def test_egrs_config_hint_extractor_options():
 
 def test_apply_egrs_matrix_all_quadrants():
     """Test that apply_egrs_matrix correctly handles all 4 quadrants."""
-    from qgre.advantages import apply_egrs_matrix
     import torch
+
+    from qgre.advantages import apply_egrs_matrix
 
     seq_len = 8
     token_advantages = torch.ones(seq_len)
@@ -429,7 +443,7 @@ def test_compute_span_correctness_edge_cases():
     # Normal case
     rr = RewardResult(
         reward=0.7,
-        scores={"q_step1": 0.8, "q_step2": 0.3, "q_step3": 0.6}
+        scores={"q_step1": 0.8, "q_step2": 0.3, "q_step3": 0.6},
     )
     step_qualities = {1: ["q_step1"], 2: ["q_step2"], 3: ["q_step3"]}
 
@@ -441,7 +455,7 @@ def test_compute_span_correctness_edge_cases():
     # Multiple qualities per step (all must pass)
     rr2 = RewardResult(
         reward=0.5,
-        scores={"q_a": 0.8, "q_b": 0.4, "q_c": 0.9}
+        scores={"q_a": 0.8, "q_b": 0.4, "q_c": 0.9},
     )
     step_qualities2 = {1: ["q_a", "q_b"]}  # q_b fails
     result2 = compute_span_correctness(rr2, step_qualities2, threshold=0.5)

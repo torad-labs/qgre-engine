@@ -1,7 +1,8 @@
 """Tests for VPRM Critic Polyak-averaged target network."""
 
-import torch
 import pytest
+import torch
+
 from qgre.critic import VPRMCritic
 from qgre.types import TrainingContext
 
@@ -29,7 +30,9 @@ class TestTargetNetworkInit:
 
     def test_target_heads_match_online_at_init(self, critic):
         for q in critic.quality_names:
-            for op, tp in zip(critic.heads[q].parameters(), critic.target_heads[q].parameters()):
+            for op, tp in zip(
+                critic.heads[q].parameters(), critic.target_heads[q].parameters(), strict=False
+            ):
                 assert torch.allclose(op.data, tp.data)
 
     def test_target_heads_no_grad(self, critic):
@@ -49,7 +52,9 @@ class TestPolyakAveraging:
         critic.update_target_network(tau=0.5)
 
         # After update: target should be midpoint between old target and online (1.0)
-        for tp, before in zip(critic.target_heads["q_format"].parameters(), target_before):
+        for tp, before in zip(
+            critic.target_heads["q_format"].parameters(), target_before, strict=False
+        ):
             expected = 0.5 * before + 0.5 * torch.ones_like(before)
             assert torch.allclose(tp.data, expected, atol=1e-6)
 
@@ -58,7 +63,7 @@ class TestPolyakAveraging:
         for param in critic.heads["q_format"].parameters():
             param.data.fill_(99.0)
         critic.update_target_network(tau=0.0)
-        for tp, b in zip(critic.target_heads["q_format"].parameters(), before):
+        for tp, b in zip(critic.target_heads["q_format"].parameters(), before, strict=False):
             assert torch.allclose(tp.data, b)
 
     def test_tau_one_full_copy(self, critic):
@@ -127,20 +132,26 @@ class TestCheckpointRoundTrip:
         restored = VPRMCritic.from_checkpoint(state)
 
         # Target should match
-        for tp_orig, tp_rest in zip(critic.target_heads["q_format"].parameters(),
-                                      restored.target_heads["q_format"].parameters()):
+        for tp_orig, tp_rest in zip(
+            critic.target_heads["q_format"].parameters(),
+            restored.target_heads["q_format"].parameters(),
+            strict=False,
+        ):
             assert torch.allclose(tp_orig.data, tp_rest.data)
 
     def test_old_checkpoint_without_target(self, critic):
         """Old checkpoint (no target_heads) should sync from online."""
         state = critic.state_dict_with_meta()
         # Remove target_heads keys to simulate old checkpoint
-        state["model_state"] = {k: v for k, v in state["model_state"].items()
-                                 if "target_heads" not in k}
+        state["model_state"] = {
+            k: v for k, v in state["model_state"].items() if "target_heads" not in k
+        }
 
         restored = VPRMCritic.from_checkpoint(state)
 
         # Target should match online (synced in from_checkpoint)
         for q in restored.quality_names:
-            for op, tp in zip(restored.heads[q].parameters(), restored.target_heads[q].parameters()):
+            for op, tp in zip(
+                restored.heads[q].parameters(), restored.target_heads[q].parameters(), strict=False
+            ):
                 assert torch.allclose(op.data, tp.data)

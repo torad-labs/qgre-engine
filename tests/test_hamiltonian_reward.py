@@ -1,6 +1,7 @@
 """Tests for Hamiltonian reward function — catch scoring bugs before training."""
 
 import pytest
+
 from examples.hamiltonian.reward_fn import hamiltonian_reward
 
 
@@ -159,8 +160,9 @@ class TestStructuredFormat:
     def test_velocity_form_T_scores_low(self):
         """T in velocity form (dx/dt)² instead of momentum form (p²) → q_T_uses_p should be low."""
         result = hamiltonian_reward(SPRING_PROMPT, VELOCITY_FORM, SPRING_META)
-        assert result.scores["q_T_uses_p"] <= 0.5, \
-            f"Velocity form T should score <= 0.5, got {result.scores['q_T_uses_p']}"
+        assert (
+            result.scores["q_T_uses_p"] <= 0.5
+        ), f"Velocity form T should score <= 0.5, got {result.scores['q_T_uses_p']}"
 
     def test_wrong_coefficient_gradient(self):
         """dp/dt = -3x instead of -6x → should score lower than correct."""
@@ -187,7 +189,11 @@ class TestMomentumForm:
 
     def test_momentum_with_numbers(self):
         text = "MOMENTUM: p = 3*dx/dt"
-        result = hamiltonian_reward(SPRING_PROMPT, f"COORDINATES: q = x\n{text}\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x", SPRING_META)
+        result = hamiltonian_reward(
+            SPRING_PROMPT,
+            f"COORDINATES: q = x\n{text}\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x",
+            SPRING_META,
+        )
         assert result.scores["q_momentum_defined"] >= 0.7
 
     def test_no_momentum_section(self):
@@ -203,8 +209,9 @@ class TestNumericalEquivalence:
         for H_form in ["p**2/6 + 3*x**2", "(1/6)*p**2 + 3*x**2", "3*x**2 + p**2/6"]:
             text = f"COORDINATES: q = x\nMOMENTUM: p = 3v\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = {H_form}\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6*x"
             result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-            assert result.scores["q_correct_H"] >= 0.9, \
-                f"H form '{H_form}' should score >= 0.9, got {result.scores['q_correct_H']}"
+            assert (
+                result.scores["q_correct_H"] >= 0.9
+            ), f"H form '{H_form}' should score >= 0.9, got {result.scores['q_correct_H']}"
 
 
 class TestScoreOrdering:
@@ -222,12 +229,15 @@ class TestScoreOrdering:
             result = hamiltonian_reward(SPRING_PROMPT, comp, SPRING_META)
             scores[name] = result.reward
 
-        assert scores["perfect"] > scores["wrong_coeff"], \
-            f"perfect ({scores['perfect']:.2f}) > wrong_coeff ({scores['wrong_coeff']:.2f})"
-        assert scores["wrong_coeff"] > scores["velocity_form"], \
-            f"wrong_coeff ({scores['wrong_coeff']:.2f}) > velocity_form ({scores['velocity_form']:.2f})"
-        assert scores["velocity_form"] > scores["garbage"], \
-            f"velocity_form ({scores['velocity_form']:.2f}) > garbage ({scores['garbage']:.2f})"
+        assert (
+            scores["perfect"] > scores["wrong_coeff"]
+        ), f"perfect ({scores['perfect']:.2f}) > wrong_coeff ({scores['wrong_coeff']:.2f})"
+        assert (
+            scores["wrong_coeff"] > scores["velocity_form"]
+        ), f"wrong_coeff ({scores['wrong_coeff']:.2f}) > velocity_form ({scores['velocity_form']:.2f})"
+        assert (
+            scores["velocity_form"] > scores["garbage"]
+        ), f"velocity_form ({scores['velocity_form']:.2f}) > garbage ({scores['garbage']:.2f})"
 
     def test_empty_scores_zero(self):
         result = hamiltonian_reward(SPRING_PROMPT, "", SPRING_META)
@@ -297,18 +307,16 @@ class TestGranularMomentumQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
         score = result.scores["q_defines_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score >= 0.8, (
-            f"Explicit Lagrangian notation should score >= 0.8, got {score}"
-        )
+        assert score >= 0.8, f"Explicit Lagrangian notation should score >= 0.8, got {score}"
 
     def test_implicit_definition_partial_credit(self):
         """p = 0.5θ̇ with no ∂L/∂θ̇ → q_defines_momentum partial credit [0.3, 0.7]."""
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_IMPLICIT_MOMENTUM, PENDULUM_META)
         score = result.scores["q_defines_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert 0.3 <= score <= 0.7, (
-            f"Implicit definition should score between 0.3 and 0.7, got {score}"
-        )
+        assert (
+            0.3 <= score <= 0.7
+        ), f"Implicit definition should score between 0.3 and 0.7, got {score}"
 
     def test_no_momentum_scores_zero(self):
         """Completion with no p definition → q_defines_momentum <= 0.1."""
@@ -316,9 +324,7 @@ class TestGranularMomentumQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, no_momentum, PENDULUM_META)
         score = result.scores["q_defines_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score <= 0.1, (
-            f"No momentum definition should score <= 0.1, got {score}"
-        )
+        assert score <= 0.1, f"No momentum definition should score <= 0.1, got {score}"
 
     # ── q_T_in_momentum ───────────────────────────────────────────────────────
 
@@ -327,18 +333,14 @@ class TestGranularMomentumQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
         score = result.scores["q_T_in_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score >= 0.8, (
-            f"T in momentum form should score >= 0.8, got {score}"
-        )
+        assert score >= 0.8, f"T in momentum form should score >= 0.8, got {score}"
 
     def test_T_velocity_form_scores_low(self):
         """T = 0.25θ̇² (velocity form) → q_T_in_momentum <= 0.3."""
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_VELOCITY_FORM, PENDULUM_META)
         score = result.scores["q_T_in_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score <= 0.3, (
-            f"T in velocity form should score <= 0.3, got {score}"
-        )
+        assert score <= 0.3, f"T in velocity form should score <= 0.3, got {score}"
 
     def test_T_mixed_partial(self):
         """T contains both p and θ̇ terms → q_T_in_momentum is partial (0.3, 0.8)."""
@@ -352,9 +354,9 @@ class TestGranularMomentumQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, mixed_T, PENDULUM_META)
         score = result.scores["q_T_in_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert 0.3 < score < 0.8, (
-            f"Mixed T (p² and θ̇²) should score between 0.3 and 0.8, got {score}"
-        )
+        assert (
+            0.3 < score < 0.8
+        ), f"Mixed T (p² and θ̇²) should score between 0.3 and 0.8, got {score}"
 
     # ── q_H_in_momentum ───────────────────────────────────────────────────────
 
@@ -363,18 +365,14 @@ class TestGranularMomentumQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
         score = result.scores["q_H_in_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score >= 0.8, (
-            f"H in momentum form should score >= 0.8, got {score}"
-        )
+        assert score >= 0.8, f"H in momentum form should score >= 0.8, got {score}"
 
     def test_H_velocity_form_scores_low(self):
         """H = 0.25θ̇² - 9.8cos(θ) (velocity form) → q_H_in_momentum <= 0.3."""
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_VELOCITY_FORM, PENDULUM_META)
         score = result.scores["q_H_in_momentum"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score <= 0.3, (
-            f"H in velocity form should score <= 0.3, got {score}"
-        )
+        assert score <= 0.3, f"H in velocity form should score <= 0.3, got {score}"
 
 
 class TestGranularCoefficientQualities:
@@ -390,9 +388,7 @@ class TestGranularCoefficientQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
         score = result.scores["q_correct_coefficient"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score >= 0.7, (
-            f"Correct coefficients should score >= 0.7, got {score}"
-        )
+        assert score >= 0.7, f"Correct coefficients should score >= 0.7, got {score}"
 
     def test_wrong_coefficient_scores_lower(self):
         """dp/dt = -4.9sin(θ) instead of -9.8sin(θ) → q_correct_coefficient < correct.
@@ -400,9 +396,7 @@ class TestGranularCoefficientQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_WRONG_DERIVATIVE, PENDULUM_META)
         score = result.scores["q_correct_coefficient"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score < 1.0, (
-            f"Wrong dp/dt coefficient should score < 1.0, got {score}"
-        )
+        assert score < 1.0, f"Wrong dp/dt coefficient should score < 1.0, got {score}"
 
     def test_coefficient_gradient(self):
         """Correct coefficients must score at least 0.2 higher than wrong coefficients."""
@@ -421,9 +415,7 @@ class TestGranularCoefficientQualities:
         result = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
         score = result.scores["q_derivative_correct"]
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
-        assert score >= 0.8, (
-            f"Correct derivatives should score >= 0.8, got {score}"
-        )
+        assert score >= 0.8, f"Correct derivatives should score >= 0.8, got {score}"
 
     def test_factor_of_two_error_distinct_signal(self):
         """dp/dt off by factor of 2 → q_derivative_correct gives a distinct mid-range signal."""
@@ -432,9 +424,9 @@ class TestGranularCoefficientQualities:
         assert 0.0 <= score <= 1.0, f"Score out of range: {score}"
         # Half the derivatives are right (dθ/dt is correct), half wrong (dp/dt off by 2)
         # Score should be in the middle range — not 0, not 1
-        assert 0.3 <= score <= 0.7, (
-            f"Factor-of-2 error should produce mid-range signal [0.3, 0.7], got {score}"
-        )
+        assert (
+            0.3 <= score <= 0.7
+        ), f"Factor-of-2 error should produce mid-range signal [0.3, 0.7], got {score}"
 
     def test_derivative_gradient(self):
         """Correct derivatives must score higher than wrong derivatives."""
@@ -457,17 +449,17 @@ class TestGranularOrdering:
         """Momentum form (p²) must score higher overall than velocity form (θ̇²)."""
         momentum = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
         velocity = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_VELOCITY_FORM, PENDULUM_META)
-        assert momentum.reward > velocity.reward, (
-            f"Momentum form ({momentum.reward:.3f}) should beat velocity form ({velocity.reward:.3f})"
-        )
+        assert (
+            momentum.reward > velocity.reward
+        ), f"Momentum form ({momentum.reward:.3f}) should beat velocity form ({velocity.reward:.3f})"
 
     def test_correct_derivative_beats_wrong(self):
         """Correct dp/dt must score higher overall than off-by-factor-of-2 dp/dt."""
         correct = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_EXPLICIT_MOMENTUM, PENDULUM_META)
         wrong = hamiltonian_reward(PENDULUM_PROMPT, PENDULUM_WRONG_DERIVATIVE, PENDULUM_META)
-        assert correct.reward > wrong.reward, (
-            f"Correct derivatives ({correct.reward:.3f}) should beat wrong ({wrong.reward:.3f})"
-        )
+        assert (
+            correct.reward > wrong.reward
+        ), f"Correct derivatives ({correct.reward:.3f}) should beat wrong ({wrong.reward:.3f})"
 
 
 class TestNeverCrash:
@@ -546,36 +538,56 @@ class TestRealModelOutputFormats:
         """Model writes equations as markdown bullets with LaTeX fractions."""
         text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n- $ \\frac{dq}{dt} = \\frac{p}{3} $\n- $ \\frac{dp}{dt} = -6x $"
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-        assert result.scores["q_correct_dqdt"] >= 0.7, f"Bullet LaTeX dqdt should extract, got {result.scores['q_correct_dqdt']}"
-        assert result.scores["q_correct_dpdt"] >= 0.7, f"Bullet LaTeX dpdt should extract, got {result.scores['q_correct_dpdt']}"
+        assert (
+            result.scores["q_correct_dqdt"] >= 0.7
+        ), f"Bullet LaTeX dqdt should extract, got {result.scores['q_correct_dqdt']}"
+        assert (
+            result.scores["q_correct_dpdt"] >= 0.7
+        ), f"Bullet LaTeX dpdt should extract, got {result.scores['q_correct_dpdt']}"
 
     def test_indented_latex_equations(self):
         """Model writes equations as indented LaTeX."""
         text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  $ \\frac{dq}{dt} = \\frac{p}{3} $\n  $ \\frac{dp}{dt} = -6x $"
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-        assert result.scores["q_correct_dqdt"] >= 0.7, f"Indented LaTeX dqdt should extract, got {result.scores['q_correct_dqdt']}"
-        assert result.scores["q_correct_dpdt"] >= 0.7, f"Indented LaTeX dpdt should extract, got {result.scores['q_correct_dpdt']}"
+        assert (
+            result.scores["q_correct_dqdt"] >= 0.7
+        ), f"Indented LaTeX dqdt should extract, got {result.scores['q_correct_dqdt']}"
+        assert (
+            result.scores["q_correct_dpdt"] >= 0.7
+        ), f"Indented LaTeX dpdt should extract, got {result.scores['q_correct_dpdt']}"
 
     def test_double_dollar_latex_equations(self):
         """Model writes equations in $$ display math blocks."""
         text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEquations:\n$$\n\\frac{dq}{dt} = \\frac{p}{3}\n$$\n$$\n\\frac{dp}{dt} = -6x\n$$"
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-        assert result.scores["q_correct_dqdt"] >= 0.5, f"Display math dqdt should extract, got {result.scores['q_correct_dqdt']}"
-        assert result.scores["q_correct_dpdt"] >= 0.5, f"Display math dpdt should extract, got {result.scores['q_correct_dpdt']}"
+        assert (
+            result.scores["q_correct_dqdt"] >= 0.5
+        ), f"Display math dqdt should extract, got {result.scores['q_correct_dqdt']}"
+        assert (
+            result.scores["q_correct_dpdt"] >= 0.5
+        ), f"Display math dpdt should extract, got {result.scores['q_correct_dpdt']}"
 
     def test_bold_markdown_labels(self):
         """Model wraps labels in ** bold markers."""
         text = "**COORDINATES:** q = x\n**MOMENTUM:** p = 3*dx/dt\n**KINETIC:** T = p²/6\n**POTENTIAL:** V = 3x²\n**HAMILTONIAN:** H = p²/6 + 3x²\n**EQUATIONS:**\n  dq/dt = p/3\n  dp/dt = -6x"
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-        assert result.scores["q_T_uses_p"] >= 0.7, f"Bold labels T should extract, got {result.scores['q_T_uses_p']}"
-        assert result.scores["q_correct_H"] >= 0.7, f"Bold labels H should extract, got {result.scores['q_correct_H']}"
+        assert (
+            result.scores["q_T_uses_p"] >= 0.7
+        ), f"Bold labels T should extract, got {result.scores['q_T_uses_p']}"
+        assert (
+            result.scores["q_correct_H"] >= 0.7
+        ), f"Bold labels H should extract, got {result.scores['q_correct_H']}"
 
     def test_hash_header_labels(self):
         """Model uses ### headers instead of plain labels."""
         text = "### COORDINATES: q = x\n### MOMENTUM: p = 3*dx/dt\n### KINETIC: T = p²/6\n### POTENTIAL: V = 3x²\n### HAMILTONIAN: H = p²/6 + 3x²\n### EQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-        assert result.scores["q_T_uses_p"] >= 0.7, f"Hash labels T should extract, got {result.scores['q_T_uses_p']}"
-        assert result.scores["q_correct_H"] >= 0.7, f"Hash labels H should extract, got {result.scores['q_correct_H']}"
+        assert (
+            result.scores["q_T_uses_p"] >= 0.7
+        ), f"Hash labels T should extract, got {result.scores['q_T_uses_p']}"
+        assert (
+            result.scores["q_correct_H"] >= 0.7
+        ), f"Hash labels H should extract, got {result.scores['q_correct_H']}"
 
     def test_derivation_then_labels(self):
         """Model writes long derivation first, then structured labels at the end.
@@ -600,23 +612,39 @@ EQUATIONS:
   dp/dt = -6x"""
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
         # Must extract from final labels, not derivation headers
-        assert result.scores["q_T_uses_p"] >= 0.7, f"Should extract last KINETIC (p form), got {result.scores['q_T_uses_p']}"
-        assert result.scores["q_correct_H"] >= 0.7, f"Should extract last HAMILTONIAN, got {result.scores['q_correct_H']}"
+        assert (
+            result.scores["q_T_uses_p"] >= 0.7
+        ), f"Should extract last KINETIC (p form), got {result.scores['q_T_uses_p']}"
+        assert (
+            result.scores["q_correct_H"] >= 0.7
+        ), f"Should extract last HAMILTONIAN, got {result.scores['q_correct_H']}"
 
     def test_incline_coordinate_s(self):
         """Model uses s instead of x for incline problems — extractors must handle."""
         text = "COORDINATES: q = s\nMOMENTUM: p = 2*ds/dt\nKINETIC: T = p²/4\nPOTENTIAL: V = -9.8*s\nHAMILTONIAN: H = p²/4 - 9.8*s\nEQUATIONS:\n  ds/dt = p/2\n  dp/dt = 9.8"
-        meta = {**SPRING_META, "H_expr": "p**2/4 - 49*s/5", "dqdt": "p/2", "dpdt": "49/5",
-                "T_expr": "p**2/4", "V_expr": "-49*s/5"}
+        meta = {
+            **SPRING_META,
+            "H_expr": "p**2/4 - 49*s/5",
+            "dqdt": "p/2",
+            "dpdt": "49/5",
+            "T_expr": "p**2/4",
+            "V_expr": "-49*s/5",
+        }
         result = hamiltonian_reward(SPRING_PROMPT, text, meta)
-        assert result.scores["q_correct_dqdt"] >= 0.7, f"s-coordinate dqdt should extract, got {result.scores['q_correct_dqdt']}"
+        assert (
+            result.scores["q_correct_dqdt"] >= 0.7
+        ), f"s-coordinate dqdt should extract, got {result.scores['q_correct_dqdt']}"
 
     def test_latex_frac_in_kinetic(self):
         """Model writes KINETIC with LaTeX \\frac{}{}."""
         text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: $ T = \\frac{p^2}{6} $\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-        assert result.scores["q_T_uses_p"] >= 0.7, f"LaTeX frac T should parse, got {result.scores['q_T_uses_p']}"
-        assert result.scores["q_correct_H"] >= 0.7, f"H should still work, got {result.scores['q_correct_H']}"
+        assert (
+            result.scores["q_T_uses_p"] >= 0.7
+        ), f"LaTeX frac T should parse, got {result.scores['q_T_uses_p']}"
+        assert (
+            result.scores["q_correct_H"] >= 0.7
+        ), f"H should still work, got {result.scores['q_correct_H']}"
 
 
 class TestLatex2SympyParsing:
@@ -624,60 +652,73 @@ class TestLatex2SympyParsing:
 
     def test_parse_math_latex_frac(self):
         """latex2sympy handles \\frac{}{} natively."""
-        from examples.hamiltonian.reward_fn import _parse_math
         import sympy as sp
+
+        from examples.hamiltonian.reward_fn import _parse_math
+
         result = _parse_math(r"\frac{p^2}{6}")
         assert result is not None
         p = sp.Symbol("p")
-        assert sp.simplify(result - p**2/6) == 0
+        assert sp.simplify(result - p**2 / 6) == 0
 
     def test_parse_math_nested_frac(self):
         """Nested fractions: \\frac{p^2}{2m} where m is a symbol."""
-        from examples.hamiltonian.reward_fn import _parse_math
         import sympy as sp
+
+        from examples.hamiltonian.reward_fn import _parse_math
+
         result = _parse_math(r"\frac{p^2}{2m}")
         assert result is not None
         p, m = sp.Symbol("p"), sp.Symbol("m")
-        assert sp.simplify(result - p**2/(2*m)) == 0
+        assert sp.simplify(result - p**2 / (2 * m)) == 0
 
     def test_parse_math_derivative_frac(self):
         """\\frac{dx}{dt} → Derivative(x, t)."""
-        from examples.hamiltonian.reward_fn import _parse_math
         import sympy as sp
+
+        from examples.hamiltonian.reward_fn import _parse_math
+
         result = _parse_math(r"\frac{dx}{dt}")
         assert result is not None
         assert result.atoms(sp.Derivative), f"Expected Derivative, got {result}"
 
     def test_parse_math_plain_algebra(self):
         """Plain algebra without LaTeX parses via sympify fallback."""
-        from examples.hamiltonian.reward_fn import _parse_math
         import sympy as sp
+
+        from examples.hamiltonian.reward_fn import _parse_math
+
         result = _parse_math("p**2/6 + 3*x**2")
         assert result is not None
         p, x = sp.Symbol("p"), sp.Symbol("x")
-        assert sp.simplify(result - (p**2/6 + 3*x**2)) == 0
+        assert sp.simplify(result - (p**2 / 6 + 3 * x**2)) == 0
 
     def test_parse_math_degree_conversion(self):
         """Degree notation \\sin(60^\\circ) → sin(π/3)."""
-        from examples.hamiltonian.reward_fn import _parse_math
         import sympy as sp
+
+        from examples.hamiltonian.reward_fn import _parse_math
+
         result = _parse_math(r"\sin(60^\circ)")
         assert result is not None
-        assert sp.simplify(result - sp.sin(sp.pi/3)) == 0
+        assert sp.simplify(result - sp.sin(sp.pi / 3)) == 0
 
     def test_velocity_detection_frac_derivative(self):
         """\\frac{dx}{dt} detected as velocity form."""
         from examples.hamiltonian.reward_fn import _has_velocity_form
+
         assert _has_velocity_form(r"\frac{dx}{dt}") is True
 
     def test_velocity_detection_dot_notation(self):
         """Unicode ẋ detected as velocity form."""
         from examples.hamiltonian.reward_fn import _has_velocity_form
+
         assert _has_velocity_form("ẋ") is True
 
     def test_velocity_detection_momentum_not_velocity(self):
         """p²/6 is NOT velocity form."""
         from examples.hamiltonian.reward_fn import _has_velocity_form
+
         assert _has_velocity_form("p**2/6") is False
 
     def test_full_latex_hamiltonian(self):
@@ -693,12 +734,17 @@ class TestLatex2SympyParsing:
             "  $ \\frac{dp}{dt} = -6x $"
         )
         result = hamiltonian_reward(SPRING_PROMPT, text, SPRING_META)
-        assert result.scores["q_correct_H"] >= 0.7, f"LaTeX H should parse, got {result.scores['q_correct_H']}"
-        assert result.scores["q_T_uses_p"] >= 0.7, f"LaTeX T should parse, got {result.scores['q_T_uses_p']}"
+        assert (
+            result.scores["q_correct_H"] >= 0.7
+        ), f"LaTeX H should parse, got {result.scores['q_correct_H']}"
+        assert (
+            result.scores["q_T_uses_p"] >= 0.7
+        ), f"LaTeX T should parse, got {result.scores['q_T_uses_p']}"
 
     def test_parse_math_rejects_chained_equality(self):
         """Chained equality 'T = p²/2m = p²/6' must not crash — returns None."""
         from examples.hamiltonian.reward_fn import _parse_math
+
         # latex2sympy returns And(Eq(...), Eq(...)) for these — not sp.Expr
         assert _parse_math(r"T = \frac{p^2}{2m} = \frac{p^2}{6}") is None
         assert _parse_math(r"a = b = c") is None

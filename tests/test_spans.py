@@ -1,13 +1,14 @@
 """Tests for span-based advantage assignment."""
 
-import torch
 import pytest
+import torch
 
 from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
 from qgre.types import RewardResult, TrainingContext
 
 
 # --- Mock tokenizer for testing ---
+
 
 class MockTokenizer:
     """Minimal tokenizer that splits on characters for deterministic testing."""
@@ -38,6 +39,7 @@ def training_ctx():
 
 # --- build_char_to_token_map tests ---
 
+
 class TestCharToTokenMap:
     def test_simple_mapping(self, simple_tokenizer):
         text = "H = p"
@@ -53,22 +55,26 @@ class TestCharToTokenMap:
 
     def test_returns_none_on_large_length_mismatch(self):
         """If per-token decode is way off from full decode, return None."""
+
         class BadTokenizer:
             def decode(self, ids, skip_special_tokens=False):
                 if len(ids) == 1:
                     return "a"
                 return "a" * 20  # 20 chars vs 2 per-token — huge mismatch
+
         tok = BadTokenizer()
         result = build_char_to_token_map([1, 2], tok)
         assert result is None
 
     def test_tolerates_small_length_mismatch(self):
         """Small BPE merge boundary mismatches (1-2 chars) are tolerated."""
+
         class SlightlyOffTokenizer:
             def decode(self, ids, skip_special_tokens=False):
                 if len(ids) == 1:
                     return "abc"
                 return "abcab"  # 5 chars, per-token would be 6 — off by 1
+
         tok = SlightlyOffTokenizer()
         result = build_char_to_token_map([1, 2], tok)
         assert result is not None
@@ -76,6 +82,7 @@ class TestCharToTokenMap:
 
 
 # --- scored_spans_to_token_masks tests ---
+
 
 class TestScoredSpansToTokenMasks:
     def test_single_span(self, simple_tokenizer, training_ctx):
@@ -137,7 +144,7 @@ class TestScoredSpansToTokenMasks:
 
         spans = {
             "q_correct_H": [(0, 9)],  # Whole expression
-            "q_T_uses_p": [(4, 5)],   # Just "T"
+            "q_T_uses_p": [(4, 5)],  # Just "T"
         }
         masks = scored_spans_to_token_masks(spans, char_map, len(token_ids), training_ctx)
 
@@ -147,6 +154,7 @@ class TestScoredSpansToTokenMasks:
 
 
 # --- Integration with advantage estimator ---
+
 
 class TestSpanBasedAdvantages:
     def test_advantages_reach_all_expression_tokens(self):
@@ -158,7 +166,9 @@ class TestSpanBasedAdvantages:
             5: ["q_correct_H"],
         }
         estimator = QGREStepAdvantageEstimator(
-            lr=0.1, mode="spo", step_qualities=step_qualities,
+            lr=0.1,
+            mode="spo",
+            step_qualities=step_qualities,
         )
 
         seq_len = 20
@@ -166,7 +176,7 @@ class TestSpanBasedAdvantages:
             "q_format": torch.ones(seq_len),
             "q_correct_H": torch.zeros(seq_len),
         }
-        token_masks["q_correct_H"][3:8] = 1.0   # First H in derivation
+        token_masks["q_correct_H"][3:8] = 1.0  # First H in derivation
         token_masks["q_correct_H"][15:19] = 1.0  # Second H in label
 
         # First call: SPO warm-start sets baseline = batch mean → advantage ~0
@@ -198,8 +208,9 @@ class TestSpanBasedAdvantages:
 
         # H tokens should have MORE signal than non-H tokens (format + H vs format only)
         # Token 10 only has format mask, tokens 3 has format + H
-        assert abs(advs[3].item()) > abs(advs[10].item()), \
-            "H tokens should have stronger signal than non-expression tokens"
+        assert abs(advs[3].item()) > abs(
+            advs[10].item()
+        ), "H tokens should have stronger signal than non-expression tokens"
 
     def test_backward_compat_empty_masks(self):
         """When token_masks are empty, all advantages should be zero."""
@@ -207,7 +218,9 @@ class TestSpanBasedAdvantages:
 
         step_qualities = {1: ["q_format"], 5: ["q_correct_H"]}
         estimator = QGREStepAdvantageEstimator(
-            lr=0.1, mode="spo", step_qualities=step_qualities,
+            lr=0.1,
+            mode="spo",
+            step_qualities=step_qualities,
         )
 
         reward = RewardResult(reward=0.5, scores={"q_format": 1.0, "q_correct_H": 0.5})
@@ -223,6 +236,7 @@ class TestSpanBasedAdvantages:
 
 
 # --- Expression span finder test ---
+
 
 class TestFindExpressionSpans:
     def test_finds_H_spans(self):
@@ -280,6 +294,7 @@ class TestFindExpressionSpans:
 
 # --- RewardResult with scored_spans ---
 
+
 class TestRewardResultSpans:
     def test_default_empty(self):
         rr = RewardResult(reward=0.5)
@@ -297,8 +312,14 @@ class TestRewardResultSpans:
         from examples.hamiltonian.reward_fn import hamiltonian_reward
 
         text = "COORDINATES: q = x\nMOMENTUM: p = 3*dx/dt\nKINETIC: T = p²/6\nPOTENTIAL: V = 3x²\nHAMILTONIAN: H = p²/6 + 3x²\nEQUATIONS:\n  dq/dt = p/3\n  dp/dt = -6x"
-        meta = {"H_expr": "p**2/6 + 3*x**2", "T_expr": "p**2/6", "V_expr": "3*x**2",
-                "dqdt": "p/3", "dpdt": "-6*x", "coordinates": "x"}
+        meta = {
+            "H_expr": "p**2/6 + 3*x**2",
+            "T_expr": "p**2/6",
+            "V_expr": "3*x**2",
+            "dqdt": "p/3",
+            "dpdt": "-6*x",
+            "coordinates": "x",
+        }
         result = hamiltonian_reward("test prompt", text, meta)
 
         assert result.scored_spans, "hamiltonian_reward should return scored_spans"
@@ -307,12 +328,16 @@ class TestRewardResultSpans:
         assert len(result.scored_spans["q_correct_H"]) >= 1
         # Format targets labeled sections only - NOT full completion
         # This prevents rewarding arbitrary text outside labeled regions
-        assert result.scored_spans["q_format"] != [(0, len(text))], \
-            "q_format must NOT span full completion - only labeled sections"
-        assert len(result.scored_spans["q_format"]) >= 1, "q_format should have labeled section spans"
+        assert result.scored_spans["q_format"] != [
+            (0, len(text))
+        ], "q_format must NOT span full completion - only labeled sections"
+        assert (
+            len(result.scored_spans["q_format"]) >= 1
+        ), "q_format should have labeled section spans"
 
 
 # --- Per-quality advantage edge cases ---
+
 
 class TestPerQualityAdvantageEdgeCases:
     """Edge case tests for per-quality advantage computation."""
@@ -323,7 +348,9 @@ class TestPerQualityAdvantageEdgeCases:
 
         step_qualities = {1: ["q_format"], 5: ["q_correct_H"]}
         estimator = QGREStepAdvantageEstimator(
-            lr=0.1, mode="spo", step_qualities=step_qualities,
+            lr=0.1,
+            mode="spo",
+            step_qualities=step_qualities,
         )
         estimator.set_current_step(1)
 
@@ -366,8 +393,11 @@ class TestPerQualityAdvantageEdgeCases:
 
         step_qualities = {1: ["q_format"], 5: ["q_sparse"]}
         estimator = QGREStepAdvantageEstimator(
-            lr=0.3, mode="spo", step_qualities=step_qualities,  # Higher LR for faster convergence
-            staleness_window=10, baseline_prior=0.5,
+            lr=0.3,
+            mode="spo",
+            step_qualities=step_qualities,  # Higher LR for faster convergence
+            staleness_window=10,
+            baseline_prior=0.5,
         )
 
         seq_len = 10
@@ -395,8 +425,9 @@ class TestPerQualityAdvantageEdgeCases:
 
         # Should decay toward prior (0.5)
         assert baseline_stale < baseline_fresh, "Stale baseline should decay"
-        assert baseline_stale > 0.4 and baseline_stale < 0.8, \
-            f"Stale baseline should be closer to prior (0.5): {baseline_stale}"
+        assert (
+            baseline_stale > 0.4 and baseline_stale < 0.8
+        ), f"Stale baseline should be closer to prior (0.5): {baseline_stale}"
 
     def test_overlapping_spans_normalized(self):
         """Tokens covered by multiple qualities should get normalized average."""
@@ -404,7 +435,9 @@ class TestPerQualityAdvantageEdgeCases:
 
         step_qualities = {1: ["q_a", "q_b"]}
         estimator = QGREStepAdvantageEstimator(
-            lr=0.1, mode="spo", step_qualities=step_qualities,
+            lr=0.1,
+            mode="spo",
+            step_qualities=step_qualities,
             baseline_prior=0.0,  # Zero prior for cleaner math
         )
         estimator.set_current_step(1)
@@ -433,21 +466,25 @@ class TestPerQualityAdvantageEdgeCases:
 
         # Token 1 (only q_a): should get q_a advantage
         token_1_adv = advs[0][1].item()
-        assert abs(token_1_adv - a_adv) < 1e-4, f"Token 1 should match q_a adv: {token_1_adv} vs {a_adv}"
+        assert (
+            abs(token_1_adv - a_adv) < 1e-4
+        ), f"Token 1 should match q_a adv: {token_1_adv} vs {a_adv}"
 
         # Token 7 (only q_b): should get q_b advantage
         token_7_adv = advs[0][7].item()
-        assert abs(token_7_adv - b_adv) < 1e-4, f"Token 7 should match q_b adv: {token_7_adv} vs {b_adv}"
+        assert (
+            abs(token_7_adv - b_adv) < 1e-4
+        ), f"Token 7 should match q_b adv: {token_7_adv} vs {b_adv}"
 
         # Token 4 (overlap q_a + q_b): should get normalized average
         token_4_adv = advs[0][4].item()
         expected_overlap = (a_adv + b_adv) / 2.0
-        assert abs(token_4_adv - expected_overlap) < 1e-4, \
-            f"Overlap token should get average: {token_4_adv} vs {expected_overlap}"
+        assert (
+            abs(token_4_adv - expected_overlap) < 1e-4
+        ), f"Overlap token should get average: {token_4_adv} vs {expected_overlap}"
 
     def test_learnability_variance_thresholds(self):
         """Test learnability = p(1-p) at various mastery levels."""
-        from collections import deque
 
         # At p=0.5: learnability = 0.25 (maximum)
         p_half = 0.5
@@ -475,7 +512,9 @@ class TestPerQualityAdvantageEdgeCases:
 
         step_qualities = {1: ["q_new"]}
         estimator = QGREStepAdvantageEstimator(
-            lr=0.1, mode="spo", step_qualities=step_qualities,
+            lr=0.1,
+            mode="spo",
+            step_qualities=step_qualities,
             baseline_prior=0.5,
         )
         estimator.set_current_step(1)
@@ -561,7 +600,9 @@ class TestPerQualityAdvantageEdgeCases:
         advantages = torch.randn(batch, seq)
         mask = torch.ones(batch, seq)
 
-        _, _, per_token_loss = loss_fn(curr_lp, prev_lp, advantages, mask, return_per_token_loss=True)
+        _, _, per_token_loss = loss_fn(
+            curr_lp, prev_lp, advantages, mask, return_per_token_loss=True
+        )
 
         # Create quality masks
         q_a_mask = torch.zeros(seq)
@@ -574,9 +615,13 @@ class TestPerQualityAdvantageEdgeCases:
         q_b_loss = (per_token_loss[0] * q_b_mask).sum() / q_b_mask.sum()
 
         # Should be different (different token regions)
-        assert q_a_loss.item() != q_b_loss.item(), "Per-quality losses should differ for different regions"
+        assert (
+            q_a_loss.item() != q_b_loss.item()
+        ), "Per-quality losses should differ for different regions"
 
         # Full mask should match mean of per-token loss
         full_loss = per_token_loss[0].mean()
         weighted_avg = (q_a_loss * 10 + q_b_loss * 10) / 20
-        assert abs(full_loss.item() - weighted_avg.item()) < 1e-5, "Weighted average should match full mean"
+        assert (
+            abs(full_loss.item() - weighted_avg.item()) < 1e-5
+        ), "Weighted average should match full mean"

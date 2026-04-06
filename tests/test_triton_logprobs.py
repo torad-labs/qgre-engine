@@ -1,9 +1,10 @@
 """Tests for Triton fused logprobs kernel (Phase 4)."""
 
-import torch
 import pytest
+import torch
 
 from qgre.triton_logprobs import HAS_TRITON
+
 
 pytestmark = pytest.mark.skipif(
     not HAS_TRITON or not torch.cuda.is_available(),
@@ -23,11 +24,18 @@ def test_triton_logprobs_small():
     labels = torch.randint(0, vocab_size, (batch, seq_len), device="cuda")
 
     result = triton_logprobs_from_hidden(hidden, lm_head, labels)
-    expected = torch.nn.functional.log_softmax(lm_head(hidden), dim=-1).gather(
-        dim=-1, index=labels.unsqueeze(-1)
-    ).squeeze(-1)
+    expected = (
+        torch.nn.functional.log_softmax(lm_head(hidden), dim=-1)
+        .gather(
+            dim=-1,
+            index=labels.unsqueeze(-1),
+        )
+        .squeeze(-1)
+    )
 
-    assert torch.allclose(result, expected, atol=1e-3), f"max diff: {(result - expected).abs().max()}"
+    assert torch.allclose(
+        result, expected, atol=1e-3
+    ), f"max diff: {(result - expected).abs().max()}"
     assert (result <= 0).all()
 
 
@@ -43,11 +51,18 @@ def test_triton_logprobs_non_power_of_2_vocab():
     labels = torch.randint(0, vocab_size, (batch, seq_len), device="cuda")
 
     result = triton_logprobs_from_hidden(hidden, lm_head, labels)
-    expected = torch.nn.functional.log_softmax(lm_head(hidden), dim=-1).gather(
-        dim=-1, index=labels.unsqueeze(-1)
-    ).squeeze(-1)
+    expected = (
+        torch.nn.functional.log_softmax(lm_head(hidden), dim=-1)
+        .gather(
+            dim=-1,
+            index=labels.unsqueeze(-1),
+        )
+        .squeeze(-1)
+    )
 
-    assert torch.allclose(result, expected, atol=1e-3), f"max diff: {(result - expected).abs().max()}"
+    assert torch.allclose(
+        result, expected, atol=1e-3
+    ), f"max diff: {(result - expected).abs().max()}"
     assert result.isfinite().all()
 
 
@@ -63,8 +78,15 @@ def test_triton_logprobs_with_bias():
     labels = torch.randint(0, vocab_size, (batch, seq_len), device="cuda")
 
     result = triton_logprobs_from_hidden(hidden, lm_head, labels)
-    expected = torch.nn.functional.log_softmax(lm_head(hidden), dim=-1).gather(
-        dim=-1, index=labels.unsqueeze(-1)
-    ).squeeze(-1)
+    expected = (
+        torch.nn.functional.log_softmax(lm_head(hidden), dim=-1)
+        .gather(
+            dim=-1,
+            index=labels.unsqueeze(-1),
+        )
+        .squeeze(-1)
+    )
 
-    assert torch.allclose(result, expected, atol=1e-3), f"max diff: {(result - expected).abs().max()}"
+    assert torch.allclose(
+        result, expected, atol=1e-3
+    ), f"max diff: {(result - expected).abs().max()}"

@@ -5,10 +5,10 @@ Each test references the original bug ID from the hardening audit.
 """
 
 import warnings
-from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+
 
 # =============================================================================
 # PHASE 1: Critical Fixes
@@ -34,10 +34,12 @@ class TestSpanLossMasking:
             q_mask_shifted = q_mask_shifted[:min_len]
         else:
             pad_len = min_len - q_mask_shifted.shape[0]
-            q_mask_shifted = torch.cat([
-                q_mask_shifted,
-                torch.zeros(pad_len, dtype=q_mask.dtype)
-            ])
+            q_mask_shifted = torch.cat(
+                [
+                    q_mask_shifted,
+                    torch.zeros(pad_len, dtype=q_mask.dtype),
+                ]
+            )
 
         # First element of original (index 0) should NOT be in shifted mask
         # Shifted mask should start from original index 1
@@ -53,10 +55,12 @@ class TestSpanLossMasking:
         q_mask_shifted = q_mask[1:]  # Length 1
         if q_mask_shifted.shape[0] < min_len:
             pad_len = min_len - q_mask_shifted.shape[0]
-            q_mask_shifted = torch.cat([
-                q_mask_shifted,
-                torch.zeros(pad_len, dtype=q_mask.dtype)
-            ])
+            q_mask_shifted = torch.cat(
+                [
+                    q_mask_shifted,
+                    torch.zeros(pad_len, dtype=q_mask.dtype),
+                ]
+            )
 
         assert q_mask_shifted.shape[0] == min_len
         assert q_mask_shifted[0] == 1.0  # Original value preserved
@@ -196,18 +200,14 @@ class TestLogprobsNoneHandling:
 
         # Original bug: len(lps) crashes when lps is None
         # Fix: lps is not None and len(lps) > 0
-        has_logprobs = all(
-            lps is not None and len(lps) > 0
-            for lps in all_logprobs
-        ) if all_logprobs else False
+        has_logprobs = (
+            all(lps is not None and len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
+        )
 
         assert has_logprobs is False  # Not all have logprobs
 
         # Check partial logprobs detection
-        partial_count = sum(
-            1 for lps in all_logprobs
-            if lps is not None and len(lps) > 0
-        )
+        partial_count = sum(1 for lps in all_logprobs if lps is not None and len(lps) > 0)
         assert partial_count == 2
 
 
@@ -220,6 +220,7 @@ class TestLoRADropoutRestore:
         Bug: Restore failure only warned, allowing training with corrupted weights.
         Fix: Raise RuntimeError after warning.
         """
+
         # Simulate the fixed pattern
         def restore_with_failure():
             try:
@@ -227,7 +228,7 @@ class TestLoRADropoutRestore:
             except Exception as e:
                 warnings.warn(f"LoRA dropout restore failed: {e}")
                 raise RuntimeError(
-                    f"LoRA dropout restore failed: {e}. Model weights corrupted."
+                    f"LoRA dropout restore failed: {e}. Model weights corrupted.",
                 ) from e
 
         with pytest.raises(RuntimeError, match="corrupted"):
@@ -268,7 +269,7 @@ class TestWeightSyncStrategyValidation:
         if load_in_4bit and weight_sync_strategy == "merge":
             with pytest.raises(ValueError, match="incompatible"):
                 raise ValueError(
-                    "weight_sync_strategy='merge' is incompatible with load_in_4bit=True."
+                    "weight_sync_strategy='merge' is incompatible with load_in_4bit=True.",
                 )
 
 
@@ -284,7 +285,7 @@ class TestVPRMHiddenDimValidation:
             with pytest.raises(RuntimeError, match="mismatch"):
                 raise RuntimeError(
                     f"VPRM critic hidden_dim mismatch: checkpoint has {checkpoint_hidden_dim} "
-                    f"but model produces {model_hidden_dim}."
+                    f"but model produces {model_hidden_dim}.",
                 )
 
 
@@ -298,7 +299,7 @@ class TestBatchValidation:
         if batch_size == 0:
             with pytest.raises(RuntimeError, match="[Ee]mpty batch"):
                 raise RuntimeError(
-                    "Empty batch received. Check data pipeline or dynamic batch sizing."
+                    "Empty batch received. Check data pipeline or dynamic batch sizing.",
                 )
 
 
@@ -324,7 +325,7 @@ class TestAdvantageEstimatorIntegration:
         )
 
         # First call should validate
-        assert not getattr(estimator, '_region_validated', False)
+        assert not getattr(estimator, "_region_validated", False)
 
         tokens = list(range(20))
         rr = RewardResult(reward=0.5, scores={"q_a": 0.5, "q_b": 0.5})
@@ -337,7 +338,7 @@ class TestAdvantageEstimatorIntegration:
         )
 
         # After first call, should be marked as validated
-        assert getattr(estimator, '_region_validated', False) is True
+        assert getattr(estimator, "_region_validated", False) is True
 
 
 class TestPadTokenValidation:
@@ -353,6 +354,7 @@ class TestPadTokenValidation:
 
         class MockTokenizer:
             """Mock tokenizer where special tokens exceed base vocab_size."""
+
             vocab_size = 151643  # Base vocab size
             pad_token_id = 151662  # <|fim_pad|> - beyond base vocab
 

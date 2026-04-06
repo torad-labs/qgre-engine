@@ -10,11 +10,14 @@ This replaces the section-based segmenter for reward functions that return score
 from __future__ import annotations
 
 import warnings
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 
-from qgre.types import TrainingContext
+
+if TYPE_CHECKING:
+    from qgre.types import TrainingContext
+
 
 # Marker value for repeated spans. In spans.py, we use this as a marker.
 # The actual sign-aware penalty is applied in advantages.py.
@@ -40,15 +43,17 @@ def build_char_to_token_map(
 
     # Pre-validation: tokenizer must have decode method
     if not hasattr(tokenizer, "decode"):
-        warnings.warn("build_char_to_token_map: tokenizer lacks decode method — returning None")
+        warnings.warn(
+            "build_char_to_token_map: tokenizer lacks decode method — returning None", stacklevel=2
+        )
         return None
 
     # Get the full decoded text (this is what the reward function scored)
     # CRITICAL: vLLM's output.text uses skip_special_tokens=True, so we must match
     try:
         full_text = tokenizer.decode(token_ids, skip_special_tokens=True)
-    except Exception as e:
-        warnings.warn(f"build_char_to_token_map: full decode failed: {e}")
+    except (ValueError, TypeError, RuntimeError) as e:
+        warnings.warn(f"build_char_to_token_map: full decode failed: {e}", stacklevel=2)
         return None
 
     full_len = len(full_text)
@@ -71,7 +76,7 @@ def build_char_to_token_map(
             # Usually it's exactly at char_pos, but BPE merges can shift things
             if tok_len > 0:
                 # Try exact match first
-                if full_text[char_pos:char_pos + tok_len] == tok_text:
+                if full_text[char_pos : char_pos + tok_len] == tok_text:
                     for c in range(char_pos, min(char_pos + tok_len, full_len)):
                         char_to_token[c] = tok_idx
                     char_pos += tok_len
@@ -79,8 +84,10 @@ def build_char_to_token_map(
                     # BPE merge caused text difference — search nearby
                     found = False
                     for offset in range(min(5, full_len - char_pos)):
-                        if full_text[char_pos + offset:char_pos + offset + tok_len] == tok_text:
-                            for c in range(char_pos + offset, min(char_pos + offset + tok_len, full_len)):
+                        if full_text[char_pos + offset : char_pos + offset + tok_len] == tok_text:
+                            for c in range(
+                                char_pos + offset, min(char_pos + offset + tok_len, full_len)
+                            ):
                                 char_to_token[c] = tok_idx
                             char_pos = char_pos + offset + tok_len
                             found = True
@@ -101,12 +108,18 @@ def build_char_to_token_map(
             # Known decode failure types — track and continue
             decode_failures += 1
             if decode_failures == 1:
-                warnings.warn(f"build_char_to_token_map: per-token decode failed at tok_idx {tok_idx}: {e}")
-        except Exception as e:
-            # Unexpected error — warn but continue
+                warnings.warn(
+                    f"build_char_to_token_map: per-token decode failed at tok_idx {tok_idx}: {e}",
+                    stacklevel=2,
+                )
+        except (TypeError, AttributeError, KeyError) as e:
+            # Other decode failure types — warn but continue
             decode_failures += 1
             if decode_failures == 1:
-                warnings.warn(f"build_char_to_token_map: unexpected error at tok_idx {tok_idx}: {type(e).__name__}: {e}")
+                warnings.warn(
+                    f"build_char_to_token_map: decode error at tok_idx {tok_idx}: {type(e).__name__}: {e}",
+                    stacklevel=2,
+                )
 
     # Safety check: if per-token decode covered way less than full decode, the
     # mapping is unreliable. Return None to trigger segmenter fallback.
@@ -115,7 +128,8 @@ def build_char_to_token_map(
         warnings.warn(
             f"build_char_to_token_map: per-token decode covered {char_pos}/{full_len} chars "
             f"({100*char_pos/full_len:.1f}%). Mapping unreliable — returning None. "
-            "Threshold is 80% coverage."
+            "Threshold is 80% coverage.",
+            stacklevel=2,
         )
         return None
 
@@ -125,14 +139,16 @@ def build_char_to_token_map(
         warnings.warn(
             f"DP3-006: char_to_token gap-fill: {gap_count}/{full_len} chars ({100*gap_count/full_len:.1f}%) "
             "have no direct token mapping. Filling with nearest valid. "
-            "High gap percentage may indicate tokenizer decode mismatch."
+            "High gap percentage may indicate tokenizer decode mismatch.",
+            stacklevel=2,
         )
 
     # Check if all tokens decode to -1 (complete mapping failure)
     if gap_count == full_len:
         warnings.warn(
             f"CRITICAL: All {full_len} characters map to -1. Complete token mapping failure. "
-            "Entire batch will lose advantage signal. Check tokenizer decode behavior."
+            "Entire batch will lose advantage signal. Check tokenizer decode behavior.",
+            stacklevel=2,
         )
 
     # Fill any remaining gaps with nearest valid token
@@ -178,14 +194,16 @@ def scored_spans_to_token_masks(
         # Reward FIRST span for each quality — later repetitions get penalized
         # The original answer is typically the correct one; repeats are noise
         # First span gets +1.0, later spans get REPETITION_MARKER penalty
-        num_spans = len(spans)
+        len(spans)
         for span_idx, (char_start, char_end) in enumerate(spans):
             # AE-R2-03: Skip span if completely outside bounds (don't relocate)
             if char_start >= max_char:
                 import warnings
+
                 warnings.warn(
                     f"Span completely outside bounds for quality '{quality_name}': "
-                    f"char_start={char_start} >= max_char={max_char}. Skipping span."
+                    f"char_start={char_start} >= max_char={max_char}. Skipping span.",
+                    stacklevel=2,
                 )
                 continue
             # Clamp to valid range
@@ -193,25 +211,29 @@ def scored_spans_to_token_masks(
             ce = max(0, min(char_end, max_char))
             if cs != char_start or ce != char_end:
                 import warnings
+
                 warnings.warn(
                     f"Span offset clamped for quality '{quality_name}': "
                     f"original ({char_start}, {char_end}) → clamped ({cs}, {ce}). "
-                    f"max_char={max_char}. Final tokens may lose advantage signal."
+                    f"max_char={max_char}. Final tokens may lose advantage signal.",
+                    stacklevel=2,
                 )
                 # Track clamped spans for metrics
                 _clamped_count[0] += 1
             # Warn if clamping caused zero-length span
             if cs >= ce:
                 import warnings
+
                 warnings.warn(
                     f"Span became zero-length after clamping for quality '{quality_name}': "
                     f"original ({char_start}, {char_end}) → clamped ({cs}, {ce}). "
-                    "Advantage signal lost for this span."
+                    "Advantage signal lost for this span.",
+                    stacklevel=2,
                 )
             # Map char range → token indices and set mask
             # First span: +1.0 (reward original answer), later spans: REPETITION_MARKER (penalize repeats)
             # The marker is detected in advantages.py where sign-aware penalty is applied
-            is_first_span = (span_idx == 0)
+            is_first_span = span_idx == 0
             span_value = 1.0 if is_first_span else REPETITION_MARKER
             for c in range(cs, ce):
                 tok_idx = char_to_token[c]
@@ -224,7 +246,7 @@ def scored_spans_to_token_masks(
                         f"DP3-005: Span mapping exceeds seq_len. "
                         f"tok_idx={tok_idx} >= seq_len={seq_len} for quality '{quality_name}'. "
                         f"char_range=({cs}, {ce}), max_char={max_char}. "
-                        "Tokenizer or span detection is inconsistent."
+                        "Tokenizer or span detection is inconsistent.",
                     )
                 mask[tok_idx] = span_value
         masks[quality_name] = mask

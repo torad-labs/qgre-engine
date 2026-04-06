@@ -14,12 +14,11 @@ This approach measures what actually happens during Phase 7 collapse:
 layers start pulling in different directions, energy dissipates into noise.
 """
 
-import torch
 import numpy as np
-from typing import Dict, List, Tuple
+import torch
 
 
-def compute_gradient_coherence(model: torch.nn.Module) -> Dict[str, float]:
+def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, float]:
     """Compute gradient coherence metrics across model layers.
 
     Args:
@@ -37,8 +36,8 @@ def compute_gradient_coherence(model: torch.nn.Module) -> Dict[str, float]:
     """
     # Collect gradients per layer, grouped by type (weights vs biases)
     weight_grads = []  # Only weight matrices
-    bias_grads = []    # Only bias vectors
-    all_grads = []     # All parameters
+    bias_grads = []  # Only bias vectors
+    all_grads = []  # All parameters
     layer_names = []
 
     for name, param in model.named_parameters():
@@ -96,10 +95,7 @@ def compute_gradient_coherence(model: torch.nn.Module) -> Dict[str, float]:
         norm1 = g1.norm().item()
         norm2 = g2.norm().item()
 
-        if norm1 > 0 and norm2 > 0:
-            cosine = dot_product / (norm1 * norm2)
-        else:
-            cosine = 0.0
+        cosine = dot_product / (norm1 * norm2) if norm1 > 0 and norm2 > 0 else 0.0
 
         layer_cosines.append(cosine)
 
@@ -127,9 +123,9 @@ def compute_gradient_coherence(model: torch.nn.Module) -> Dict[str, float]:
 def compute_batch_gradient_variance(
     model: torch.nn.Module,
     loss_fn,
-    batch_inputs: List[torch.Tensor],
-    batch_targets: List[torch.Tensor],
-) -> Dict[str, float]:
+    batch_inputs: list[torch.Tensor],
+    batch_targets: list[torch.Tensor],
+) -> dict[str, float]:
     """Compute gradient variance across batch samples.
 
     High variance = samples pulling in different directions = turbulence.
@@ -149,7 +145,7 @@ def compute_batch_gradient_variance(
     # Collect per-sample gradients
     sample_grads = []
 
-    for input_tensor, target_tensor in zip(batch_inputs, batch_targets):
+    for input_tensor, target_tensor in zip(batch_inputs, batch_targets, strict=False):
         model.zero_grad()
         output = model(input_tensor)
         loss = loss_fn(output, target_tensor)
@@ -222,7 +218,7 @@ class TurbulenceDetector:
         self.turbulent_count = 0
         self.transition_step = None
 
-    def update(self, step: int, coherence_stats: Dict[str, float]) -> str:
+    def update(self, step: int, coherence_stats: dict[str, float]) -> str:
         """Update detector with new coherence measurement.
 
         Args:
@@ -240,7 +236,9 @@ class TurbulenceDetector:
             if len(self.calibration_data) >= self.calibration_steps:
                 # Calibration complete
                 baseline_cosine = np.mean(self.calibration_data)
-                print(f"Gradient coherence calibrated: baseline mean_cosine = {baseline_cosine:.3f}")
+                print(
+                    f"Gradient coherence calibrated: baseline mean_cosine = {baseline_cosine:.3f}"
+                )
                 self.state = "LAMINAR"
 
         elif self.state == "LAMINAR":

@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import random
 import warnings
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import ClassVar
 
 import torch
+
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +115,7 @@ class TrainerState:
     and RNG state for reproducibility.
     Serializable checkpoint component.
     """
+
     global_step: int = 0
     accumulated_loss: float = 0.0
     accumulation_count: int = 0
@@ -133,6 +135,7 @@ class DataLoaderState:
     Manages iteration state and dynamic priority scheduling.
     Serializable checkpoint component.
     """
+
     epoch: int = 0
     step_in_epoch: int = 0
     total_steps: int = 0
@@ -147,6 +150,7 @@ class AdvantageEstimatorState:
     Wraps the advantage estimator's full state_dict for checkpoint serialization.
     The actual state structure is managed by QGREStepAdvantageEstimator.
     """
+
     # Full state dict from QGREStepAdvantageEstimator.state_dict()
     # Contains: V, V_last_seen, quality_seen, step_seen, reward_var, reward_mean, etc.
     state_dict: dict | None = None
@@ -159,6 +163,7 @@ class WeightLoaderState:
     Prevents double-initialization and tracks resource lifecycle.
     Serializable checkpoint component.
     """
+
     load_lora_called: bool = False
     initialized: bool = False
     cleaned_up: bool = False
@@ -222,8 +227,11 @@ class CheckpointState:
         """
         # Validate required fields
         required_fields = [
-            "trainer", "dataloader", "advantage_estimator",
-            "weight_loader", "game_state"
+            "trainer",
+            "dataloader",
+            "advantage_estimator",
+            "weight_loader",
+            "game_state",
         ]
         for field_name in required_fields:
             if not hasattr(self, field_name):
@@ -243,26 +251,28 @@ class CheckpointState:
             if not isinstance(value, expected_type):
                 raise TypeError(
                     f"Field '{field_name}' has incorrect type: "
-                    f"expected {expected_type.__name__}, got {type(value).__name__}"
+                    f"expected {expected_type.__name__}, got {type(value).__name__}",
                 )
 
         # game_state can be GameState or dict (migration path — dict converted by checkpoint.py)
         if not isinstance(self.game_state, (GameState, dict)):
             raise TypeError(
                 f"Field 'game_state' has incorrect type: "
-                f"expected GameState or dict, got {type(self.game_state).__name__}"
+                f"expected GameState or dict, got {type(self.game_state).__name__}",
             )
 
         # Validate optional field types
         if self.vprm_critic_state is not None and not isinstance(self.vprm_critic_state, dict):
             raise TypeError(
                 f"Field 'vprm_critic_state' must be dict or None, "
-                f"got {type(self.vprm_critic_state).__name__}"
+                f"got {type(self.vprm_critic_state).__name__}",
             )
-        if self.vprm_optimizer_state is not None and not isinstance(self.vprm_optimizer_state, dict):
+        if self.vprm_optimizer_state is not None and not isinstance(
+            self.vprm_optimizer_state, dict
+        ):
             raise TypeError(
                 f"Field 'vprm_optimizer_state' must be dict or None, "
-                f"got {type(self.vprm_optimizer_state).__name__}"
+                f"got {type(self.vprm_optimizer_state).__name__}",
             )
 
         # Validate optional dict fields using registry
@@ -270,31 +280,38 @@ class CheckpointState:
             value = getattr(self, field_name, None)
             if value is not None and not isinstance(value, dict):
                 raise TypeError(
-                    f"Field '{field_name}' must be dict or None, "
-                    f"got {type(value).__name__}"
+                    f"Field '{field_name}' must be dict or None, " f"got {type(value).__name__}",
                 )
 
         # STATE REGISTRY VALIDATION: Ensure OPTIONAL_FIELDS is complete
         # This catches the bug where a field is added to the dataclass but not to OPTIONAL_FIELDS
-        required_fields_set = {"trainer", "dataloader", "advantage_estimator", "weight_loader", "game_state"}
+        required_fields_set = {
+            "trainer",
+            "dataloader",
+            "advantage_estimator",
+            "weight_loader",
+            "game_state",
+        }
         expected_fields = required_fields_set | set(self.OPTIONAL_FIELDS) | {"schema_version"}
-        actual_fields = {f.name for f in self.__dataclass_fields__.values() if f.name != "OPTIONAL_FIELDS"}
+        actual_fields = {
+            f.name for f in self.__dataclass_fields__.values() if f.name != "OPTIONAL_FIELDS"
+        }
         missing_from_registry = actual_fields - expected_fields
         if missing_from_registry:
             raise RuntimeError(
                 f"STATE REGISTRY ERROR: Fields {sorted(missing_from_registry)} exist in CheckpointState "
                 f"but are not in OPTIONAL_FIELDS. Add them to OPTIONAL_FIELDS to ensure "
-                f"they are restored on checkpoint load."
+                f"they are restored on checkpoint load.",
             )
 
         # Validate schema version
         if not isinstance(self.schema_version, int):
             raise TypeError(
-                f"Field 'schema_version' must be int, got {type(self.schema_version).__name__}"
+                f"Field 'schema_version' must be int, got {type(self.schema_version).__name__}",
             )
 
     @classmethod
-    def from_dict(cls, d: dict) -> "CheckpointState":
+    def from_dict(cls, d: dict) -> CheckpointState:
         """Reconstruct CheckpointState from dict (e.g. from asdict() or torch.load()).
 
         Handles both:
@@ -323,13 +340,14 @@ class CheckpointState:
             warnings.warn(
                 "Loading old checkpoint format (schema_version 1). "
                 "Migrating to StateSpec format with defaults.",
-                UserWarning
+                UserWarning,
+                stacklevel=2,
             )
             # Validate required field exists (silent default to 0 would be catastrophic)
             if "global_step" not in d:
                 raise ValueError(
                     "Old format checkpoint missing required key 'global_step'. "
-                    "Cannot safely restore checkpoint — training step is unknown."
+                    "Cannot safely restore checkpoint — training step is unknown.",
                 )
             # Warn for optional fields that affect training behavior
             missing_fields = []
@@ -341,7 +359,8 @@ class CheckpointState:
                 warnings.warn(
                     f"Old checkpoint missing fields {missing_fields} — using defaults. "
                     "Loss averaging may be incorrect for this step.",
-                    UserWarning
+                    UserWarning,
+                    stacklevel=2,
                 )
             # Migrate: build StateSpec dicts from flat fields
             trainer = TrainerState(
@@ -357,7 +376,7 @@ class CheckpointState:
             )
             # Old format uses advantage_estimator_state (dict), wrap in StateSpec
             advantage_estimator = AdvantageEstimatorState(
-                state_dict=d.get("advantage_estimator_state")
+                state_dict=d.get("advantage_estimator_state"),
             )
             # Old format uses dataloader_state (dict), wrap in StateSpec
             dl_state = d.get("dataloader_state")
@@ -381,7 +400,8 @@ class CheckpointState:
                     "Checkpoint missing 'game_state' — creating fresh GameState with phase=1. "
                     "All mastery progress and tier phases will be reset. "
                     "If unexpected, checkpoint may be corrupted.",
-                    UserWarning
+                    UserWarning,
+                    stacklevel=2,
                 )
                 game_state = GameState()
             elif isinstance(game_state_raw, GameState):
@@ -396,7 +416,7 @@ class CheckpointState:
             if missing:
                 raise ValueError(
                     f"New-format checkpoint missing required keys: {missing}. "
-                    "Checkpoint may be corrupted or truncated."
+                    "Checkpoint may be corrupted or truncated.",
                 )
 
             # Reconstruct nested dataclasses from their dict representations
@@ -404,15 +424,19 @@ class CheckpointState:
             if not isinstance(trainer_d, dict):
                 raise TypeError(
                     f"Expected dict for 'trainer', got {type(trainer_d).__name__}. "
-                    "Checkpoint may be corrupted."
+                    "Checkpoint may be corrupted.",
                 )
             trainer = TrainerState(**trainer_d)
 
             dataloader_d = d.get("dataloader", {})
-            dataloader = DataLoaderState(**dataloader_d) if isinstance(dataloader_d, dict) else dataloader_d
+            dataloader = (
+                DataLoaderState(**dataloader_d) if isinstance(dataloader_d, dict) else dataloader_d
+            )
 
             ae_d = d.get("advantage_estimator", {})
-            advantage_estimator = AdvantageEstimatorState(**ae_d) if isinstance(ae_d, dict) else ae_d
+            advantage_estimator = (
+                AdvantageEstimatorState(**ae_d) if isinstance(ae_d, dict) else ae_d
+            )
 
             wl_d = d.get("weight_loader", {})
             weight_loader = WeightLoaderState(**wl_d) if isinstance(wl_d, dict) else wl_d
@@ -423,7 +447,8 @@ class CheckpointState:
                     "Checkpoint missing 'game_state' — creating fresh GameState with phase=1. "
                     "All mastery progress and tier phases will be reset. "
                     "If unexpected, checkpoint may be corrupted.",
-                    UserWarning
+                    UserWarning,
+                    stacklevel=2,
                 )
                 game_state = GameState()
             elif isinstance(game_state_raw, dict):
@@ -431,10 +456,12 @@ class CheckpointState:
                 # via gamestate_from_dict which handles deque reconstruction.
                 # WARNING: Caller must convert game_state from dict to GameState using gamestate_from_dict.
                 import warnings
+
                 warnings.warn(
                     "R3-CSM-006: CheckpointState.from_dict returning game_state as dict. "
                     "Caller must convert using gamestate_from_dict() before use.",
-                    UserWarning
+                    UserWarning,
+                    stacklevel=2,
                 )
                 game_state = game_state_raw  # Will be converted by caller
             else:
@@ -468,12 +495,13 @@ class PromptContext:
     Built by the trainer from batch + GameState, then flows through
     advantage computation, VPRM, tutorial recording, and gate composition.
     """
-    prompt_id: int              # Original hash ID from dataloader
-    skill_key: str | None       # Tutorial skill this prompt belongs to (None if untracked)
-    tier: str                   # Difficulty tier from metadata (e.g. "tutorial_gravity")
-    aspiration_target: float    # Per-skill mastery_threshold or global default
-    aspiration_warmup: float    # 0→1 ramp factor for recently unlocked skills
-    is_active: bool             # Passes both tier gate AND skill gate
+
+    prompt_id: int  # Original hash ID from dataloader
+    skill_key: str | None  # Tutorial skill this prompt belongs to (None if untracked)
+    tier: str  # Difficulty tier from metadata (e.g. "tutorial_gravity")
+    aspiration_target: float  # Per-skill mastery_threshold or global default
+    aspiration_warmup: float  # 0→1 ramp factor for recently unlocked skills
+    is_active: bool  # Passes both tier gate AND skill gate
 
     @property
     def prompt_id_str(self) -> str:
@@ -518,6 +546,7 @@ class SampleData:
         kl_region_weights: Per-token KL multipliers from region segmentation (optional)
         gen_logprobs: Generation-time logprobs for LLDS (optional, pre-padding)
     """
+
     completion: list[int]
     reward_result: RewardResult
     context: PromptContext
@@ -577,29 +606,29 @@ class TrainingStep:
                 f"active_qualities={len(self.active_qualities)}, "
                 f"batch_regions={len(self.batch_regions)}, "
                 f"batch_contexts={len(self.batch_contexts)}, "
-                f"completions={len(self.completions)}"
+                f"completions={len(self.completions)}",
             )
         batch_size = list_lens[0]
         if self.padded_advs.shape[0] != batch_size:
             raise ValueError(
                 f"TrainingStep tensor mismatch: padded_advs batch={self.padded_advs.shape[0]} "
-                f"vs list batch={batch_size}"
+                f"vs list batch={batch_size}",
             )
         # CT-7: Validate optional tensor shapes if present
         if self.gen_logprobs_padded is not None and self.gen_logprobs_padded.shape[0] != batch_size:
             raise ValueError(
-                f"CT-7: gen_logprobs_padded batch={self.gen_logprobs_padded.shape[0]} vs list batch={batch_size}"
+                f"CT-7: gen_logprobs_padded batch={self.gen_logprobs_padded.shape[0]} vs list batch={batch_size}",
             )
         if self.kl_region_weights is not None and self.kl_region_weights.shape[0] != batch_size:
             raise ValueError(
-                f"CT-7: kl_region_weights batch={self.kl_region_weights.shape[0]} vs list batch={batch_size}"
+                f"CT-7: kl_region_weights batch={self.kl_region_weights.shape[0]} vs list batch={batch_size}",
             )
 
     def __len__(self) -> int:
         """Return batch size."""
         return len(self.samples)
 
-    def filter(self, idx: torch.Tensor) -> "TrainingStep":
+    def filter(self, idx: torch.Tensor) -> TrainingStep:
         """Atomically reindex ALL fields by idx. Returns new TrainingStep.
 
         Args:
@@ -619,7 +648,7 @@ class TrainingStep:
             if max_idx >= len(self.samples):
                 raise IndexError(
                     f"TrainingStep.filter() received index {max_idx} "
-                    f"but len(samples)={len(self.samples)}. SPO filter produced invalid indices."
+                    f"but len(samples)={len(self.samples)}. SPO filter produced invalid indices.",
                 )
 
         # Reindex all list fields
@@ -634,7 +663,9 @@ class TrainingStep:
         new_padded_advs = self.padded_advs[idx]
         new_comp_tensor = self.comp_tensor[idx]
         new_comp_attention_mask = self.comp_attention_mask[idx]
-        new_gen_logprobs = self.gen_logprobs_padded[idx] if self.gen_logprobs_padded is not None else None
+        new_gen_logprobs = (
+            self.gen_logprobs_padded[idx] if self.gen_logprobs_padded is not None else None
+        )
         new_kl_weights = self.kl_region_weights[idx] if self.kl_region_weights is not None else None
 
         # Track original indices for downstream mapping (VPRM, EGRS)
@@ -646,7 +677,7 @@ class TrainingStep:
             for i, old_i in enumerate(idx_list):
                 if old_i > max_old_idx:
                     raise IndexError(
-                        f"CT-4: Filter composition error - idx[{i}]={old_i} exceeds old filter length {len(self.filter_idx)}"
+                        f"CT-4: Filter composition error - idx[{i}]={old_i} exceeds old filter length {len(self.filter_idx)}",
                     )
         else:
             new_filter_idx = idx_list
@@ -680,6 +711,7 @@ class TrainingStep:
 @dataclass
 class SkillNode:
     """A node in the tutorial skill dependency DAG."""
+
     name: str
     prompts: list[str]
     prerequisites: list[str]
@@ -695,7 +727,9 @@ class SkillNode:
     _initial_scores: list = field(default_factory=list, repr=False)  # First 5 scores after unlock
     _initial_mastery_logged: bool = field(default=False, repr=False)
     _unlock_step: int | None = field(default=None, repr=False)  # Step when skill was unlocked
-    _pre_unlock_baseline: float | None = field(default=None, repr=False)  # Mastery score of prerequisites at unlock time
+    _pre_unlock_baseline: float | None = field(
+        default=None, repr=False
+    )  # Mastery score of prerequisites at unlock time
     aspiration_warmup_steps: int = 20  # Ramp aspiration from 0→full over N steps after unlock
     # Learnability-based advancement: advance only when variance collapses
     learnability_threshold: float = 0.10  # Advance when p(1-p) < this
@@ -836,9 +870,13 @@ class GameState:
 
     # ── Tutorial skill tree ──
 
-    def init_tutorial(self, tutorial_config, all_prompt_ids: list[str] | None = None,
-                      dataloader_items: list[dict] | None = None,
-                      difficulty_column: str | None = None):
+    def init_tutorial(
+        self,
+        tutorial_config,
+        all_prompt_ids: list[str] | None = None,
+        dataloader_items: list[dict] | None = None,
+        difficulty_column: str | None = None,
+    ):
         """Initialize skill tree from TutorialConfig. Call after construction.
 
         Args:
@@ -849,6 +887,7 @@ class GameState:
             difficulty_column: Metadata column for tier mapping (e.g. "difficulty").
         """
         from qgre.config import TutorialConfig
+
         if not isinstance(tutorial_config, TutorialConfig) or not tutorial_config.enabled:
             self.tutorial_enabled = False
             return
@@ -856,7 +895,7 @@ class GameState:
         if not tutorial_config.skill_tree:
             raise ValueError(
                 "tutorial.enabled=true but skill_tree is empty. "
-                "Define at least one skill with prompts or match_metadata."
+                "Define at least one skill with prompts or match_metadata.",
             )
 
         self.tutorial_enabled = True
@@ -873,7 +912,8 @@ class GameState:
                 warnings.warn(
                     f"Skill '{key}' has match_metadata={sc.match_metadata} but no "
                     f"dataloader_items provided. Metadata resolution skipped — "
-                    f"skill will have only explicit prompts: {sc.prompts}"
+                    f"skill will have only explicit prompts: {sc.prompts}",
+                    stacklevel=2,
                 )
             if sc.match_metadata and dataloader_items:
                 for item in dataloader_items:
@@ -899,16 +939,19 @@ class GameState:
 
             if not prompts:
                 # Check if this skill blocks any dependents — deadlock if so
-                dependents = [k for k, s in tutorial_config.skill_tree.items() if key in s.prerequisites]
+                dependents = [
+                    k for k, s in tutorial_config.skill_tree.items() if key in s.prerequisites
+                ]
                 if dependents:
                     raise ValueError(
                         f"Skill '{key}' has no prompts after metadata resolution and blocks {dependents}. "
                         f"Training would deadlock. match_metadata={sc.match_metadata}, "
-                        f"explicit prompts={sc.prompts}"
+                        f"explicit prompts={sc.prompts}",
                     )
                 warnings.warn(
                     f"Skill '{key}' has no prompts after metadata resolution. "
-                    f"match_metadata={sc.match_metadata}, explicit prompts={sc.prompts}"
+                    f"match_metadata={sc.match_metadata}, explicit prompts={sc.prompts}",
+                    stacklevel=2,
                 )
 
         # Build O(1) prompt → skill lookup
@@ -951,7 +994,7 @@ class GameState:
                 if pre not in self.skill_tree:
                     raise ValueError(
                         f"Skill '{key}' has prerequisite '{pre}' "
-                        f"which does not exist in skill_tree"
+                        f"which does not exist in skill_tree",
                     )
                 visit(pre)
             temp.remove(key)
@@ -967,7 +1010,7 @@ class GameState:
                 if prompt_id in seen_prompts:
                     raise ValueError(
                         f"Prompt '{prompt_id}' appears in both "
-                        f"'{seen_prompts[prompt_id]}' and '{key}'"
+                        f"'{seen_prompts[prompt_id]}' and '{key}'",
                     )
                 seen_prompts[prompt_id] = key
 
@@ -975,8 +1018,7 @@ class GameState:
         roots = [k for k, n in self.skill_tree.items() if not n.prerequisites]
         if not roots:
             raise ValueError(
-                "No root skills (skills with empty prerequisites). "
-                "Training cannot start."
+                "No root skills (skills with empty prerequisites). " "Training cannot start.",
             )
 
         # 4. regression_threshold < mastery_threshold
@@ -984,11 +1026,13 @@ class GameState:
             if node.regression_threshold >= node.mastery_threshold:
                 raise ValueError(
                     f"Skill '{key}': regression_threshold ({node.regression_threshold}) "
-                    f"must be less than mastery_threshold ({node.mastery_threshold})"
+                    f"must be less than mastery_threshold ({node.mastery_threshold})",
                 )
 
-        logger.info(f"Skill tree validated: {len(self.skill_tree)} skills, "
-                    f"{len(roots)} roots, {len(seen_prompts)} prompts mapped")
+        logger.info(
+            f"Skill tree validated: {len(self.skill_tree)} skills, "
+            f"{len(roots)} roots, {len(seen_prompts)} prompts mapped"
+        )
 
     def _invalidate_prompt_cache(self):
         self._active_prompts_dirty = True
@@ -1014,7 +1058,7 @@ class GameState:
 
             # Collect active (unlocked + not mastered) and mastered skills
             active_skills = []
-            for key, node in self.skill_tree.items():
+            for node in self.skill_tree.values():
                 is_unlocked = node.unlocked(self.skill_tree)
                 if is_unlocked and not node.mastered:
                     active_skills.append(node)
@@ -1044,11 +1088,13 @@ class GameState:
 
         # Post-mastery behavior: all skills mastered, no active base pool
         if not self._active_base_pool:
-            if self.post_mastery_behavior == 'pause' and not active:
-                logger.info("[TUTORIAL] All skills mastered. post_mastery_behavior=pause. "
-                           "Returning empty pool — trainer should stop.")
+            if self.post_mastery_behavior == "pause" and not active:
+                logger.info(
+                    "[TUTORIAL] All skills mastered. post_mastery_behavior=pause. "
+                    "Returning empty pool — trainer should stop."
+                )
                 return []
-            elif self.post_mastery_behavior == 'continue_all':
+            if self.post_mastery_behavior == "continue_all":
                 logger.info("[TUTORIAL] All skills mastered. post_mastery_behavior=continue_all.")
                 return self.all_prompts
             # review_only: return whatever review sampling produced (may be empty this step)
@@ -1062,7 +1108,9 @@ class GameState:
             if review_fallback:
                 return review_fallback
             # review_only with nothing to review — return empty, trainer handles it
-            logger.info("[TUTORIAL] review_only: no review prompts this step. Returning empty pool.")
+            logger.info(
+                "[TUTORIAL] review_only: no review prompts this step. Returning empty pool."
+            )
             return []
 
         if not active:
@@ -1095,11 +1143,13 @@ class GameState:
         # This prevents advancing when skill is still high-variance (in ZPD)
         if is_ready_now and not was_ready_before:
             node._status = SkillStatus.MASTERED
-            logger.info(f"[TUTORIAL] SKILL MASTERED: {node.name} "
-                       f"(mastery={node.mastery_score:.2f}, "
-                       f"learnability={node.learnability:.3f}, "
-                       f"threshold={node.mastery_threshold}, "
-                       f"learnability_threshold={node.learnability_threshold})")
+            logger.info(
+                f"[TUTORIAL] SKILL MASTERED: {node.name} "
+                f"(mastery={node.mastery_score:.2f}, "
+                f"learnability={node.learnability:.3f}, "
+                f"threshold={node.mastery_threshold}, "
+                f"learnability_threshold={node.learnability_threshold})"
+            )
             self._invalidate_prompt_cache()
             self._check_unlocks()
 
@@ -1107,15 +1157,17 @@ class GameState:
         # Don't relock just because variance spiked temporarily
         elif was_mastered_before and not is_mastered_now:
             node._status = SkillStatus.ACTIVE
-            logger.warning(f"[TUTORIAL] MASTERY REGRESSION: {node.name} "
-                          f"(mastery={node.mastery_score:.2f}, "
-                          f"regression_threshold={node.regression_threshold})")
+            logger.warning(
+                f"[TUTORIAL] MASTERY REGRESSION: {node.name} "
+                f"(mastery={node.mastery_score:.2f}, "
+                f"regression_threshold={node.regression_threshold})"
+            )
             self._invalidate_prompt_cache()
             self._check_relocks()
 
     def _check_unlocks(self):
         """After a mastery event, check if any locked skills should unlock."""
-        for key, node in self.skill_tree.items():
+        for node in self.skill_tree.values():
             if node.status == SkillStatus.LOCKED and node.unlocked(self.skill_tree):
                 node._status = SkillStatus.ACTIVE
                 node._unlock_step = self.step_count
@@ -1123,18 +1175,22 @@ class GameState:
                 pre_scores = [self.skill_tree[pre].mastery_score for pre in node.prerequisites]
                 node._pre_unlock_baseline = sum(pre_scores) / len(pre_scores) if pre_scores else 0.0
                 self._invalidate_prompt_cache()
-                logger.info(f"[TUTORIAL] SKILL UNLOCKED: {node.name} "
-                           f"(prerequisites met: {node.prerequisites}, "
-                           f"step={self.step_count}, "
-                           f"pre_unlock_baseline={node._pre_unlock_baseline:.3f})")
+                logger.info(
+                    f"[TUTORIAL] SKILL UNLOCKED: {node.name} "
+                    f"(prerequisites met: {node.prerequisites}, "
+                    f"step={self.step_count}, "
+                    f"pre_unlock_baseline={node._pre_unlock_baseline:.3f})"
+                )
 
     def _check_relocks(self):
         """After a regression, cascade re-lock to dependents with full mastery reset."""
         changed = True
         while changed:
             changed = False
-            for key, node in self.skill_tree.items():
-                if node.status in (SkillStatus.ACTIVE, SkillStatus.MASTERED) and not node.unlocked(self.skill_tree):
+            for node in self.skill_tree.values():
+                if node.status in (SkillStatus.ACTIVE, SkillStatus.MASTERED) and not node.unlocked(
+                    self.skill_tree
+                ):
                     if node.prerequisites:
                         prev_status = node.status
                         node._status = SkillStatus.LOCKED
@@ -1147,9 +1203,11 @@ class GameState:
                         node._pre_unlock_baseline = None
                         changed = True
                         self._invalidate_prompt_cache()
-                        logger.warning(f"[TUTORIAL] CASCADE RE-LOCK: {node.name} "
-                                      f"(was {prev_status}, prerequisite lost mastery, "
-                                      f"mastery state reset)")
+                        logger.warning(
+                            f"[TUTORIAL] CASCADE RE-LOCK: {node.name} "
+                            f"(was {prev_status}, prerequisite lost mastery, "
+                            f"mastery state reset)"
+                        )
 
     def resolve_mastery_score(self, prompt_id: str, reward_result) -> float:
         """Extract the mastery-tracking score for a prompt from a RewardResult.
@@ -1165,7 +1223,8 @@ class GameState:
                 warnings.warn(
                     f"Skill '{node.name}' score_key='{node.score_key}' not in "
                     f"reward_result.scores (keys: {list(reward_result.scores.keys())}). "
-                    f"Falling back to overall reward."
+                    f"Falling back to overall reward.",
+                    stacklevel=2,
                 )
         return reward_result.reward
 
@@ -1206,14 +1265,16 @@ class GameState:
             tier_warmup = self._get_tier_phase_warmup(tier)
             warmup = min(warmup, tier_warmup)
 
-            contexts.append(PromptContext(
-                prompt_id=pid,
-                skill_key=skill_key,
-                tier=tier,
-                aspiration_target=asp_target,
-                aspiration_warmup=warmup,
-                is_active=is_active,
-            ))
+            contexts.append(
+                PromptContext(
+                    prompt_id=pid,
+                    skill_key=skill_key,
+                    tier=tier,
+                    aspiration_target=asp_target,
+                    aspiration_warmup=warmup,
+                    is_active=is_active,
+                )
+            )
         return contexts
 
     def can_tier_unlock(self, tier_name: str) -> bool:
@@ -1253,8 +1314,10 @@ class GameState:
                 needed = prereq_node.mastery_window
                 score = prereq_node.mastery_score
                 threshold = prereq_node.mastery_threshold
-                print(f"  │ ⏳ Tier '{tier_name}' blocked — prerequisite skill '{prereq_key}' not mastered "
-                      f"({completions}/{needed} completions, score {score:.2f}/{threshold:.2f})")
+                print(
+                    f"  │ ⏳ Tier '{tier_name}' blocked — prerequisite skill '{prereq_key}' not mastered "
+                    f"({completions}/{needed} completions, score {score:.2f}/{threshold:.2f})"
+                )
                 return False
         return True
 
@@ -1307,31 +1370,35 @@ class GameState:
         active = sum(1 for n in self.skill_tree.values() if n.status == SkillStatus.ACTIVE)
         mastered = sum(1 for n in self.skill_tree.values() if n.status == SkillStatus.MASTERED)
         locked = sum(1 for n in self.skill_tree.values() if n.status == SkillStatus.LOCKED)
-        metrics['tutorial/active_skills'] = active
-        metrics['tutorial/mastered_skills'] = mastered
-        metrics['tutorial/locked_skills'] = locked
-        metrics['tutorial/total_skills'] = len(self.skill_tree)
+        metrics["tutorial/active_skills"] = active
+        metrics["tutorial/mastered_skills"] = mastered
+        metrics["tutorial/locked_skills"] = locked
+        metrics["tutorial/total_skills"] = len(self.skill_tree)
         # Active prompt pool size (deterministic — rebuild cache if needed, but don't include random review sampling)
         if self._active_prompts_dirty:
             self.get_active_prompts()  # Rebuild cache (result discarded — we only want the deterministic pools)
-        metrics['tutorial/active_prompt_pool_size'] = len(self._active_base_pool)
-        metrics['tutorial/mastered_review_pool_size'] = sum(len(n.prompts) for n in self._mastered_pool)
+        metrics["tutorial/active_prompt_pool_size"] = len(self._active_base_pool)
+        metrics["tutorial/mastered_review_pool_size"] = sum(
+            len(n.prompts) for n in self._mastered_pool
+        )
         for key, node in self.skill_tree.items():
-            metrics[f'tutorial/skill/{key}/mastery'] = node.mastery_score
-            metrics[f'tutorial/skill/{key}/status'] = node.status.value
-            metrics[f'tutorial/skill/{key}/completions'] = len(node.recent_scores)
-            metrics[f'tutorial/skill/{key}/aspiration_target'] = node.mastery_threshold
+            metrics[f"tutorial/skill/{key}/mastery"] = node.mastery_score
+            metrics[f"tutorial/skill/{key}/status"] = node.status.value
+            metrics[f"tutorial/skill/{key}/completions"] = len(node.recent_scores)
+            metrics[f"tutorial/skill/{key}/aspiration_target"] = node.mastery_threshold
             # Aspiration warmup factor (visible when ramping)
             if node._unlock_step is not None:
                 steps_since = self.step_count - node._unlock_step
                 if steps_since < node.aspiration_warmup_steps:
-                    metrics[f'tutorial/skill/{key}/aspiration_warmup'] = steps_since / node.aspiration_warmup_steps
+                    metrics[f"tutorial/skill/{key}/aspiration_warmup"] = (
+                        steps_since / node.aspiration_warmup_steps
+                    )
             # Transfer lift: initial mastery after unlock (logged once at 5 completions)
             if node.initial_mastery is not None and not node._initial_mastery_logged:
-                metrics[f'tutorial/skill/{key}/initial_mastery'] = node.initial_mastery
+                metrics[f"tutorial/skill/{key}/initial_mastery"] = node.initial_mastery
                 # Compute transfer_lift: how much did prerequisites help?
                 transfer_lift = node.initial_mastery - (node._pre_unlock_baseline or 0.0)
-                metrics[f'tutorial/skill/{key}/transfer_lift'] = transfer_lift
+                metrics[f"tutorial/skill/{key}/transfer_lift"] = transfer_lift
                 node._initial_mastery_logged = True
                 # Log prominently — this is the key metric for validating the tutorial system
                 logger.info(
@@ -1339,7 +1406,7 @@ class GameState:
                     f"  initial_mastery = {node.initial_mastery:.3f} (first 5 completions)\n"
                     f"  pre_unlock_baseline = {node._pre_unlock_baseline or 0:.3f} (prerequisite mastery at unlock)\n"
                     f"  transfer_lift = {transfer_lift:+.3f} "
-                    f"({'POSITIVE — prerequisites helped' if transfer_lift > 0 else 'ZERO/NEGATIVE — check prerequisite structure'})"
+                    f"({'POSITIVE — prerequisites helped' if transfer_lift > 0 else 'ZERO/NEGATIVE — check prerequisite structure'})",
                 )
         return metrics
 
@@ -1348,49 +1415,56 @@ class GameState:
         if not self.tutorial_enabled:
             return {}
         return {
-            'skill_tracker': {
+            "skill_tracker": {
                 key: {
-                    'scores': list(node.recent_scores),
-                    'was_mastered': node._was_mastered,
-                    'status': node._status.value,
-                    'total_completions': node._total_completions,
-                    'initial_scores': list(node._initial_scores),
-                    'initial_mastery_logged': node._initial_mastery_logged,
-                    'unlock_step': node._unlock_step,
-                    'pre_unlock_baseline': node._pre_unlock_baseline,
+                    "scores": list(node.recent_scores),
+                    "was_mastered": node._was_mastered,
+                    "status": node._status.value,
+                    "total_completions": node._total_completions,
+                    "initial_scores": list(node._initial_scores),
+                    "initial_mastery_logged": node._initial_mastery_logged,
+                    "unlock_step": node._unlock_step,
+                    "pre_unlock_baseline": node._pre_unlock_baseline,
                 }
                 for key, node in self.skill_tree.items()
-            }
+            },
         }
 
     def load_tutorial_state_dict(self, state: dict):
         """Restore tutorial state from checkpoint."""
-        if 'skill_tracker' not in state:
+        if "skill_tracker" not in state:
             if self.tutorial_enabled:
                 logger.warning("[TUTORIAL] No tutorial state in checkpoint — starting fresh")
             return
-        for key, data in state['skill_tracker'].items():
+        for key, data in state["skill_tracker"].items():
             if key not in self.skill_tree:
-                logger.warning(f"[TUTORIAL] Checkpoint skill '{key}' not in current config — dropping")
+                logger.warning(
+                    f"[TUTORIAL] Checkpoint skill '{key}' not in current config — dropping"
+                )
                 continue
             if isinstance(data, list):
                 scores, was_mastered, status = data, False, None
             else:
-                scores = data['scores']
-                was_mastered = data.get('was_mastered', False)
-                status = data.get('status', None)
+                scores = data["scores"]
+                was_mastered = data.get("was_mastered", False)
+                status = data.get("status", None)
             self.skill_tree[key].recent_scores = deque(
-                scores, maxlen=self.skill_tree[key].mastery_window
+                scores,
+                maxlen=self.skill_tree[key].mastery_window,
             )
             self.skill_tree[key]._was_mastered = was_mastered
             if status is not None:
-                self.skill_tree[key]._status = SkillStatus(status) if isinstance(status, str) else status
+                self.skill_tree[key]._status = (
+                    SkillStatus(status) if isinstance(status, str) else status
+                )
             if isinstance(data, dict):
-                self.skill_tree[key]._total_completions = data.get('total_completions', 0)
-                self.skill_tree[key]._initial_scores = data.get('initial_scores', [])
-                self.skill_tree[key]._initial_mastery_logged = data.get('initial_mastery_logged', False)
-                self.skill_tree[key]._unlock_step = data.get('unlock_step', None)
-                self.skill_tree[key]._pre_unlock_baseline = data.get('pre_unlock_baseline', None)
+                self.skill_tree[key]._total_completions = data.get("total_completions", 0)
+                self.skill_tree[key]._initial_scores = data.get("initial_scores", [])
+                self.skill_tree[key]._initial_mastery_logged = data.get(
+                    "initial_mastery_logged", False
+                )
+                self.skill_tree[key]._unlock_step = data.get("unlock_step", None)
+                self.skill_tree[key]._pre_unlock_baseline = data.get("pre_unlock_baseline", None)
         self._active_prompts_dirty = True
 
     # ── 1D backward compat properties ──
@@ -1435,24 +1509,32 @@ class GameState:
             return False
 
         observations = self.tier_mastery.get(tier, {}).get(current_phase)
-        not_enough_observations = observations is not None and len(observations) < self.min_observations_before_advance
+        not_enough_observations = (
+            observations is not None and len(observations) < self.min_observations_before_advance
+        )
         if not_enough_observations:
             return False
 
         mastery = self.get_tier_step_mastery(tier, current_phase)
         if mastery >= self.mastery_threshold:
             import logging
+
             _logger = logging.getLogger("qgre.types")
             old_phase = current_phase
             self.tier_phases[tier] = current_phase + 1
             self.phase_history.append((self.step_count, tier, old_phase, current_phase + 1))
             self.tier_steps_at_phase_start[tier] = self.step_count
-            _logger.warning(f"[PHASE ADVANCE] tier={tier}, {old_phase}→{current_phase+1}, step={self.step_count}, mastery={mastery:.3f}")
+            _logger.warning(
+                f"[PHASE ADVANCE] tier={tier}, {old_phase}→{current_phase+1}, step={self.step_count}, mastery={mastery:.3f}"
+            )
             return True
         return False
 
     def check_tier_unlock(
-        self, tier_order: list[str], unlock_phase: int, unlock_threshold: float,
+        self,
+        tier_order: list[str],
+        unlock_phase: int,
+        unlock_threshold: float,
     ) -> str | None:
         """Check if the next tier should be unlocked.
 
@@ -1502,7 +1584,7 @@ class GameState:
         windows = self.tier_mastery.get(tier, {})
         window = windows.get(current_phase)
         if window and len(window) >= self.plateau_window:
-            recent = list(window)[-self.plateau_window:]
+            recent = list(window)[-self.plateau_window :]
             half = len(recent) // 2
             first_half_mean = sum(recent[:half]) / half
             second_half_mean = sum(recent[half:]) / (len(recent) - half)

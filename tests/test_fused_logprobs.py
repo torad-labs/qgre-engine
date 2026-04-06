@@ -4,9 +4,9 @@ Tests the core chunking + autograd mechanics. The Unsloth env var integration
 (UNSLOTH_RETURN_HIDDEN_STATES) is tested via live model tests, not mocks.
 """
 
-import torch
-import torch.nn as nn
 import pytest
+import torch
+from torch import nn
 
 from qgre.fused_logprobs import chunked_logprobs_from_hidden, get_hidden_states_and_lm_head
 
@@ -41,9 +41,15 @@ class TestChunkedLogprobs:
         hidden = torch.randn(1, 20, 32, requires_grad=True)
         labels = torch.randint(0, 100, (1, 20))
 
-        with_ckpt = chunked_logprobs_from_hidden(hidden, lm_head, labels, chunk_size=8, use_checkpoint=True)
-        without_ckpt = chunked_logprobs_from_hidden(hidden, lm_head, labels, chunk_size=8, use_checkpoint=False)
-        assert torch.allclose(with_ckpt, without_ckpt, atol=1e-5), "Checkpoint must not change values"
+        with_ckpt = chunked_logprobs_from_hidden(
+            hidden, lm_head, labels, chunk_size=8, use_checkpoint=True
+        )
+        without_ckpt = chunked_logprobs_from_hidden(
+            hidden, lm_head, labels, chunk_size=8, use_checkpoint=False
+        )
+        assert torch.allclose(
+            with_ckpt, without_ckpt, atol=1e-5
+        ), "Checkpoint must not change values"
 
     def test_single_chunk_equivalent_to_full(self):
         """When chunk_size >= seq_len, result should match non-chunked."""
@@ -56,6 +62,7 @@ class TestChunkedLogprobs:
         with torch.no_grad():
             logits = lm_head(hidden).float()
             from qgre.nemo_extracted.logits import selective_log_softmax
+
             direct = selective_log_softmax(logits, labels)
         assert torch.allclose(chunked.detach(), direct, atol=1e-5)
 
@@ -92,6 +99,7 @@ class TestGetHiddenStatesAndLmHead:
 
                 class _Config:
                     pass
+
                 self.config = _Config()
                 self.config.vocab_size = vocab_size
 
@@ -100,8 +108,10 @@ class TestGetHiddenStatesAndLmHead:
 
             def forward(self, input_ids, **kwargs):
                 batch, seq = input_ids.shape
+
                 class Out:
                     pass
+
                 result = Out()
                 result.logits = torch.randn(batch, seq, out_dim)
                 return result
@@ -122,6 +132,7 @@ class TestGetHiddenStatesAndLmHead:
         input_ids = torch.randint(0, 100, (1, 10))
         # GB3-005: Should raise RuntimeError instead of returning None
         import pytest
+
         with pytest.raises(RuntimeError, match="GB3-005.*logits.*not hidden states"):
             get_hidden_states_and_lm_head(model, input_ids)
 
@@ -136,6 +147,7 @@ class TestGetHiddenStatesAndLmHead:
 
     def test_model_without_config_uses_lm_head_dims(self):
         """When model has no config attribute, shape check uses lm_head.in_features."""
+
         class NoConfigModel(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -146,8 +158,10 @@ class TestGetHiddenStatesAndLmHead:
 
             def forward(self, input_ids, **kwargs):
                 batch, seq = input_ids.shape
+
                 class Out:
                     pass
+
                 result = Out()
                 result.logits = torch.randn(batch, seq, 32)
                 return result
@@ -159,9 +173,11 @@ class TestGetHiddenStatesAndLmHead:
 
     def test_no_lm_head_returns_none(self):
         """When model has no get_output_embeddings or it returns non-Linear."""
+
         class NoEmbModel(nn.Module):
             def get_output_embeddings(self):
                 return None  # Not nn.Linear
+
             def forward(self, input_ids, **kwargs):
                 return torch.randn(1, 10, 32)
 

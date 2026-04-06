@@ -12,27 +12,46 @@ Only downloads the embedding layer from each model — not the full weights.
 
 import json
 import sys
-from pathlib import Path
 from itertools import combinations
+from pathlib import Path
 
-import torch
 import numpy as np
+import torch
+
 
 # Physics tokens relevant to Hamiltonian mechanics
 # Include single-char tokens AND multi-char tokens that the tokenizer might produce
 PHYSICS_TOKENS = [
     # Variables
-    "p", "V", "T", "H", "x", "y", "q",
+    "p",
+    "V",
+    "T",
+    "H",
+    "x",
+    "y",
+    "q",
     # Constants/parameters
-    "m", "k", "g",
+    "m",
+    "k",
+    "g",
     # Operators/calculus
-    "dt", "dx", "dp",
+    "dt",
+    "dx",
+    "dp",
     # Key physics words
-    "kinetic", "potential", "momentum", "Hamiltonian",
+    "kinetic",
+    "potential",
+    "momentum",
+    "Hamiltonian",
     # Math operators (to see if math vs language separation scales)
-    "frac", "partial", "sqrt",
+    "frac",
+    "partial",
+    "sqrt",
     # Control tokens (non-physics, for comparison)
-    "the", "is", "and", "of",
+    "the",
+    "is",
+    "and",
+    "of",
 ]
 
 # Qwen3 model sizes to compare
@@ -52,9 +71,9 @@ def load_embeddings_only(model_id: str) -> tuple[torch.Tensor, "PreTrainedTokeni
     Uses safetensors index to download only the shard containing embeddings,
     not the full model weights.
     """
-    from transformers import AutoTokenizer, AutoConfig
-    from huggingface_hub import hf_hub_download
     import safetensors.torch
+    from huggingface_hub import hf_hub_download
+    from transformers import AutoConfig, AutoTokenizer
 
     print(f"\n{'='*60}")
     print(f"Loading embeddings from {model_id}")
@@ -233,10 +252,22 @@ def main():
 
     # Select key physics pairs to highlight
     key_pairs = [
-        "p|V", "p|T", "T|V", "p|H", "V|H", "T|H",  # Physics variables
-        "p|x", "V|x", "m|k", "m|g", "k|g",           # Variables vs params
-        "kinetic|potential", "momentum|Hamiltonian",    # Physics concepts
-        "p|the", "V|the", "T|the",                     # Physics vs language
+        "p|V",
+        "p|T",
+        "T|V",
+        "p|H",
+        "V|H",
+        "T|H",  # Physics variables
+        "p|x",
+        "V|x",
+        "m|k",
+        "m|g",
+        "k|g",  # Variables vs params
+        "kinetic|potential",
+        "momentum|Hamiltonian",  # Physics concepts
+        "p|the",
+        "V|the",
+        "T|the",  # Physics vs language
     ]
 
     model_names = list(results.keys())
@@ -245,7 +276,11 @@ def main():
         return
 
     # Find pairs that exist in all models
-    all_pairs = set.intersection(*[set(results[m]["distances"].keys()) for m in model_names]) if model_names else set()
+    all_pairs = (
+        set.intersection(*[set(results[m]["distances"].keys()) for m in model_names])
+        if model_names
+        else set()
+    )
 
     # Header
     header = f"{'Pair':<25}"
@@ -277,7 +312,7 @@ def main():
 
         # Check linearity: ratio of smallest to largest
         if len(values) >= 2 and values[-1] != 0:
-            ratio = values[0] / values[-1] if values[-1] != 0 else float('inf')
+            ratio = values[0] / values[-1] if values[-1] != 0 else float("inf")
 
     # Compute scaling summary
     print("\n" + "=" * 80)

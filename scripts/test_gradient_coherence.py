@@ -1,8 +1,10 @@
 """Quick test of gradient coherence measurement to validate near-zero cosine."""
 
-import torch
 import sys
 from pathlib import Path
+
+import torch
+
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -61,8 +63,18 @@ def test_with_dummy_model():
     print("\n[TEST 4] LoRA-like low-rank gradients")
     for param in model.parameters():
         # Create low-rank gradient (rank 5)
-        u = torch.randn(param.shape[0], 5) if param.dim() == 2 else torch.randn_like(param).unsqueeze(-1).expand(-1, 5)
-        v = torch.randn(5, param.shape[-1]) if param.dim() == 2 else torch.randn(5, *param.shape[1:]) if param.dim() > 1 else torch.randn(5)
+        u = (
+            torch.randn(param.shape[0], 5)
+            if param.dim() == 2
+            else torch.randn_like(param).unsqueeze(-1).expand(-1, 5)
+        )
+        v = (
+            torch.randn(5, param.shape[-1])
+            if param.dim() == 2
+            else torch.randn(5, *param.shape[1:])
+            if param.dim() > 1
+            else torch.randn(5)
+        )
         if param.dim() == 2:
             param.grad = u @ v
         else:

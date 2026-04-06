@@ -14,6 +14,7 @@ from pathlib import Path
 
 import torch
 
+
 warnings.filterwarnings("ignore", message=".*does not have a padding token.*")
 warnings.filterwarnings("ignore", message=".*PAD_TOKEN.*")
 
@@ -56,7 +57,15 @@ def main():
         model,
         r=config.model.lora_rank,
         lora_alpha=config.model.lora_alpha,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        target_modules=[
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        ],
         modules_to_save=["lm_head"],  # Phase 2: embed_tokens removed (fim_pad is pre-trained)
         lora_dropout=0.0,
         use_gradient_checkpointing="unsloth",
@@ -77,28 +86,38 @@ def main():
     else:
         fails += 1
 
-    if check("Pad token != EOS token", pad_id != eos_id,
-             f"PAD={pad_id} ({pad_token}), EOS={eos_id} ({tokenizer.eos_token})"):
+    if check(
+        "Pad token != EOS token",
+        pad_id != eos_id,
+        f"PAD={pad_id} ({pad_token}), EOS={eos_id} ({tokenizer.eos_token})",
+    ):
         passes += 1
     else:
         fails += 1
 
-    if check("Pad token is <|vision_pad|> (151654)", pad_id == 151654,
-             f"Actual: {pad_id} ({pad_token})"):
+    if check(
+        "Pad token is <|vision_pad|> (151654)", pad_id == 151654, f"Actual: {pad_id} ({pad_token})"
+    ):
         passes += 1
     else:
         fails += 1
 
-    if check("EOS token is <|im_end|> (151645)", eos_id == 151645,
-             f"Actual: {eos_id} ({tokenizer.eos_token})"):
+    if check(
+        "EOS token is <|im_end|> (151645)",
+        eos_id == 151645,
+        f"Actual: {eos_id} ({tokenizer.eos_token})",
+    ):
         passes += 1
     else:
         fails += 1
 
     # Verify pad token is NOT a stop token
     stop_tokens = config.generation.stop_token_ids
-    if check("Pad token NOT in stop_token_ids", pad_id not in stop_tokens,
-             f"stop_tokens={stop_tokens}, pad={pad_id}"):
+    if check(
+        "Pad token NOT in stop_token_ids",
+        pad_id not in stop_tokens,
+        f"stop_tokens={stop_tokens}, pad={pad_id}",
+    ):
         passes += 1
     else:
         fails += 1
@@ -108,14 +127,20 @@ def main():
 
     # Qwen3 tokenizer: test that padding works correctly
     # Use texts with VERY different lengths to guarantee padding
-    test_texts = ["Hello", "This is a much longer sentence that should require many more tokens to encode"]
+    test_texts = [
+        "Hello",
+        "This is a much longer sentence that should require many more tokens to encode",
+    ]
     encoded = tokenizer(test_texts, padding=True, return_tensors="pt")
     input_ids = encoded["input_ids"]
 
     # Shorter sequence (index 0) should have pad tokens
     pad_positions = (input_ids[0] == pad_id).sum().item()
-    if check("Shorter sequence has pad tokens", pad_positions > 0,
-             f"Pad positions in shorter sequence: {pad_positions}, seq lengths: {(input_ids[0] != pad_id).sum().item()} vs {(input_ids[1] != pad_id).sum().item()}"):
+    if check(
+        "Shorter sequence has pad tokens",
+        pad_positions > 0,
+        f"Pad positions in shorter sequence: {pad_positions}, seq lengths: {(input_ids[0] != pad_id).sum().item()} vs {(input_ids[1] != pad_id).sum().item()}",
+    ):
         passes += 1
     else:
         fails += 1
@@ -124,8 +149,11 @@ def main():
     tokenizer.padding_side = "left"
     encoded_left = tokenizer(test_texts, padding=True, return_tensors="pt")
     first_token_shorter = encoded_left["input_ids"][0][0].item()
-    if check("Left-padding: first token of shorter seq is PAD", first_token_shorter == pad_id,
-             f"First token: {first_token_shorter}, expected PAD={pad_id}"):
+    if check(
+        "Left-padding: first token of shorter seq is PAD",
+        first_token_shorter == pad_id,
+        f"First token: {first_token_shorter}, expected PAD={pad_id}",
+    ):
         passes += 1
     else:
         fails += 1
@@ -134,6 +162,7 @@ def main():
     print("\n--- CHECK 3: LoRA adapter save/load ---")
 
     import tempfile
+
     lora_dir = Path(tempfile.mkdtemp()) / "test_lora"
 
     # Save LoRA
@@ -151,8 +180,9 @@ def main():
     safetensors = list(lora_dir.rglob("*.safetensors"))
     bin_files = list(lora_dir.rglob("*.bin"))
     has_weights = len(safetensors) > 0 or len(bin_files) > 0
-    if check("Weight files saved", has_weights,
-             f"safetensors: {len(safetensors)}, bin: {len(bin_files)}"):
+    if check(
+        "Weight files saved", has_weights, f"safetensors: {len(safetensors)}, bin: {len(bin_files)}"
+    ):
         passes += 1
     else:
         fails += 1
@@ -166,6 +196,7 @@ def main():
 
     # Hash weights before reload
     import hashlib
+
     weight_hash_before = hashlib.sha256()
     for f in sorted(safetensors or bin_files):
         weight_hash_before.update(f.read_bytes())
@@ -185,8 +216,11 @@ def main():
     for f in sorted(lora_dir.rglob("*.safetensors") or lora_dir.rglob("*.bin")):
         weight_hash_after.update(f.read_bytes())
     hash_after = weight_hash_after.hexdigest()[:16]
-    if check("Weight hash unchanged after reload", hash_before == hash_after,
-             f"Before: {hash_before}, After: {hash_after}"):
+    if check(
+        "Weight hash unchanged after reload",
+        hash_before == hash_after,
+        f"Before: {hash_before}, After: {hash_after}",
+    ):
         passes += 1
     else:
         fails += 1
@@ -199,29 +233,42 @@ def main():
 
     # Reload and verify
     from transformers import AutoTokenizer
+
     reloaded = AutoTokenizer.from_pretrained(str(tokenizer_dir))
 
-    if check("Reloaded pad_token_id matches", reloaded.pad_token_id == pad_id,
-             f"Saved: {pad_id}, Reloaded: {reloaded.pad_token_id}"):
+    if check(
+        "Reloaded pad_token_id matches",
+        reloaded.pad_token_id == pad_id,
+        f"Saved: {pad_id}, Reloaded: {reloaded.pad_token_id}",
+    ):
         passes += 1
     else:
         fails += 1
 
-    if check("Reloaded eos_token_id matches", reloaded.eos_token_id == eos_id,
-             f"Saved: {eos_id}, Reloaded: {reloaded.eos_token_id}"):
+    if check(
+        "Reloaded eos_token_id matches",
+        reloaded.eos_token_id == eos_id,
+        f"Saved: {eos_id}, Reloaded: {reloaded.eos_token_id}",
+    ):
         passes += 1
     else:
         fails += 1
 
-    if check("Reloaded pad_token matches", reloaded.pad_token == pad_token,
-             f"Saved: {pad_token}, Reloaded: {reloaded.pad_token}"):
+    if check(
+        "Reloaded pad_token matches",
+        reloaded.pad_token == pad_token,
+        f"Saved: {pad_token}, Reloaded: {reloaded.pad_token}",
+    ):
         passes += 1
     else:
         fails += 1
 
     # Verify vocab size preserved
-    if check("Vocab size preserved", len(reloaded) == len(tokenizer),
-             f"Original: {len(tokenizer)}, Reloaded: {len(reloaded)}"):
+    if check(
+        "Vocab size preserved",
+        len(reloaded) == len(tokenizer),
+        f"Original: {len(tokenizer)}, Reloaded: {len(reloaded)}",
+    ):
         passes += 1
     else:
         fails += 1
@@ -246,8 +293,11 @@ def main():
     if outputs and outputs[0].outputs:
         gen_text = outputs[0].outputs[0].text
         gen_tokens = outputs[0].outputs[0].token_ids
-        if check("Generation produces output", len(gen_text) > 0,
-                 f"{len(gen_tokens)} tokens, {len(gen_text)} chars"):
+        if check(
+            "Generation produces output",
+            len(gen_text) > 0,
+            f"{len(gen_tokens)} tokens, {len(gen_text)} chars",
+        ):
             passes += 1
         else:
             fails += 1
@@ -256,8 +306,11 @@ def main():
         last_token = gen_tokens[-1] if gen_tokens else None
         is_stop = last_token in config.generation.stop_token_ids
         is_max = len(gen_tokens) >= 64
-        if check("Stops at stop token or max_tokens", is_stop or is_max,
-                 f"Last token: {last_token}, is_stop: {is_stop}, is_max: {is_max}"):
+        if check(
+            "Stops at stop token or max_tokens",
+            is_stop or is_max,
+            f"Last token: {last_token}, is_stop: {is_stop}, is_max: {is_max}",
+        ):
             passes += 1
         else:
             fails += 1
@@ -277,6 +330,7 @@ def main():
 
     # Cleanup
     import shutil
+
     shutil.rmtree(lora_dir.parent, ignore_errors=True)
     shutil.rmtree(tokenizer_dir.parent, ignore_errors=True)
 

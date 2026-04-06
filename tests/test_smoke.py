@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import torch
 
+
 gpu = pytest.mark.gpu
 
 
@@ -23,12 +24,12 @@ def test_three_steps_no_crash():
     Assert: no crash, no nan loss, no OOM.
     This is THE integration test that validates everything works together.
     """
-    from qgre.config import QGREConfig, ModelConfig, GenerationConfig
+    from qgre.config import QGREConfig
+    from qgre.data import QGREDataLoader
     from qgre.generation import UnslothBackend
-    from qgre.trainer import QGRETrainer
-    from qgre.data import QGREDataLoader, PromptBatch
-    from qgre.types import RewardResult
     from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES as STEP_QUALITIES
+    from qgre.trainer import QGRETrainer
+    from qgre.types import RewardResult
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = QGREConfig()
@@ -100,7 +101,9 @@ def test_three_steps_no_crash():
                 metrics = trainer.step(batch, output.token_ids, reward_results)
                 losses.append(metrics["loss"])
 
-                assert torch.isfinite(torch.tensor(metrics["loss"])), f"NaN/Inf loss at step {step_num}"
+                assert torch.isfinite(
+                    torch.tensor(metrics["loss"])
+                ), f"NaN/Inf loss at step {step_num}"
                 break  # One batch per epoch for smoke test
 
         assert len(losses) == 3
@@ -115,7 +118,8 @@ def test_lora_sync_verification():
     """
     import tempfile
     from pathlib import Path
-    from qgre.config import ModelConfig, GenerationConfig
+
+    from qgre.config import GenerationConfig, ModelConfig
     from qgre.generation import UnslothBackend
     from qgre.lora_verify import LoRAVerifier
 
@@ -150,12 +154,13 @@ def test_vram_does_not_grow():
     """
     import tempfile
     from pathlib import Path
+
     from qgre.config import QGREConfig
-    from qgre.generation import UnslothBackend
-    from qgre.trainer import QGRETrainer
     from qgre.data import QGREDataLoader
-    from qgre.types import RewardResult
+    from qgre.generation import UnslothBackend
     from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES as STEP_QUALITIES
+    from qgre.trainer import QGRETrainer
+    from qgre.types import RewardResult
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = QGREConfig()
@@ -176,19 +181,25 @@ def test_vram_does_not_grow():
 
         prompts = [{"prompt": f"Test prompt {i}"} for i in range(5)]
         loader = QGREDataLoader(
-            prompts=prompts, tokenizer=tokenizer,
-            max_prompt_length=256, train_batch_size=1, n_completions=1,
+            prompts=prompts,
+            tokenizer=tokenizer,
+            max_prompt_length=256,
+            train_batch_size=1,
+            n_completions=1,
         )
 
         def stub_reward(prompt, completion, meta=None):
             all_q = []
             for qs in STEP_QUALITIES.values():
                 all_q.extend(qs)
-            return RewardResult(reward=0.5, scores={q: 0.5 for q in all_q}, phase=1)
+            return RewardResult(reward=0.5, scores=dict.fromkeys(all_q, 0.5), phase=1)
 
         trainer = QGRETrainer(
-            model=model, tokenizer=tokenizer, reward_fn=stub_reward,
-            config=cfg, generation_backend=backend,
+            model=model,
+            tokenizer=tokenizer,
+            reward_fn=stub_reward,
+            config=cfg,
+            generation_backend=backend,
         )
         trainer.setup_optimizer()
 

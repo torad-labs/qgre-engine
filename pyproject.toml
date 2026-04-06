@@ -36,6 +36,10 @@ hamiltonian = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "ruff>=0.4.0",
+    "pyright>=1.1.360",
+    "pre-commit>=3.7.0",
+    "bandit[toml]>=1.7.8",
 ]
 
 [project.urls]
@@ -48,4 +52,396 @@ include = ["qgre*"]
 markers = [
     "gpu: requires CUDA GPU (skip with -m 'not gpu')",
     "slow: slow tests (skip with -m 'not slow')",
+]
+
+# =============================================================================
+# Ruff - Fast Python linter and formatter
+# Catches silent bugs that cause garbage gradients in ML training
+# =============================================================================
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+exclude = [
+    ".git",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "*.egg-info",
+]
+
+[tool.ruff.lint]
+# Enable comprehensive rule sets - ML training code needs strict checking
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes - unused imports/variables, undefined names
+    "B",      # flake8-bugbear - common bugs and design problems
+    "C4",     # flake8-comprehensions
+    "I",      # isort - import sorting
+    "N",      # pep8-naming
+    "UP",     # pyupgrade - modern Python syntax
+    "YTT",    # flake8-2020 - sys.version checks
+    "ANN",    # flake8-annotations - type annotation checks
+    "ASYNC",  # flake8-async
+    "S",      # flake8-bandit - security
+    "BLE",    # flake8-blind-except - bare except clauses
+    "A",      # flake8-builtins - shadowing builtins
+    "COM",    # flake8-commas
+    "C90",    # mccabe complexity
+    "DTZ",    # flake8-datetimez
+    "T10",    # flake8-debugger
+    "EXE",    # flake8-executable
+    "ISC",    # flake8-implicit-str-concat
+    "ICN",    # flake8-import-conventions
+    "LOG",    # flake8-logging
+    "G",      # flake8-logging-format
+    "INP",    # flake8-no-pep420
+    "PIE",    # flake8-pie
+    "T20",    # flake8-print - no print statements in production
+    "PYI",    # flake8-pyi
+    "PT",     # flake8-pytest-style
+    "Q",      # flake8-quotes
+    "RSE",    # flake8-raise
+    "RET",    # flake8-return - missing returns, unnecessary returns
+    "SLF",    # flake8-self
+    "SLOT",   # flake8-slots
+    "SIM",    # flake8-simplify - catches incomplete logic
+    "TID",    # flake8-tidy-imports
+    "TCH",    # flake8-type-checking
+    "INT",    # flake8-gettext
+    "ARG",    # flake8-unused-arguments
+    "PTH",    # flake8-use-pathlib
+    "TD",     # flake8-todos
+    "FIX",    # flake8-fixme
+    "ERA",    # eradicate - commented out code (incomplete work indicator)
+    "PGH",    # pygrep-hooks
+    "PL",     # Pylint
+    "TRY",    # tryceratops - exception handling
+    "FLY",    # flynt
+    "NPY",    # NumPy-specific rules
+    "PERF",   # Perflint - performance anti-patterns
+    "FURB",   # refurb - modern Python
+    "RUF",    # Ruff-specific rules
+]
+
+ignore = [
+    # ISC001 conflicts with ruff formatter (they prefer different string concat styles)
+    "ISC001",
+    # COM812 trailing comma conflicts with formatter in some cases
+    "COM812",
+    # Allow TODO/FIXME comments (we track these separately)
+    "TD002",
+    "TD003",
+    "FIX002",
+    # Allow assert in tests
+    "S101",
+    # Allow print in examples/scripts (but not in qgre/)
+    "T201",
+    # Line too long - let formatter handle this
+    "E501",
+    # Allow f-string in logging (performance vs readability tradeoff)
+    "G004",
+    # Magic value comparison - too noisy for ML code with constants
+    "PLR2004",
+    # Too many arguments - ML functions often have many config params
+    "PLR0913",
+    # Too many branches/statements - complex training loops are expected
+    "PLR0912",
+    "PLR0915",
+    # Missing type annotation for **kwargs
+    "ANN003",
+    # Mutable class attributes - dataclasses use field(default_factory=)
+    "RUF012",
+    # Exception must not use string (we use descriptive error messages)
+    "TRY003",
+    # Avoid specifying long messages outside exception class
+    "EM101",
+    "EM102",
+    # Inline imports necessary for lazy loading and avoiding circular imports
+    "PLC0415",
+    # Private member access often necessary for internal module communication
+    "SLF001",
+    # Unicode characters in docstrings (physics symbols like α, β, etc.)
+    "RUF002",
+    "RUF003",
+    # Complex functions are expected in ML training code
+    "C901",
+    # Raise within try is common pattern for error transformation
+    "TRY301",
+    # Loop variable binding is intentional in closures
+    "B023",
+    # Manual list comprehension sometimes clearer
+    "PERF401",
+    # Type comparison with is/is not is sometimes correct
+    "E721",
+    # Try-except in loop is sometimes necessary
+    "PERF203",
+    # Collapsible if often less readable
+    "SIM102",
+    # ANN401 any-type is necessary for dynamic typing at boundaries
+    "ANN401",
+    # ERA001 - many are documentation comments explaining code structure, not dead code
+    "ERA001",
+    # Unused arguments often intentional for API compatibility or protocol conformance
+    "ARG001",
+    "ARG002",
+    "ARG003",
+    "ARG005",
+    # Unused loop control variable - often intentional for range counting
+    "B007",
+    # Too many returns - complex validation logic
+    "PLR0911",
+    # Verbose log message - we want detailed error messages
+    "TRY401",
+    # Type check without TypeError - pattern matching is valid
+    "TRY004",
+    # Redefined loop name - sometimes intentional
+    "PLW2901",
+    # Suspicious random - we use seeded random for reproducibility, not crypto
+    "S311",
+    # NPY002 legacy random - numpy.random.seed is valid for reproducibility
+    "NPY002",
+    # PTH rules - sometimes os.path is clearer
+    "PTH100",
+    "PTH112",
+    "PTH118",
+    "PTH120",
+    "PTH123",
+    # Ambiguous variable name (l, I, O) - sometimes acceptable in math context
+    "E741",
+    # raise-without-from - sometimes we don't want the original exception
+    "B904",
+    # Try-consider-else - often less readable
+    "TRY300",
+    # open without context manager - sometimes context is managed elsewhere
+    "SIM115",
+]
+
+# Per-file ignores
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "ANN",     # Tests don't need full type annotations
+    "S101",    # Assert is fine in tests
+    "S105",    # Hardcoded test passwords ok
+    "S108",    # Temp paths in tests are safe
+    "PLR2004", # Magic values fine in tests
+    "ARG001",  # Unused args (fixtures)
+    "ARG002",
+    "SLF001",  # Private member access ok in tests
+    "E402",    # Import order for pytest fixtures
+    "N802",    # Physics function names (test_T_momentum_form)
+    "N806",    # Physics variable names
+    "N812",    # Import aliases (XML_SEG)
+    "BLE001",  # Blind except ok in tests for error paths
+    "F841",    # Unused variables ok in test setup
+    "F821",    # Undefined names (torch in annotations)
+    "PT018",   # Compound assertions ok in tests
+    "PT030",   # pytest.warns too broad ok in tests
+    "PERF102", # dict.values() optimization not critical in tests
+    "PERF403", # Manual dict comprehension ok in tests
+    "SIM108",  # Ternary not required in tests
+    "SIM222",  # Boolean simplification not required in tests
+    "PIE810",  # startswith tuple not required in tests
+    "B028",    # stacklevel not required in test warnings
+    "RUF043",  # pytest.raises ambiguous pattern ok in tests
+    "RUF059",  # Unused unpacked variable ok (model, tokenizer = backend.load())
+    "FURB171", # Single-item membership ok in tests
+    "S110",    # try-except-pass ok in test error handling verification
+]
+"examples/**/*.py" = [
+    "T201",    # Print ok in examples
+    "INP001",  # Examples don't need __init__.py
+    "N802",    # Physics function names (_extract_H, _score_T_uses_p)
+    "N806",    # Physics variable names (T, V, H, etc.)
+    "N803",    # Physics argument names
+    "ANN",     # Examples don't need full annotations
+    "ARG001",  # Unused arguments ok in examples
+    "E402",    # Import order (path setup before imports)
+    "F841",    # Unused variables ok in examples
+    "BLE001",  # Blind except ok in examples (sympy parsing)
+    "S110",    # try-except-pass ok for optional features
+    "S112",    # try-except-continue ok for batch processing
+    "PIE810",  # startswith tuple not required
+    "RET504",  # Unnecessary assignment before return ok for clarity
+    "RET505",  # Unnecessary else after return ok for clarity
+    "RUF001",  # Ambiguous Unicode ok (Greek letters in physics: γ, ×)
+    "FURB171", # Single-item membership ok
+    "PERF403", # Manual dict comprehension ok
+]
+"scripts/**/*.py" = [
+    "T201",    # Print ok in scripts
+    "INP001",  # Scripts don't need __init__.py
+    "ANN",     # Scripts don't need full annotations
+    "N803",    # Physics argument names (M, K, N for matrix dims)
+    "N806",    # Physics variable names
+    "N812",    # Import alias (TBenchmark) ok
+    "EXE001",  # Shebang issues
+    "E402",    # Import order
+    "F821",    # Undefined names (optional type hints)
+    "F841",    # Unused variables ok in scripts
+    "BLE001",  # Blind except ok in scripts
+    "PLR2004", # Magic values in scripts
+    "S603",    # subprocess calls in scripts
+    "SIM113",  # enumerate() not required
+    "RUF001",  # Ambiguous Unicode ok (×, etc.)
+]
+"qgre/__main__.py" = [
+    "E402",    # Import order is intentional (env setup before imports)
+]
+"qgre/advantages.py" = [
+    "N806",    # Physics variable names (V for variance)
+    "F823",    # False positive - warnings is imported at module level
+    "ANN001",  # critic param is VPRMCritic (complex typing)
+]
+"qgre/attention_bonds.py" = [
+    "N812",    # import torch.nn.functional as F is PyTorch convention
+]
+"qgre/trainer.py" = [
+    "N806",    # T_max variable names reference scheduler.T_max
+    "N817",    # FLM alias for FastLanguageModel
+    "ANN001",  # Complex internal method parameters
+    "ANN201",  # completion_logger returns CompletionLogger (defined elsewhere)
+    "ANN202",  # Internal closures don't need full annotations
+]
+"qgre/triton_logprobs.py" = [
+    "N803",    # BLOCK_V, HAS_BIAS are Triton constexpr naming convention
+    "N806",    # Triton kernel variable naming
+    "ANN001",  # Triton pointers have special types
+]
+"qgre/weight_load.py" = [
+    "ANN201",  # Returns dynamic vLLM types
+]
+"qgre/fused_logprobs.py" = [
+    "ANN201",  # Returns model-specific types
+]
+"qgre/gradient_coherence.py" = [
+    "ANN001",  # loss_fn is Callable (complex typing)
+]
+"qgre/logging.py" = [
+    "ANN002",  # *exc in __exit__ is standard
+    "ANN204",  # __enter__/__exit__ return types
+]
+"qgre/lora_verify.py" = [
+    "ANN001",  # model/tokenizer are dynamic Unsloth types
+]
+"qgre/types.py" = [
+    "ANN001",  # config/tutorial_config are QGREConfig (avoid circular import)
+    "ANN201",  # resolve_mastery_score returns float (already annotated)
+]
+"qgre/nemo_extracted/**/*.py" = [
+    "ANN",     # Extracted code - don't modify
+    "ARG",     # Extracted code
+    "ERA001",  # Extracted code may have comments
+]
+
+[tool.ruff.lint.flake8-annotations]
+allow-star-arg-any = true
+mypy-init-return = true
+suppress-none-returning = true
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["qgre"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
+
+[tool.ruff.lint.pylint]
+max-args = 10
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+
+# =============================================================================
+# Pyright - Strict static type checking
+# Catches missing returns, type mismatches, unbound variables
+# =============================================================================
+[tool.pyright]
+pythonVersion = "3.10"
+pythonPlatform = "Linux"
+include = ["qgre"]
+exclude = [
+    "**/__pycache__",
+    "**/node_modules",
+    ".venv",
+    "build",
+    "dist",
+]
+
+# STRICT mode - catches silent ML bugs
+typeCheckingMode = "standard"  # Start with standard, upgrade to strict incrementally
+
+# Report levels for critical ML bugs
+reportMissingImports = "error"
+reportMissingTypeStubs = "warning"
+reportUnusedImport = "error"
+reportUnusedVariable = "error"
+reportUnusedFunction = "warning"
+reportDuplicateImport = "error"
+reportOptionalSubscript = "error"
+reportOptionalMemberAccess = "error"
+reportOptionalCall = "error"
+reportOptionalIterable = "error"
+reportOptionalContextManager = "error"
+reportOptionalOperand = "error"
+reportTypedDictNotRequiredAccess = "error"
+reportUntypedFunctionDecorator = "warning"
+reportUntypedClassDecorator = "warning"
+reportUntypedBaseClass = "warning"
+reportUntypedNamedTuple = "error"
+reportPrivateUsage = "warning"
+reportPrivateImportUsage = "warning"
+reportConstantRedefinition = "error"
+reportIncompatibleMethodOverride = "error"
+reportIncompatibleVariableOverride = "error"
+reportInconsistentConstructor = "error"
+reportOverlappingOverload = "error"
+reportMissingSuperCall = "warning"
+reportUninitializedInstanceVariable = "warning"
+reportInvalidStringEscapeSequence = "error"
+reportUnknownParameterType = "warning"
+reportUnknownArgumentType = "warning"
+reportUnknownLambdaType = "warning"
+reportUnknownVariableType = "warning"
+reportUnknownMemberType = "warning"
+reportMissingParameterType = "warning"
+reportMissingTypeArgument = "warning"
+reportInvalidTypeVarUse = "error"
+reportCallInDefaultInitializer = "error"
+reportUnnecessaryIsInstance = "warning"
+reportUnnecessaryCast = "warning"
+reportUnnecessaryComparison = "warning"
+reportUnnecessaryContains = "warning"
+reportAssertAlwaysTrue = "error"
+reportSelfClsParameterName = "error"
+reportImplicitStringConcatenation = "warning"
+reportUndefinedVariable = "error"
+reportUnboundVariable = "error"
+reportInvalidStubStatement = "error"
+reportIncompleteStub = "warning"
+reportUnsupportedDunderAll = "error"
+reportUnusedCallResult = "none"  # Too noisy for ML code
+reportUnusedCoroutine = "error"
+reportUnusedExpression = "warning"
+reportUnnecessaryTypeIgnoreComment = "warning"
+reportMatchNotExhaustive = "error"
+reportImplicitOverride = "warning"
+
+# =============================================================================
+# Bandit - Security linter
+# =============================================================================
+[tool.bandit]
+exclude_dirs = ["tests", "examples"]
+skips = [
+    "B101",  # assert used (we use it intentionally for invariants)
+    "B311",  # random not for crypto (we use torch random for ML)
 ]

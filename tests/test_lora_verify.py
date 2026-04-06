@@ -73,10 +73,10 @@ def test_should_recreate_engine():
 
     assert verifier.should_recreate_engine() is False  # step 1
     assert verifier.should_recreate_engine() is False  # step 2
-    assert verifier.should_recreate_engine() is True   # step 3 — recreate
+    assert verifier.should_recreate_engine() is True  # step 3 — recreate
     assert verifier.should_recreate_engine() is False  # step 4 (reset)
     assert verifier.should_recreate_engine() is False  # step 5
-    assert verifier.should_recreate_engine() is True   # step 6 — recreate
+    assert verifier.should_recreate_engine() is True  # step 6 — recreate
 
 
 def test_reset_recreate_counter():

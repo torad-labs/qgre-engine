@@ -15,12 +15,14 @@ without region diversity).
 
 from __future__ import annotations
 
-from collections import defaultdict
+from typing import TYPE_CHECKING
 
 import torch
-import torch.nn as nn
+from torch import nn
 
-from qgre.types import TrainingContext
+
+if TYPE_CHECKING:
+    from qgre.types import TrainingContext
 
 
 class QualityMLP(nn.Module):
@@ -78,15 +80,14 @@ class VPRMCritic(nn.Module):
         self.quality_names = all_qualities
 
         # One MLP per quality (online heads — learn fast via MSE)
-        self.heads = nn.ModuleDict({
-            q: QualityMLP(hidden_dim, intermediate_dim) for q in all_qualities
-        })
+        self.heads = nn.ModuleDict(
+            {q: QualityMLP(hidden_dim, intermediate_dim) for q in all_qualities}
+        )
 
         # Target heads — slow-moving copy for stable advantage predictions (Polyak averaged)
         import copy
-        self.target_heads = nn.ModuleDict({
-            q: copy.deepcopy(self.heads[q]) for q in all_qualities
-        })
+
+        self.target_heads = nn.ModuleDict({q: copy.deepcopy(self.heads[q]) for q in all_qualities})
         for param in self.target_heads.parameters():
             param.requires_grad = False
 
@@ -106,10 +107,17 @@ class VPRMCritic(nn.Module):
         """Polyak averaging: θ_target ← (1-τ)θ_target + τ*θ_online."""
         # RL3-009: Document that caller (compute_advantages or trainer) must call this
         for q_name in self.quality_names:
-            for op, tp in zip(self.heads[q_name].parameters(), self.target_heads[q_name].parameters()):
+            for op, tp in zip(
+                self.heads[q_name].parameters(),
+                self.target_heads[q_name].parameters(),
+                strict=False,
+            ):
                 if not torch.isfinite(op.data).all():
                     import warnings
-                    warnings.warn(f"NaN/Inf in online head '{q_name}' — skipping Polyak update")
+
+                    warnings.warn(
+                        f"NaN/Inf in online head '{q_name}' — skipping Polyak update", stacklevel=2
+                    )
                     return
                 # Move online params to target device before Polyak update
                 op_data = op.data.to(device=tp.device, dtype=tp.dtype)
@@ -119,7 +127,11 @@ class VPRMCritic(nn.Module):
     def sync_target_to_online(self):
         """Hard copy online → target. Used during warmup."""
         for q_name in self.quality_names:
-            for op, tp in zip(self.heads[q_name].parameters(), self.target_heads[q_name].parameters()):
+            for op, tp in zip(
+                self.heads[q_name].parameters(),
+                self.target_heads[q_name].parameters(),
+                strict=False,
+            ):
                 tp.data.copy_(op.data)
 
     def forward(
@@ -142,9 +154,9 @@ class VPRMCritic(nn.Module):
         """
         # Mean-pool hidden states per region (STEP_1, STEP_2, ...)
         # Extract unique step IDs in Python (avoids GPU sync from .unique().tolist())
-        step_ids_present = sorted({
-            int(r.split("_")[1]) for r in regions if r.startswith("STEP_") and "_" in r
-        })
+        step_ids_present = sorted(
+            {int(r.split("_")[1]) for r in regions if r.startswith("STEP_") and "_" in r}
+        )
         region_ids_list = []
         for r in regions:
             if r.startswith("STEP_") and "_" in r:
@@ -172,9 +184,13 @@ class VPRMCritic(nn.Module):
             region_key = f"STEP_{region_step}"
             if region_key in region_pools:
                 # C04-NUMERICAL: Cast pooled hidden states to ctx.dtype before MLP
-                pooled = region_pools[region_key].to(dtype=ctx.dtype).unsqueeze(0)  # [1, hidden_dim]
+                pooled = (
+                    region_pools[region_key].to(dtype=ctx.dtype).unsqueeze(0)
+                )  # [1, hidden_dim]
                 out = heads[q_name](pooled)
-                predictions[q_name] = out.squeeze() if out.numel() == 1 else out.squeeze(0).squeeze(0)
+                predictions[q_name] = (
+                    out.squeeze() if out.numel() == 1 else out.squeeze(0).squeeze(0)
+                )
             else:
                 # AE5: Region missing → return None so caller skips this quality's advantage
                 # (zero baseline would cause unbounded advantage = reward - 0)
@@ -182,9 +198,10 @@ class VPRMCritic(nn.Module):
                     self._region_not_found_count = 0
                 self._region_not_found_count += 1
                 import logging
+
                 logging.getLogger(__name__).error(
                     f"RL3-003: Region {region_key} not found for quality '{q_name}'. "
-                    f"Skipping advantage for this quality. Total skipped: {self._region_not_found_count}"
+                    f"Skipping advantage for this quality. Total skipped: {self._region_not_found_count}",
                 )
                 predictions[q_name] = None
 
@@ -211,9 +228,7 @@ class VPRMCritic(nn.Module):
             - critic_losses: quality_name → MSE loss tensor (for backward)
         """
         # Pool regions ONCE, then run both head sets against the same pools
-        step_ids_present = sorted({
-            int(r.split("_")[1]) for r in regions if r.startswith("STEP_")
-        })
+        step_ids_present = sorted({int(r.split("_")[1]) for r in regions if r.startswith("STEP_")})
         # C01-DEVICE: Use ctx.device for tensor creation
         region_ids = torch.tensor(
             [int(r.split("_")[1]) if r.startswith("STEP_") else -1 for r in regions],
@@ -232,7 +247,11 @@ class VPRMCritic(nn.Module):
                         self._nan_replacement_count = 0
                     self._nan_replacement_count += 1
                     import warnings
-                    warnings.warn(f"RL3-004: NaN detected in VPRM critic region pooling for STEP_{step_id}. Returning zero. Total: {self._nan_replacement_count}")
+
+                    warnings.warn(
+                        f"RL3-004: NaN detected in VPRM critic region pooling for STEP_{step_id}. Returning zero. Total: {self._nan_replacement_count}",
+                        stacklevel=2,
+                    )
                     pooled = torch.zeros_like(pooled)
                 region_pools[f"STEP_{step_id}"] = pooled
 
@@ -253,12 +272,16 @@ class VPRMCritic(nn.Module):
                 if q_name not in self._region_warned_count:
                     self._region_warned_count[q_name] = 0
                 self._region_warned_count[q_name] += 1
-                if q_name not in self._region_warned or self._region_warned_count[q_name] % 100 == 0:
+                if (
+                    q_name not in self._region_warned
+                    or self._region_warned_count[q_name] % 100 == 0
+                ):
                     import logging
+
                     logging.getLogger(__name__).warning(
                         f"Critic: no {region_key} found for quality '{q_name}' — "
                         f"segmenter may not be producing expected regions, critic will have zero gradient. "
-                        f"(occurred {self._region_warned_count[q_name]} times)"
+                        f"(occurred {self._region_warned_count[q_name]} times)",
                     )
                     self._region_warned.add(q_name)
                 advantages[q_name] = None
@@ -272,7 +295,11 @@ class VPRMCritic(nn.Module):
             # ADV-R2-5: Check for NaN before .item()
             if torch.isnan(target_pred):
                 import warnings
-                warnings.warn(f"NaN target prediction for quality '{q_name}' — setting advantage to 0.0")
+
+                warnings.warn(
+                    f"NaN target prediction for quality '{q_name}' — setting advantage to 0.0",
+                    stacklevel=2,
+                )
                 advantages[q_name] = 0.0
                 continue
             adv = actual - target_pred.detach().item()
@@ -287,7 +314,11 @@ class VPRMCritic(nn.Module):
                     self._no_grad_warned = set()
                 if q_name not in self._no_grad_warned:
                     import warnings
-                    warnings.warn(f"Critic head '{q_name}' has requires_grad=False — no loss recorded, critic will not learn")
+
+                    warnings.warn(
+                        f"Critic head '{q_name}' has requires_grad=False — no loss recorded, critic will not learn",
+                        stacklevel=2,
+                    )
                     self._no_grad_warned.add(q_name)
             if online_pred.requires_grad:
                 # C01-DEVICE: Use ctx.device for tensor creation
@@ -320,10 +351,10 @@ class VPRMCritic(nn.Module):
         all_losses: list[torch.Tensor] = []
 
         for i, (hs, regions, rewards) in enumerate(
-            zip(batch_hidden_states, batch_regions, batch_rewards)
+            zip(batch_hidden_states, batch_regions, batch_rewards, strict=False),
         ):
             if spo_fallback_mask is not None and spo_fallback_mask[i]:
-                batch_advantages.append({q: 0.0 for q in self.quality_names})
+                batch_advantages.append(dict.fromkeys(self.quality_names, 0.0))
                 continue
 
             advs, losses = self.compute_advantages(hs, regions, rewards, ctx)
@@ -386,7 +417,9 @@ class VPRMCritic(nn.Module):
             mask_len = float_mask.shape[0]
             if mask_len < hs_len:
                 # Mask is shorter — pad with zeros at start (prompt region)
-                padding = torch.zeros(hs_len - mask_len, device=float_mask.device, dtype=float_mask.dtype)
+                padding = torch.zeros(
+                    hs_len - mask_len, device=float_mask.device, dtype=float_mask.dtype
+                )
                 float_mask = torch.cat([padding, float_mask], dim=0)
             elif mask_len > hs_len:
                 # Mask is longer — trim from end
@@ -407,7 +440,11 @@ class VPRMCritic(nn.Module):
                     self._nan_span_count = 0
                 self._nan_span_count += 1
                 import warnings
-                warnings.warn(f"NaN in span pooling for '{q_name}'. Total: {self._nan_span_count}")
+
+                warnings.warn(
+                    f"NaN in span pooling for '{q_name}'. Total: {self._nan_span_count}",
+                    stacklevel=2,
+                )
                 advantages[q_name] = 0.0
                 continue
 
@@ -418,7 +455,10 @@ class VPRMCritic(nn.Module):
             target_pred = self.target_heads[q_name](pooled).squeeze(0).squeeze(0)
             if torch.isnan(target_pred):
                 import warnings
-                warnings.warn(f"NaN target prediction for quality '{q_name}' (span mode)")
+
+                warnings.warn(
+                    f"NaN target prediction for quality '{q_name}' (span mode)", stacklevel=2
+                )
                 advantages[q_name] = 0.0
                 continue
 
@@ -435,9 +475,10 @@ class VPRMCritic(nn.Module):
         # R2-RSP-004: Log warning when all qualities return None for a sample
         if all(v is None for v in advantages.values()):
             import logging
+
             logging.getLogger(__name__).warning(
                 f"R2-RSP-004: All qualities returned None from critic (all missing from masks). "
-                f"Quality names: {self.quality_names}, masks: {list(token_masks.keys())}"
+                f"Quality names: {self.quality_names}, masks: {list(token_masks.keys())}",
             )
 
         return advantages, critic_losses
@@ -463,12 +504,12 @@ class VPRMCritic(nn.Module):
         batch_advantages: list[dict[str, float]] = []
         all_losses: list[torch.Tensor] = []
 
-        for i, (hs, masks, rewards) in enumerate(
-            zip(batch_hidden_states, batch_token_masks, batch_rewards)
+        for _i, (hs, masks, rewards) in enumerate(
+            zip(batch_hidden_states, batch_token_masks, batch_rewards, strict=False),
         ):
             if not masks:
                 # No masks for this sample — skip critic
-                batch_advantages.append({q: None for q in self.quality_names})
+                batch_advantages.append(dict.fromkeys(self.quality_names))
                 continue
 
             advs, losses = self.compute_advantages_from_spans(hs, masks, rewards, ctx)

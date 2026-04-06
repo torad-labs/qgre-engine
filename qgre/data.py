@@ -3,20 +3,24 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
 
 
 @dataclass
 class PromptBatch:
     """A batch of tokenized, padded prompts ready for generation."""
 
-    input_ids: torch.Tensor       # [batch_size, max_prompt_length] — left-padded
-    attention_mask: torch.Tensor   # [batch_size, max_prompt_length]
-    prompt_ids: list[int]          # hash IDs for SPO value tracker
-    raw_prompts: list[str]         # original prompt text
+    input_ids: torch.Tensor  # [batch_size, max_prompt_length] — left-padded
+    attention_mask: torch.Tensor  # [batch_size, max_prompt_length]
+    prompt_ids: list[int]  # hash IDs for SPO value tracker
+    raw_prompts: list[str]  # original prompt text
     metadata: list[dict[str, Any]]  # ground_truth, extra_info, etc.
 
 
@@ -50,7 +54,7 @@ class QGREDataLoader:
         if n_completions < 1:
             raise ValueError(
                 f"DP-R2-05: n_completions must be >= 1, got {n_completions}. "
-                "Cannot generate rollouts with n_completions=0."
+                "Cannot generate rollouts with n_completions=0.",
             )
         self.tokenizer = tokenizer
         self.max_prompt_length = max_prompt_length
@@ -67,14 +71,16 @@ class QGREDataLoader:
         filtered = len(prompts) - self.total_prompts
         if filtered > 0:
             import warnings
+
             warnings.warn(
                 f"Filtered {filtered}/{len(prompts)} prompts exceeding "
-                f"max_prompt_length={max_prompt_length}"
+                f"max_prompt_length={max_prompt_length}",
+                stacklevel=2,
             )
         if self.total_prompts == 0:
             raise ValueError(
                 f"All {len(prompts)} prompts filtered by max_prompt_length={max_prompt_length}. "
-                f"No training data. Increase max_prompt_length or check prompts."
+                f"No training data. Increase max_prompt_length or check prompts.",
             )
 
         # Epoch tracking
@@ -97,7 +103,7 @@ class QGREDataLoader:
                     raise ValueError(
                         f"Required metadata_columns {missing} not found in prompt data at index {idx}. "
                         f"Available columns: {list(row.keys())}. "
-                        "Update metadata_columns in config or add missing columns to training data."
+                        "Update metadata_columns in config or add missing columns to training data.",
                     )
         items = []
         for row in prompts:
@@ -120,18 +126,24 @@ class QGREDataLoader:
 
                 if self._enable_thinking_supported is True:
                     token_ids = self.tokenizer.apply_chat_template(
-                        messages, tokenize=True, add_generation_prompt=True,
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
                         enable_thinking=False,
                     )
                 elif self._enable_thinking_supported is False:
                     token_ids = self.tokenizer.apply_chat_template(
-                        messages, tokenize=True, add_generation_prompt=True,
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=True,
                     )
                 else:
                     # First call: try with enable_thinking=False, cache result
                     try:
                         token_ids = self.tokenizer.apply_chat_template(
-                            messages, tokenize=True, add_generation_prompt=True,
+                            messages,
+                            tokenize=True,
+                            add_generation_prompt=True,
                             enable_thinking=False,
                         )
                         self._enable_thinking_supported = True
@@ -141,7 +153,9 @@ class QGREDataLoader:
                             raise
                         self._enable_thinking_supported = False
                         token_ids = self.tokenizer.apply_chat_template(
-                            messages, tokenize=True, add_generation_prompt=True,
+                            messages,
+                            tokenize=True,
+                            add_generation_prompt=True,
                         )
                 # transformers 5.x returns BatchEncoding, extract input_ids
                 if hasattr(token_ids, "input_ids"):
@@ -151,9 +165,11 @@ class QGREDataLoader:
                 # After unwrap, verify token_ids is still a sequence before len() check
                 if not isinstance(token_ids, (list, tuple)):
                     import warnings
+
                     warnings.warn(
                         f"DP-R2-UNWRAP: token_ids after unwrap is scalar {type(token_ids).__name__}, "
-                        f"wrapping back to list. Prompt text: {text[:100]}"
+                        f"wrapping back to list. Prompt text: {text[:100]}",
+                        stacklevel=2,
                     )
                     token_ids = [token_ids]
             else:
@@ -162,30 +178,37 @@ class QGREDataLoader:
             # DP-R2-02: Filter out empty token_ids
             if len(token_ids) == 0:
                 import warnings
+
                 warnings.warn(
                     f"DP-R2-02: Empty token_ids after encoding, skipping prompt. "
-                    f"Prompt text: {text[:100]}"
+                    f"Prompt text: {text[:100]}",
+                    stacklevel=2,
                 )
                 continue
 
             if len(token_ids) > self.max_prompt_length:
                 import warnings
+
                 warnings.warn(
                     f"Prompt truncated: {len(token_ids)} tokens > max_prompt_length={self.max_prompt_length}. "
-                    "This prompt will be skipped. Increase max_prompt_length if this is unintended."
+                    "This prompt will be skipped. Increase max_prompt_length if this is unintended.",
+                    stacklevel=2,
                 )
                 continue  # Filter overlong
 
             metadata = {col: row.get(col) for col in self.metadata_columns}
             prompt_id = int.from_bytes(
-                hashlib.sha256(text.encode()).digest()[:8], "big"
+                hashlib.sha256(text.encode()).digest()[:8],
+                "big",
             )
-            items.append({
-                "token_ids": token_ids,
-                "text": text,
-                "prompt_id": prompt_id,
-                "metadata": metadata,
-            })
+            items.append(
+                {
+                    "token_ids": token_ids,
+                    "text": text,
+                    "prompt_id": prompt_id,
+                    "metadata": metadata,
+                }
+            )
 
         return items
 
@@ -196,15 +219,18 @@ class QGREDataLoader:
             priorities: dict mapping prompt_id → priority weight (higher = sample more)
         """
         import math
+
         for prompt_id, weight in priorities.items():
             if not math.isfinite(weight) or weight < 0:
                 raise ValueError(
                     f"Invalid priority weight for prompt_id {prompt_id}: {weight}. "
-                    "Weights must be non-negative and finite."
+                    "Weights must be non-negative and finite.",
                 )
         self._priorities = priorities
 
-    def set_difficulty_gate(self, allowed_difficulties: set[str], difficulty_column: str = "difficulty"):
+    def set_difficulty_gate(
+        self, allowed_difficulties: set[str], difficulty_column: str = "difficulty"
+    ):
         """Gate prompts by difficulty: only prompts with matching difficulty get sampled.
 
         Prompts outside the allowed set get zero priority weight.
@@ -215,7 +241,7 @@ class QGREDataLoader:
                 f"set_difficulty_gate: difficulty_column='{difficulty_column}' "
                 f"not in metadata_columns={self.metadata_columns}. "
                 "Cannot gate by difficulty without the column. "
-                "Add difficulty_column to metadata_columns in config."
+                "Add difficulty_column to metadata_columns in config.",
             )
         # DP-R2-06: Validate difficulty_column exists in actual metadata keys, not just metadata_columns
         if self.items:
@@ -224,14 +250,16 @@ class QGREDataLoader:
                 raise ValueError(
                     f"DP3-001: difficulty_column='{difficulty_column}' not found in actual data metadata. "
                     f"Available keys: {list(sample_item['metadata'].keys())}. "
-                    "Check that difficulty_column is in metadata_columns and present in training data."
+                    "Check that difficulty_column is in metadata_columns and present in training data.",
                 )
         # DP3-003: Warn if metadata_columns is empty but difficulty_column is set
         if not self.metadata_columns:
             import warnings
+
             warnings.warn(
                 "DP3-003: metadata_columns is empty but difficulty_column is set. "
-                "Difficulty gating will not work. Add difficulty_column to metadata_columns."
+                "Difficulty gating will not work. Add difficulty_column to metadata_columns.",
+                stacklevel=2,
             )
             # Prevent gate from being set if metadata_columns is empty
             return
@@ -244,8 +272,10 @@ class QGREDataLoader:
 
         # Start with base weights
         weights = torch.tensor(
-            [self._priorities.get(item["prompt_id"], 1.0) if self._priorities else 1.0
-             for item in self.items],
+            [
+                self._priorities.get(item["prompt_id"], 1.0) if self._priorities else 1.0
+                for item in self.items
+            ],
             dtype=torch.float64,
         )
 
@@ -263,9 +293,11 @@ class QGREDataLoader:
                     filtered_count += 1
                     if none_count == 1:
                         import warnings
+
                         warnings.warn(
                             f"Difficulty gate: prompt {item['prompt_id']} has difficulty=None and will be filtered. "
-                            f"Check difficulty_column '{col}' data."
+                            f"Check difficulty_column '{col}' data.",
+                            stacklevel=2,
                         )
                     continue
                 # DP3-010: Explicit check — don't convert None to ""
@@ -274,34 +306,45 @@ class QGREDataLoader:
                     filtered_count += 1
             if none_count > 0:
                 import warnings
+
                 warnings.warn(
                     f"DP3-010: Difficulty gate: {none_count}/{len(self.items)} prompts have difficulty=None "
-                    f"and were filtered. Check difficulty_column '{col}' data."
+                    f"and were filtered. Check difficulty_column '{col}' data.",
+                    stacklevel=2,
                 )
 
         # DP-R3-03: Log at ERROR level with context about which gate caused zero weights
         if weights.sum() == 0:
             import logging
+
             logger = logging.getLogger(__name__)
             gate_context = []
             if self._priorities is not None:
                 gate_context.append("priority weights")
             if hasattr(self, "_difficulty_gate") and self._difficulty_gate is not None:
-                gate_context.append(f"difficulty_gate (allowed: {self._difficulty_gate.get('allowed_difficulties', [])})")
+                gate_context.append(
+                    f"difficulty_gate (allowed: {self._difficulty_gate.get('allowed_difficulties', [])})"
+                )
             logger.error(
                 f"DP-R3-03: ALL weights are zero after filtering by {', '.join(gate_context)}. "
                 "Falling back to uniform sampling. This indicates a configuration error: "
                 "no prompts pass the active gates. Check: (1) difficulty_gate allowed_difficulties, "
-                "(2) priority weights, (3) metadata column values."
+                "(2) priority weights, (3) metadata column values.",
             )
             weights = torch.ones(len(self.items), dtype=torch.float64)
 
-        if self._priorities is not None or (hasattr(self, "_difficulty_gate") and self._difficulty_gate is not None):
+        if self._priorities is not None or (
+            hasattr(self, "_difficulty_gate") and self._difficulty_gate is not None
+        ):
             # DP2-007: Filter out zero-weight prompts before multinomial sampling
             mask = weights > 0
             if mask.sum() == 0:
                 import warnings
-                warnings.warn("All weights are zero after filtering — falling back to uniform sampling")
+
+                warnings.warn(
+                    "All weights are zero after filtering — falling back to uniform sampling",
+                    stacklevel=2,
+                )
                 indices = torch.randperm(len(self.items), generator=gen).tolist()
             else:
                 # Only sample from non-zero weights
@@ -310,14 +353,17 @@ class QGREDataLoader:
                 nonzero_weights = nonzero_weights + 1e-8
                 nonzero_weights = nonzero_weights / nonzero_weights.sum()
                 sampled = torch.multinomial(
-                    nonzero_weights, len(self.items), replacement=True, generator=gen,
+                    nonzero_weights,
+                    len(self.items),
+                    replacement=True,
+                    generator=gen,
                 )
                 # DP3-008: Add assertion that remapped indices are valid
                 indices = nonzero_indices[sampled].tolist()
                 if any(idx >= len(self.items) or idx < 0 for idx in indices):
                     raise RuntimeError(
                         f"DP3-008: Multinomial sampling produced invalid indices. "
-                        f"Max index: {max(indices)}, items: {len(self.items)}"
+                        f"Max index: {max(indices)}, items: {len(self.items)}",
                     )
         else:
             indices = torch.randperm(len(self.items), generator=gen).tolist()
@@ -334,11 +380,13 @@ class QGREDataLoader:
         if vocab_size is not None and pad_id >= vocab_size:
             raise ValueError(
                 f"pad_token_id={pad_id} >= vocab_size={vocab_size}. "
-                "Invalid tokenizer configuration. Set tokenizer.pad_token_id to a valid token ID."
+                "Invalid tokenizer configuration. Set tokenizer.pad_token_id to a valid token ID.",
             )
         batch_size = len(token_ids_list)
         input_ids = torch.full(
-            (batch_size, self.max_prompt_length), pad_id, dtype=torch.long,
+            (batch_size, self.max_prompt_length),
+            pad_id,
+            dtype=torch.long,
         )
         attention_mask = torch.zeros(batch_size, self.max_prompt_length, dtype=torch.long)
 
@@ -366,15 +414,18 @@ class QGREDataLoader:
                 for _ in range(self.n_completions):
                     # DP-R2-01: Use deepcopy for nested metadata
                     import copy
+
                     meta = copy.deepcopy(item["metadata"])
                     # DP-R3-02: Use prefixed name to avoid collision with user metadata
                     meta["_batch_prompt_idx"] = orig_idx
-                    expanded_items.append({
-                        "token_ids": item["token_ids"],
-                        "text": item["text"],
-                        "prompt_id": item["prompt_id"],
-                        "metadata": meta,
-                    })
+                    expanded_items.append(
+                        {
+                            "token_ids": item["token_ids"],
+                            "text": item["text"],
+                            "prompt_id": item["prompt_id"],
+                            "metadata": meta,
+                        }
+                    )
 
             token_ids_list = [item["token_ids"] for item in expanded_items]
             input_ids, attention_mask = self._left_pad(token_ids_list)
@@ -406,22 +457,30 @@ class QGREDataLoader:
         }
         if self._difficulty_gate is not None:
             allowed, col = self._difficulty_gate
-            state["difficulty_gate"] = {"allowed_difficulties": list(allowed), "difficulty_column": col}
+            state["difficulty_gate"] = {
+                "allowed_difficulties": list(allowed),
+                "difficulty_column": col,
+            }
         return state
 
     def load_state_dict(self, state: dict):
         """Resume from checkpoint."""
-        from qgre.schema import validate_schema, FieldSpec, Required
         import math
 
+        from qgre.schema import FieldSpec, Required, validate_schema
+
         # Validate state dict structure
-        validated = validate_schema(state, {
-            "epoch": FieldSpec(int, Required.NO, default=0),
-            "step_in_epoch": FieldSpec(int, Required.NO, default=0),
-            "total_steps": FieldSpec(int, Required.NO, default=0),
-            "priority_weights": FieldSpec((dict, type(None)), Required.NO, default=None),
-            "difficulty_gate": FieldSpec((dict, type(None)), Required.NO, default=None),
-        }, "dataloader_state")
+        validated = validate_schema(
+            state,
+            {
+                "epoch": FieldSpec(int, Required.NO, default=0),
+                "step_in_epoch": FieldSpec(int, Required.NO, default=0),
+                "total_steps": FieldSpec(int, Required.NO, default=0),
+                "priority_weights": FieldSpec((dict, type(None)), Required.NO, default=None),
+                "difficulty_gate": FieldSpec((dict, type(None)), Required.NO, default=None),
+            },
+            "dataloader_state",
+        )
 
         self.epoch = validated["epoch"]
         self.step_in_epoch = validated["step_in_epoch"]
@@ -432,23 +491,31 @@ class QGREDataLoader:
             weights = validated["priority_weights"]
             if not isinstance(weights, dict):
                 import warnings
+
                 warnings.warn(
-                    f"SCHEMA: priority_weights expected dict, got {type(weights).__name__}. Skipping."
+                    f"SCHEMA: priority_weights expected dict, got {type(weights).__name__}. Skipping.",
+                    stacklevel=2,
                 )
             else:
                 # Validate each weight is non-negative and finite
                 # SFH-002: Track which entries are invalid for debugging
                 invalid_entries = []
                 for prompt_id, weight in weights.items():
-                    if not isinstance(weight, (int, float)) or weight < 0 or not math.isfinite(weight):
+                    if (
+                        not isinstance(weight, (int, float))
+                        or weight < 0
+                        or not math.isfinite(weight)
+                    ):
                         invalid_entries.append((prompt_id, weight))
                 if invalid_entries:
                     import warnings
+
                     sample = invalid_entries[:3]  # Show first 3
                     sample_str = ", ".join(f"{pid}={w}" for pid, w in sample)
                     warnings.warn(
                         f"SFH-002: {len(invalid_entries)} invalid priority weights. "
-                        f"Examples: [{sample_str}]. Skipping all priority_weights."
+                        f"Examples: [{sample_str}]. Skipping all priority_weights.",
+                        stacklevel=2,
                     )
                 else:
                     self._priorities = weights
@@ -459,30 +526,38 @@ class QGREDataLoader:
             gate = validated["difficulty_gate"]
             if not isinstance(gate, dict):
                 import warnings
+
                 warnings.warn(
                     f"SFH-001: difficulty_gate expected dict, got {type(gate).__name__}. "
-                    "Difficulty gate will not be restored — curriculum learning disabled."
+                    "Difficulty gate will not be restored — curriculum learning disabled.",
+                    stacklevel=2,
                 )
             elif "allowed_difficulties" not in gate or "difficulty_column" not in gate:
                 import warnings
+
                 warnings.warn(
                     f"SFH-001: difficulty_gate missing required keys. Got keys: {list(gate.keys())}. "
-                    "Difficulty gate will not be restored — curriculum learning disabled."
+                    "Difficulty gate will not be restored — curriculum learning disabled.",
+                    stacklevel=2,
                 )
             else:
                 allowed = gate["allowed_difficulties"]
                 col = gate["difficulty_column"]
                 if not isinstance(allowed, list):
                     import warnings
+
                     warnings.warn(
                         f"SFH-001: allowed_difficulties expected list, got {type(allowed).__name__}. "
-                        "Difficulty gate will not be restored — curriculum learning disabled."
+                        "Difficulty gate will not be restored — curriculum learning disabled.",
+                        stacklevel=2,
                     )
                 elif not isinstance(col, str):
                     import warnings
+
                     warnings.warn(
                         f"SFH-001: difficulty_column expected str, got {type(col).__name__}. "
-                        "Difficulty gate will not be restored — curriculum learning disabled."
+                        "Difficulty gate will not be restored — curriculum learning disabled.",
+                        stacklevel=2,
                     )
                 else:
                     self._difficulty_gate = (set(allowed), col)
@@ -491,6 +566,7 @@ class QGREDataLoader:
 def load_prompts_from_parquet(path: str | Path) -> list[dict[str, Any]]:
     """Load prompts from a parquet file. Returns list of dicts."""
     import pandas as pd
+
     # CFG-R2-3: Add context on FileNotFoundError
     try:
         df = pd.read_parquet(path)
@@ -498,6 +574,6 @@ def load_prompts_from_parquet(path: str | Path) -> list[dict[str, Any]]:
         raise FileNotFoundError(
             f"Training data file not found: {path}\n"
             f"Check data.train_files in config YAML and verify paths are correct.\n"
-            f"Original error: {e}"
+            f"Original error: {e}",
         ) from e
     return df.to_dict(orient="records")

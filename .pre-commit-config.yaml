@@ -1,0 +1,59 @@
+# Pre-commit hooks for QGRE - catches silent ML training bugs before commit
+# 55+ bugs found in hardening passes - this prevents future regressions
+
+default_language_version:
+  python: python3
+
+repos:
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-ast  # Verify Python files parse correctly
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: [--unsafe]  # Allow custom YAML tags
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: debug-statements  # No leftover print/pdb/debugger
+      - id: check-added-large-files
+        args: [--maxkb=1000]
+
+  # Ruff - fast Python linter and formatter
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.4
+    hooks:
+      # Linting - catches silent bugs, swallowed exceptions, incomplete code
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+        types_or: [python, pyi]
+      # Formatting - consistent style
+      - id: ruff-format
+        types_or: [python, pyi]
+
+  # Pyright - strict static type checking
+  # Catches missing returns, type mismatches, unbound variables
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright
+        entry: pyright
+        language: system
+        types: [python]
+        pass_filenames: false
+        args: [qgre/]
+
+  # Check for common security issues
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.8
+    hooks:
+      - id: bandit
+        args: [-c, pyproject.toml, -r, qgre/]
+        additional_dependencies: ["bandit[toml]"]
+
+# CI configuration
+ci:
+  autofix_prs: false  # Don't auto-fix, let developers see the issues
+  autofix_commit_msg: "style: auto-fix from pre-commit hooks"
+  autoupdate_schedule: monthly

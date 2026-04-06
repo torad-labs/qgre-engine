@@ -14,17 +14,19 @@ from pathlib import Path
 
 import torch
 
+
 warnings.filterwarnings("ignore", message=".*does not have a padding token.*")
 warnings.filterwarnings("ignore", message=".*PAD_TOKEN.*")
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from qgre.config import QGREConfig
+from qgre.data import PromptBatch
 from qgre.generation import UnslothBackend
 from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES
-from qgre.types import GameState, RewardResult
 from qgre.trainer import QGRETrainer
-from qgre.data import PromptBatch
+from qgre.types import GameState, RewardResult
+
 
 PROMPTS = [
     "Analyze the relationship between shared_mutable_state and thread_safety in concurrent programming.",
@@ -47,7 +49,9 @@ def score_completion(prompt: str, completion: str, meta: dict | None = None) -> 
 
     scores["q_format_tags"] = 1.0 if has_step1 else 0.0
     scores["q_tag_content"] = 0.8 if has_step1 and len(completion) > 100 else 0.2
-    scores["q_node_in_prompt"] = 0.7 if any(w in completion.lower() for w in prompt.lower().split()[:3]) else 0.3
+    scores["q_node_in_prompt"] = (
+        0.7 if any(w in completion.lower() for w in prompt.lower().split()[:3]) else 0.3
+    )
     scores["q_node_format"] = 0.9 if has_step1 else 0.1
     scores["q_node_length"] = min(1.0, len(completion) / 500)
     scores["q_chain_s2_refs_s1"] = 0.6 if has_step2 and has_step1 else 0.1
@@ -60,7 +64,13 @@ def score_completion(prompt: str, completion: str, meta: dict | None = None) -> 
     scores["q_node_f1"] = 0.3 if has_step4 else 0.0
     scores["q_eos_correct"] = 1.0
 
-    step1_keys = ["q_format_tags", "q_tag_content", "q_node_in_prompt", "q_node_format", "q_node_length"]
+    step1_keys = [
+        "q_format_tags",
+        "q_tag_content",
+        "q_node_in_prompt",
+        "q_node_format",
+        "q_node_length",
+    ]
     reward = sum(scores[k] for k in step1_keys) / len(step1_keys)
     return RewardResult(reward=reward, scores=scores, phase=1)
 
@@ -79,7 +89,7 @@ def main():
     config.generation.max_tokens = MAX_TOKENS
     config.algorithm.mode = "spo"
 
-    print(f"\nLoading model...")
+    print("\nLoading model...")
     backend = UnslothBackend(config.model, config.generation)
     model, tokenizer = backend.load()
 
@@ -87,8 +97,11 @@ def main():
     print(f"VRAM after load: {vram_after_load:.2f} GB")
 
     trainer = QGRETrainer(
-        model=model, tokenizer=tokenizer, reward_fn=score_completion,
-        config=config, generation_backend=backend,
+        model=model,
+        tokenizer=tokenizer,
+        reward_fn=score_completion,
+        config=config,
+        generation_backend=backend,
         game_state=GameState(),
         step_qualities=HYPERGRAPH_V1_STEP_QUALITIES,
     )
@@ -117,24 +130,30 @@ def main():
         attention_mask = torch.zeros(len(PROMPTS), max_len, dtype=torch.long)
         for i, ids in enumerate(chat_token_ids):
             ids = ids[-max_len:]
-            input_ids[i, max_len - len(ids):] = torch.tensor(ids, dtype=torch.long)
-            attention_mask[i, max_len - len(ids):] = 1
+            input_ids[i, max_len - len(ids) :] = torch.tensor(ids, dtype=torch.long)
+            attention_mask[i, max_len - len(ids) :] = 1
         input_ids = input_ids.to("cuda")
         attention_mask = attention_mask.to("cuda")
         gen_output = backend.generate(input_ids, attention_mask)
 
         # Score
-        reward_results = [score_completion(PROMPTS[i], gen_output.texts[i]) for i in range(len(gen_output.texts))]
+        reward_results = [
+            score_completion(PROMPTS[i], gen_output.texts[i]) for i in range(len(gen_output.texts))
+        ]
 
         # Train
         backend.set_training_mode()
         batch = PromptBatch(
-            input_ids=input_ids, attention_mask=attention_mask,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
             prompt_ids=list(range(len(PROMPTS))),
-            raw_prompts=PROMPTS, metadata=[{} for _ in PROMPTS],
+            raw_prompts=PROMPTS,
+            metadata=[{} for _ in PROMPTS],
         )
         metrics = trainer.step(
-            batch, gen_output.token_ids, reward_results,
+            batch,
+            gen_output.token_ids,
+            reward_results,
             generation_logprobs=gen_output.logprobs,
         )
 
@@ -152,9 +171,11 @@ def main():
             mastery = trainer.game_state.get_step_mastery(1)
             phase = trainer.game_state.phase
             avg_tokens = sum(len(t) for t in gen_output.token_ids) / len(gen_output.token_ids)
-            print(f"  Step {step+1:3d}/{N_STEPS} | loss={loss:+.6f} | reward={reward_mean:.3f} | "
-                  f"mastery_s1={mastery:.3f} | phase={phase} | "
-                  f"avg_tokens={avg_tokens:.0f} | VRAM={vram_now:.2f}/{vram_peak:.2f} GB")
+            print(
+                f"  Step {step+1:3d}/{N_STEPS} | loss={loss:+.6f} | reward={reward_mean:.3f} | "
+                f"mastery_s1={mastery:.3f} | phase={phase} | "
+                f"avg_tokens={avg_tokens:.0f} | VRAM={vram_now:.2f}/{vram_peak:.2f} GB"
+            )
 
     # Summary
     print(f"\n{'='*80}")
@@ -168,7 +189,9 @@ def main():
     print(f"  VRAM end: {vram_usage[-1]:.2f} GB")
     print(f"  VRAM peak: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
     vram_growth = vram_usage[-1] - vram_usage[0]
-    print(f"  VRAM growth: {vram_growth:+.3f} GB ({'OK' if abs(vram_growth) < 0.5 else 'WARNING: leak?'})")
+    print(
+        f"  VRAM growth: {vram_growth:+.3f} GB ({'OK' if abs(vram_growth) < 0.5 else 'WARNING: leak?'})"
+    )
     print(f"  Skipped steps: {sum(1 for m in losses if m == 0.0)}/{N_STEPS}")
 
 

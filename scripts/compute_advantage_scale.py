@@ -20,16 +20,15 @@ So: advantage_scale = target_logit_nudge / (lr * lora_scaling * mean_tokens_per_
 """
 
 import json
-import sys
 from pathlib import Path
 
-import torch
 import numpy as np
+import torch
 
 
 def measure_logit_statistics(model_id: str = "Qwen/Qwen3-1.7B"):
     """Measure the logit distribution of the base model on physics-relevant tokens."""
-    from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig
+    from transformers import AutoConfig, AutoTokenizer
 
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     print(f"Model: {model_id}")
@@ -47,8 +46,8 @@ def measure_logit_statistics(model_id: str = "Qwen/Qwen3-1.7B"):
     # The spread depends on both the hidden state norm and the lm_head weight norms
 
     # Load just the lm_head weights
-    from huggingface_hub import hf_hub_download
     import safetensors.torch
+    from huggingface_hub import hf_hub_download
 
     try:
         index_file = hf_hub_download(model_id, "model.safetensors.index.json")
@@ -84,7 +83,7 @@ def measure_logit_statistics(model_id: str = "Qwen/Qwen3-1.7B"):
 
     # Compute per-token weight norms (how "loud" each token is in logit space)
     token_norms = lm_head.norm(dim=1)  # [vocab_size]
-    print(f"\n  lm_head weight norms:")
+    print("\n  lm_head weight norms:")
     print(f"    mean: {token_norms.mean():.4f}")
     print(f"    std:  {token_norms.std():.4f}")
     print(f"    min:  {token_norms.min():.4f}")
@@ -115,14 +114,16 @@ def measure_logit_statistics(model_id: str = "Qwen/Qwen3-1.7B"):
     physics_normed = physics_vecs / physics_norms.unsqueeze(1)
     cosine_sim = physics_normed @ physics_normed.T
 
-    print(f"\n  Physics token lm_head norms:")
-    for name, norm in zip(physics_names, physics_norms):
+    print("\n  Physics token lm_head norms:")
+    for name, norm in zip(physics_names, physics_norms, strict=False):
         print(f"    '{name}': {norm:.4f}")
 
-    print(f"\n  Physics token pairwise cosine similarity (lm_head space):")
+    print("\n  Physics token pairwise cosine similarity (lm_head space):")
     for i in range(len(physics_names)):
-        for j in range(i+1, len(physics_names)):
-            print(f"    {physics_names[i]}|{physics_names[j]}: {cosine_sim[i,j]:.4f} (dist={1-cosine_sim[i,j].item():.4f})")
+        for j in range(i + 1, len(physics_names)):
+            print(
+                f"    {physics_names[i]}|{physics_names[j]}: {cosine_sim[i,j]:.4f} (dist={1-cosine_sim[i,j].item():.4f})"
+            )
 
     # Compute expected logit difference between two physics tokens
     # For hidden state h: logit_diff = h @ (lm_head[i] - lm_head[j])
@@ -137,14 +138,14 @@ def measure_logit_statistics(model_id: str = "Qwen/Qwen3-1.7B"):
 
     diff_norms = []
     for i in range(len(physics_ids)):
-        for j in range(i+1, len(physics_ids)):
+        for j in range(i + 1, len(physics_ids)):
             diff = lm_head[physics_ids[i]] - lm_head[physics_ids[j]]
             diff_norms.append(diff.norm().item())
 
     mean_diff_norm = np.mean(diff_norms)
     expected_logit_diff = expected_h_norm * mean_diff_norm
 
-    print(f"\n  Expected logit statistics:")
+    print("\n  Expected logit statistics:")
     print(f"    Estimated hidden state norm: {expected_h_norm:.2f}")
     print(f"    Mean lm_head diff norm (physics tokens): {mean_diff_norm:.4f}")
     print(f"    Expected logit difference between physics tokens: {expected_logit_diff:.2f}")
@@ -198,30 +199,38 @@ def compute_optimal_advantage_scale(
     # target_nudge = lr * lora_scaling * raw_adv * adv_scale * n_tokens
     # adv_scale = target_nudge / (lr * lora_scaling * raw_adv * n_tokens)
 
-    advantage_scale = target_logit_nudge / (lr * lora_scaling * expected_raw_advantage * mean_span_tokens)
+    advantage_scale = target_logit_nudge / (
+        lr * lora_scaling * expected_raw_advantage * mean_span_tokens
+    )
 
     print(f"\n{'='*60}")
-    print(f"OPTIMAL ADVANTAGE SCALE COMPUTATION")
+    print("OPTIMAL ADVANTAGE SCALE COMPUTATION")
     print(f"{'='*60}")
-    print(f"\nInputs:")
+    print("\nInputs:")
     print(f"  Learning rate: {lr}")
     print(f"  LoRA rank: {lora_rank}, alpha: {lora_alpha}, scaling: {lora_scaling}")
     print(f"  Expected raw advantage: {expected_raw_advantage}")
     print(f"  Mean span tokens per quality: {mean_span_tokens}")
-    print(f"  Target nudge fraction: {target_nudge_fraction} ({target_nudge_fraction*100}% of logit gap per step)")
-    print(f"\nLogit space:")
+    print(
+        f"  Target nudge fraction: {target_nudge_fraction} ({target_nudge_fraction*100}% of logit gap per step)"
+    )
+    print("\nLogit space:")
     print(f"  Expected logit diff (physics tokens): {expected_logit_diff:.2f}")
     print(f"  Target logit nudge per step: {target_logit_nudge:.4f}")
-    print(f"\nGradient chain:")
-    print(f"  Per-token gradient ≈ lr * lora_scaling * advantage")
-    print(f"  = {lr} * {lora_scaling} * {expected_raw_advantage} * scale * {mean_span_tokens} tokens")
+    print("\nGradient chain:")
+    print("  Per-token gradient ≈ lr * lora_scaling * advantage")
+    print(
+        f"  = {lr} * {lora_scaling} * {expected_raw_advantage} * scale * {mean_span_tokens} tokens"
+    )
     print(f"\n>>> OPTIMAL advantage_scale = {advantage_scale:.6f}")
 
     # Also compute what our previous scales would have done
     for scale in [1.0, 0.1, advantage_scale]:
         nudge = lr * lora_scaling * expected_raw_advantage * scale * mean_span_tokens
         pct = nudge / expected_logit_diff * 100
-        print(f"\n  scale={scale:.4f}: logit nudge per step = {nudge:.6f} ({pct:.2f}% of logit gap)")
+        print(
+            f"\n  scale={scale:.4f}: logit nudge per step = {nudge:.6f} ({pct:.2f}% of logit gap)"
+        )
 
     return advantage_scale
 

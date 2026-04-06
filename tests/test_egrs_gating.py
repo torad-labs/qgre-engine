@@ -1,7 +1,5 @@
 """Test EGRS soft gating functions."""
 
-import math
-
 import torch
 
 from qgre.attention_bonds import compute_confidence_gate, compute_normalized_entropy
@@ -90,9 +88,9 @@ def test_confidence_gate_temperature_effect():
     sharp_range = gate_sharp[4].item() - gate_sharp[0].item()
     soft_range = gate_soft[4].item() - gate_soft[0].item()
 
-    assert sharp_range > soft_range, (
-        f"Sharp gate should have larger range than soft: {sharp_range:.4f} vs {soft_range:.4f}"
-    )
+    assert (
+        sharp_range > soft_range
+    ), f"Sharp gate should have larger range than soft: {sharp_range:.4f} vs {soft_range:.4f}"
 
     print(f"Sharp (T=0.01): {[f'{g:.4f}' for g in gate_sharp.tolist()]}")
     print(f"Soft (T=0.5): {[f'{g:.4f}' for g in gate_soft.tolist()]}")
@@ -105,9 +103,9 @@ def test_confidence_gate_monotonic():
 
     # Check monotonicity
     for i in range(len(gate) - 1):
-        assert gate[i] <= gate[i + 1], (
-            f"Gate should be monotonic: gate[{i}]={gate[i]:.4f} > gate[{i+1}]={gate[i+1]:.4f}"
-        )
+        assert (
+            gate[i] <= gate[i + 1]
+        ), f"Gate should be monotonic: gate[{i}]={gate[i]:.4f} > gate[{i+1}]={gate[i+1]:.4f}"
 
     print("Confidence gate is monotonically increasing")
 

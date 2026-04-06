@@ -45,19 +45,19 @@ def selective_log_softmax(
     if index.dtype not in (torch.int32, torch.int64):
         raise ValueError(
             f"selective_log_softmax: labels must be int32 or int64, got {index.dtype}. "
-            "torch.gather requires integer index tensor."
+            "torch.gather requires integer index tensor.",
         )
     # GB3-002: Add shape assertion before gather
     if logits.shape[0] != index.shape[0]:
         raise ValueError(
             f"GB3-002: selective_log_softmax batch size mismatch. "
-            f"logits.shape[0]={logits.shape[0]} != index.shape[0]={index.shape[0]}"
+            f"logits.shape[0]={logits.shape[0]} != index.shape[0]={index.shape[0]}",
         )
     if len(logits.shape) < 2 or len(index.shape) < 1:
         raise ValueError(
             f"GB3-002: selective_log_softmax shape error. "
             f"logits.shape={logits.shape} (expected [..., vocab]), "
-            f"index.shape={index.shape} (expected [...])."
+            f"index.shape={index.shape} (expected [...]).",
         )
 
     if logits.dtype in (torch.float32, torch.float64):
@@ -68,30 +68,31 @@ def selective_log_softmax(
         if (index < 0).any() or (index >= vocab_size).any():
             raise ValueError(
                 f"LP-R3-01: Index out of bounds in fp32 path. "
-                f"index range [{index.min().item()}, {index.max().item()}] vs vocab_size={vocab_size}"
+                f"index range [{index.min().item()}, {index.max().item()}] vs vocab_size={vocab_size}",
             )
         lse = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
         selected = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
         return (selected - lse).to(torch.float32)
-    else:
-        # GEN-R1-5: bf16/fp16: convert to FP32 BEFORE log_softmax for stability
-        # logsumexp in BF16 loses precision — compute log_softmax in FP32.
-        # GB2-004: Use functional approach to preserve gradients (no in-place)
-        logprobs_list = []
-        for logits_row, index_row in zip(logits, index):
-            # LP-R2-04: Validate bounds before bf16 path
-            vocab_size = logits_row.shape[-1]
-            if (index_row < 0).any() or (index_row >= vocab_size).any():
-                raise ValueError(
-                    f"LP-R2-04: Index out of bounds in bf16 path. "
-                    f"index range [{index_row.min().item()}, {index_row.max().item()}] vs vocab_size={vocab_size}"
-                )
-            logprobs_row = logits_row.float().log_softmax(dim=-1)
-            selected = torch.gather(
-                logprobs_row, dim=-1, index=index_row.unsqueeze(-1)
-            ).squeeze(-1)
-            logprobs_list.append(selected)
-        return torch.stack(logprobs_list).to(torch.float32)
+    # GEN-R1-5: bf16/fp16: convert to FP32 BEFORE log_softmax for stability
+    # logsumexp in BF16 loses precision — compute log_softmax in FP32.
+    # GB2-004: Use functional approach to preserve gradients (no in-place)
+    logprobs_list = []
+    for logits_row, index_row in zip(logits, index, strict=False):
+        # LP-R2-04: Validate bounds before bf16 path
+        vocab_size = logits_row.shape[-1]
+        if (index_row < 0).any() or (index_row >= vocab_size).any():
+            raise ValueError(
+                f"LP-R2-04: Index out of bounds in bf16 path. "
+                f"index range [{index_row.min().item()}, {index_row.max().item()}] vs vocab_size={vocab_size}",
+            )
+        logprobs_row = logits_row.float().log_softmax(dim=-1)
+        selected = torch.gather(
+            logprobs_row,
+            dim=-1,
+            index=index_row.unsqueeze(-1),
+        ).squeeze(-1)
+        logprobs_list.append(selected)
+    return torch.stack(logprobs_list).to(torch.float32)
 
 
 def logprobs_from_logits(
@@ -116,16 +117,19 @@ def logprobs_from_logits(
     Returns:
         [batch, seq] log probabilities for each token (float32)
     """
-    batch, seq_len, vocab = logits.shape
+    batch, seq_len, _vocab = logits.shape
     # Use torch.cat to preserve autograd graph — NOT torch.zeros + in-place assignment.
     # torch.zeros creates a leaf tensor; in-place slice assignment severs the graph.
     # Same pattern as chunked_logprobs_from_hidden in fused_logprobs.py.
     chunks = []
     for start in range(0, seq_len, chunk_size):
         end = min(start + chunk_size, seq_len)
-        chunks.append(selective_log_softmax(
-            logits[:, start:end, :], labels[:, start:end],
-        ))
+        chunks.append(
+            selective_log_softmax(
+                logits[:, start:end, :],
+                labels[:, start:end],
+            )
+        )
 
     if not chunks:
         return torch.zeros(batch, 0, dtype=torch.float32, device=logits.device)

@@ -6,19 +6,26 @@ replacing scattered isinstance checks with a single declarative schema definitio
 The leverage point: 28 bugs across 3 harden rounds traced to untyped dict boundaries.
 One schema, one validation pass, zero scattered isinstance checks.
 """
+
 from __future__ import annotations
 
 import math
 import warnings
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, TypeVar, get_args, get_origin
+from typing import TYPE_CHECKING, Any, TypeVar
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 
 T = TypeVar("T")
 
 
 class Required(Enum):
     """Marker for required fields."""
+
     YES = "required"
     NO = "optional"
 
@@ -36,13 +43,14 @@ class FieldSpec:
         validate: Optional custom validation function
         nested_schema: Schema for nested dict validation
     """
+
     expected_type: type | tuple[type, ...]
     required: Required = Required.NO
     default: Any = None
     coerce: bool = True
     filter_nan: bool = False
     validate: Callable[[Any], bool] | None = None
-    nested_schema: dict[str, "FieldSpec"] | None = None
+    nested_schema: dict[str, FieldSpec] | None = None
 
 
 def validate_field(
@@ -82,7 +90,7 @@ def validate_field(
     elif not type_match:
         raise TypeError(
             f"SCHEMA: Field '{path}' expected {_type_name(expected)}, "
-            f"got {type(value).__name__}"
+            f"got {type(value).__name__}",
         )
 
     # Filter NaN/Inf from numeric lists
@@ -91,7 +99,8 @@ def validate_field(
         value = [v for v in value if _is_finite(v)]
         if len(value) < original_len:
             warnings.warn(
-                f"SCHEMA: Filtered {original_len - len(value)} NaN/Inf values from '{path}'"
+                f"SCHEMA: Filtered {original_len - len(value)} NaN/Inf values from '{path}'",
+                stacklevel=2,
             )
 
     # Filter NaN/Inf from dict values
@@ -105,7 +114,8 @@ def validate_field(
                 nan_count += 1
         if nan_count > 0:
             warnings.warn(
-                f"SCHEMA: Filtered {nan_count} NaN/Inf values from '{path}'"
+                f"SCHEMA: Filtered {nan_count} NaN/Inf values from '{path}'",
+                stacklevel=2,
             )
         value = filtered
 
@@ -142,8 +152,7 @@ def validate_schema(
     """
     if not isinstance(data, dict):
         raise TypeError(
-            f"SCHEMA: Expected dict at '{base_path or 'root'}', "
-            f"got {type(data).__name__}"
+            f"SCHEMA: Expected dict at '{base_path or 'root'}', " f"got {type(data).__name__}",
         )
 
     result = {}
@@ -173,7 +182,7 @@ def _coerce_type(value: Any, expected: type | tuple[type, ...], path: str) -> An
                 continue
         raise TypeError(
             f"SCHEMA: Cannot coerce '{path}' value {type(value).__name__} "
-            f"to any of {_type_name(expected)}"
+            f"to any of {_type_name(expected)}",
         )
     return _coerce_single_type(value, expected, path)
 
@@ -186,31 +195,31 @@ def _coerce_single_type(value: Any, expected: type, path: str) -> Any:
             # Warn on precision loss from float
             if isinstance(value, float) and value != result:
                 warnings.warn(
-                    f"SCHEMA: Precision loss coercing '{path}' from float {value} to int {result}"
+                    f"SCHEMA: Precision loss coercing '{path}' from float {value} to int {result}",
+                    stacklevel=2,
                 )
             return result
-        elif expected == float:
+        if expected == float:
             result = float(value)
             if not math.isfinite(result):
-                raise ValueError(f"Coercion to float produced non-finite value")
+                raise ValueError("Coercion to float produced non-finite value")
             return result
-        elif expected == str:
+        if expected == str:
             return str(value)
-        elif expected == bool:
+        if expected == bool:
             return bool(value)
-        elif expected == list:
+        if expected == list:
             return list(value)
-        elif expected == dict:
+        if expected == dict:
             if not isinstance(value, dict):
                 raise TypeError("Cannot coerce non-dict to dict")
             return dict(value)
-        else:
-            # Can't coerce to complex types
-            raise TypeError(f"Cannot coerce to {expected.__name__}")
+        # Can't coerce to complex types
+        raise TypeError(f"Cannot coerce to {expected.__name__}")
     except (ValueError, TypeError) as e:
         raise TypeError(
             f"SCHEMA: Cannot coerce '{path}' value {value!r} ({type(value).__name__}) "
-            f"to {expected.__name__}: {e}"
+            f"to {expected.__name__}: {e}",
         ) from e
 
 
@@ -231,6 +240,7 @@ def _type_name(t: type | tuple[type, ...]) -> str:
 # ============================================================================
 # Pre-defined schemas for QGRE checkpoint boundaries
 # ============================================================================
+
 
 def non_negative(value: Any) -> bool:
     """Validate that numeric value is non-negative."""
@@ -306,10 +316,11 @@ WEIGHT_LOADER_STATE_SCHEMA: dict[str, FieldSpec] = {
     "cleaned_up": FieldSpec(bool, Required.NO, default=False),
 }
 
+
 # Priority weights schema (for data.py)
 def validate_priority_weights(weights: dict) -> bool:
     """Validate priority weights are non-negative and finite."""
-    for k, v in weights.items():
+    for v in weights.values():
         if not isinstance(v, (int, float)):
             return False
         if v < 0 or not math.isfinite(v):

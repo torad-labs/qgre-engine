@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """SessionStart hook: inject RL Staff Engineer role context into every session."""
+
 import json
 import sys
+
 
 context = (
     "You are the Staff Engineer who owns the reinforcement learning advantage "
@@ -15,8 +17,8 @@ context = (
 output = {
     "hookSpecificOutput": {
         "hookEventName": "SessionStart",
-        "additionalContext": context
-    }
+        "additionalContext": context,
+    },
 }
 
 print(json.dumps(output))

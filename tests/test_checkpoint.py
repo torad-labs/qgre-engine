@@ -2,10 +2,8 @@
 
 import json
 import tempfile
-from collections import defaultdict, deque
+from collections import deque
 from pathlib import Path
-
-import pytest
 
 from qgre.checkpoint import (
     discover_latest_checkpoint,
@@ -204,7 +202,6 @@ def test_checkpoint_rng_state_restored():
 
 def test_checkpoint_includes_advantage_estimator_state(mock_game_state):
     """V tracker and _step_seen persist through save/load."""
-    import torch
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "global_step_100.pt"
@@ -248,18 +245,25 @@ def test_gamestate_preserves_defaultdict_behavior():
 
 def test_trainer_save_load_step_counter(mock_game_state):
     """Train 3 steps → save → new trainer → load → step counter == 3."""
-    import torch.nn as nn
     from unittest.mock import MagicMock
+
+    from torch import nn
+
     from qgre.config import QGREConfig
-    from qgre.trainer import QGRETrainer
     from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES
+    from qgre.trainer import QGRETrainer
 
     class TinyModel(nn.Module):
         def __init__(self):
             super().__init__()
             self.linear = nn.Linear(4, 4)
+
         def forward(self, x):
-            return MagicMock(logits=self.linear(torch.randn(1, 4).expand(x.shape[0], -1).unsqueeze(1).expand(-1, x.shape[1], -1)))
+            return MagicMock(
+                logits=self.linear(
+                    torch.randn(1, 4).expand(x.shape[0], -1).unsqueeze(1).expand(-1, x.shape[1], -1)
+                )
+            )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = QGREConfig()
@@ -269,8 +273,10 @@ def test_trainer_save_load_step_counter(mock_game_state):
 
         model = TinyModel()
         trainer = QGRETrainer(
-            model=model, tokenizer=None,
-            reward_fn=lambda *a: None, config=cfg,
+            model=model,
+            tokenizer=None,
+            reward_fn=lambda *a: None,
+            config=cfg,
             game_state=mock_game_state,
         )
         trainer.setup_optimizer()
@@ -280,8 +286,10 @@ def test_trainer_save_load_step_counter(mock_game_state):
         # New trainer, load checkpoint
         model2 = TinyModel()
         trainer2 = QGRETrainer(
-            model=model2, tokenizer=None,
-            reward_fn=lambda *a: None, config=cfg,
+            model=model2,
+            tokenizer=None,
+            reward_fn=lambda *a: None,
+            config=cfg,
         )
         trainer2.setup_optimizer()
         resumed = trainer2.resume(tmpdir)
@@ -293,8 +301,10 @@ def test_trainer_save_load_step_counter(mock_game_state):
 
 def test_v_tracker_persists_across_checkpoint():
     """SPO V tracker values present after save/load cycle."""
-    import torch.nn as nn
     from unittest.mock import MagicMock
+
+    from torch import nn
+
     from qgre.config import QGREConfig
     from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES
     from qgre.trainer import QGRETrainer
@@ -303,6 +313,7 @@ def test_v_tracker_persists_across_checkpoint():
         def __init__(self):
             super().__init__()
             self.linear = nn.Linear(4, 4)
+
         def forward(self, x):
             return MagicMock(logits=self.linear(torch.randn(1, 4)))
 
@@ -314,8 +325,10 @@ def test_v_tracker_persists_across_checkpoint():
 
         model = TinyModel()
         trainer = QGRETrainer(
-            model=model, tokenizer=None,
-            reward_fn=lambda *a: None, config=cfg,
+            model=model,
+            tokenizer=None,
+            reward_fn=lambda *a: None,
+            config=cfg,
         )
         trainer.setup_optimizer()
 
@@ -329,8 +342,10 @@ def test_v_tracker_persists_across_checkpoint():
         # Restore
         model2 = TinyModel()
         trainer2 = QGRETrainer(
-            model=model2, tokenizer=None,
-            reward_fn=lambda *a: None, config=cfg,
+            model=model2,
+            tokenizer=None,
+            reward_fn=lambda *a: None,
+            config=cfg,
         )
         trainer2.setup_optimizer()
         trainer2.resume(tmpdir)
@@ -346,8 +361,9 @@ def test_v_tracker_persists_across_checkpoint():
 def test_old_format_checkpoint_migration():
     """Old checkpoint format (flat keys) migrates to StateSpec format."""
     import torch
+
     from qgre.checkpoint import load_checkpoint
-    from qgre.types import CheckpointState, TrainerState
+    from qgre.types import CheckpointState
 
     with tempfile.TemporaryDirectory() as tmpdir:
         path = Path(tmpdir) / "global_step_100.pt"

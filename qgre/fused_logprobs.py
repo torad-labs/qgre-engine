@@ -21,13 +21,15 @@ Unsloth's own GRPO trainer uses the same UNSLOTH_RETURN_HIDDEN_STATES pattern.
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from qgre.nemo_extracted.logits import selective_log_softmax
 
 
-def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, output_attentions: bool = False, **kwargs):
+def get_hidden_states_and_lm_head(
+    model: nn.Module, input_ids: torch.Tensor, output_attentions: bool = False, **kwargs
+):
     """Get hidden states and lm_head from model.
 
     UNSLOTH_RETURN_HIDDEN_STATES=1 is set globally at startup (__main__.py).
@@ -55,6 +57,7 @@ def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, out
 
     # Get lm_head module — uses WeightExporter for PEFT ModulesToSaveWrapper unwrapping
     from qgre.weight_export import WeightExporter
+
     lm_head = WeightExporter().get_lm_head(model)
     if lm_head is None:
         # Fallback: try direct access without unwrapping
@@ -81,32 +84,32 @@ def get_hidden_states_and_lm_head(model: nn.Module, input_ids: torch.Tensor, out
         raise RuntimeError(
             f"GB3-005: get_hidden_states returned logits (dim={last_dim}=vocab_size), not hidden states. "
             f"UNSLOTH_RETURN_HIDDEN_STATES did not take effect. "
-            f"Check env var is set before model load."
+            f"Check env var is set before model load.",
         )
     if last_dim != lm_head.in_features:
         # GB3-005: Raise explicit error instead of returning None
         raise RuntimeError(
             f"GB3-005: get_hidden_states output dim {last_dim} matches neither "
             f"hidden_dim ({lm_head.in_features}) nor vocab_size ({lm_head.out_features}). "
-            f"Model output is corrupted or architecture is unsupported."
+            f"Model output is corrupted or architecture is unsupported.",
         )
 
     if output_attentions:
         attentions = output.attentions if hasattr(output, "attentions") else None
         return hidden_states, lm_head, attentions
-    else:
-        return hidden_states, lm_head
+    return hidden_states, lm_head
 
 
-def _chunk_forward(chunk_hidden: torch.Tensor, lm_head: nn.Linear, chunk_labels: torch.Tensor) -> torch.Tensor:
+def _chunk_forward(
+    chunk_hidden: torch.Tensor, lm_head: nn.Linear, chunk_labels: torch.Tensor
+) -> torch.Tensor:
     """Forward one chunk through lm_head + selective_log_softmax.
 
     Separated into its own function for torch.checkpoint compatibility.
     torch.checkpoint requires a function (not inline code) to wrap.
     """
     chunk_logits = lm_head(chunk_hidden).float()  # Cast to fp32 — bf16 path is 10-50× slower
-    result = selective_log_softmax(chunk_logits, chunk_labels)
-    return result
+    return selective_log_softmax(chunk_logits, chunk_labels)
 
 
 def chunked_logprobs_from_hidden(
@@ -147,15 +150,15 @@ def chunked_logprobs_from_hidden(
         raise RuntimeError(
             f"chunked_logprobs_from_hidden: device mismatch. "
             f"hidden_states on {hidden_states.device}, labels on {labels.device}. "
-            "All tensors must be on the same device."
+            "All tensors must be on the same device.",
         )
     if lm_head.weight.device != hidden_states.device:
         raise RuntimeError(
             f"chunked_logprobs_from_hidden: device mismatch. "
             f"lm_head on {lm_head.weight.device}, hidden_states on {hidden_states.device}. "
-            "All tensors must be on the same device."
+            "All tensors must be on the same device.",
         )
-    batch, seq_len, hidden = hidden_states.shape
+    batch, seq_len, _hidden = hidden_states.shape
     if seq_len == 0:
         return torch.zeros(batch, 0, dtype=torch.float32, device=hidden_states.device)
     chunks = []
@@ -167,7 +170,10 @@ def chunked_logprobs_from_hidden(
 
         if use_checkpoint:
             chunk_lp = torch_checkpoint(
-                _chunk_forward, chunk_hidden, lm_head, chunk_labels,
+                _chunk_forward,
+                chunk_hidden,
+                lm_head,
+                chunk_labels,
                 use_reentrant=False,
             )
         else:

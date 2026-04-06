@@ -11,9 +11,8 @@ These metrics detect when the model transitions from coherent (laminar) gradient
 to incoherent (turbulent) updates, which manifests as sudden performance collapse.
 """
 
-import torch
 import numpy as np
-from typing import Tuple
+import torch
 
 
 def compute_attention_entropy(attentions: tuple) -> dict:
@@ -42,11 +41,11 @@ def compute_attention_entropy(attentions: tuple) -> dict:
             "per_head_entropy": [],
         }
 
-    n_layers = len(attentions)
+    len(attentions)
     per_layer_entropy = []
     per_head_entropy = []
 
-    for layer_idx, attn in enumerate(attentions):
+    for _layer_idx, attn in enumerate(attentions):
         # attn: [batch, n_heads, seq_len, seq_len]
         # Average over batch
         attn_avg = attn.mean(dim=0)  # [n_heads, seq_len, seq_len]

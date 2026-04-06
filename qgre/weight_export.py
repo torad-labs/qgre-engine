@@ -9,10 +9,8 @@ file changes. WeightBus and WeightLoader are untouched.
 
 from __future__ import annotations
 
-from typing import Any
-
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 class WeightExporter:
@@ -31,7 +29,10 @@ class WeightExporter:
         model.unmerge_adapter()
 
     def get_modules_to_save(
-        self, model: nn.Module, expected: list[str] | None = None, strict: bool = False
+        self,
+        model: nn.Module,
+        expected: list[str] | None = None,
+        strict: bool = False,
     ) -> dict[str, torch.Tensor]:
         """Extract lm_head/embed_tokens trainable weights from ModulesToSaveWrapper.
 
@@ -52,11 +53,13 @@ class WeightExporter:
         # This is hard to fix without locks. Document the risk.
         # Call state_dict() inside sync function to avoid stale tensor references
         import warnings as _warnings
+
         if model.training:
             _warnings.warn(
                 "get_modules_to_save called during training (model.training=True). "
                 "Race condition possible if optimizer.step() runs concurrently. "
-                "Call sync only between training steps."
+                "Call sync only between training steps.",
+                stacklevel=2,
             )
         for key, tensor in model.state_dict().items():
             if "modules_to_save" not in key or "weight" not in key:
@@ -80,13 +83,13 @@ class WeightExporter:
                 )
                 if strict:
                     raise RuntimeError(msg)
-                else:
-                    warnings.warn(msg)
+                warnings.warn(msg, stacklevel=2)
             if unexpected:
                 warnings.warn(
                     f"get_modules_to_save: found unexpected modules {unexpected}. "
                     f"Expected {expected}, got {list(weights.keys())}. "
-                    f"Config may be out of sync with PEFT wrapper — check modules_to_save."
+                    f"Config may be out of sync with PEFT wrapper — check modules_to_save.",
+                    stacklevel=2,
                 )
         return weights
 
@@ -97,10 +100,7 @@ class WeightExporter:
         Values are views of the live training parameters — updated by optimizer.step().
         """
         # Call state_dict() inside sync function to avoid stale tensor references
-        return {
-            k: v for k, v in model.state_dict().items()
-            if ".lora_A." in k or ".lora_B." in k
-        }
+        return {k: v for k, v in model.state_dict().items() if ".lora_A." in k or ".lora_B." in k}
 
     def get_lm_head(self, model: nn.Module) -> nn.Linear | None:
         """Get the unwrapped lm_head nn.Linear (for fused logprobs).

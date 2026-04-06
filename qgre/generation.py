@@ -1,25 +1,31 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Protocol
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
 
 import torch
 
-from qgre.config import GenerationConfig, ModelConfig
 from qgre.weight_bus import SyncStrategy
 from qgre.weight_export import WeightExporter
 from qgre.weight_load import WeightLoader
+
+
+if TYPE_CHECKING:
+    from qgre.config import GenerationConfig, ModelConfig
 
 
 @dataclass
 class GenerationOutput:
     """Output from a single generation call."""
 
-    token_ids: list[list[int]]   # [batch_size] × variable length
-    texts: list[str]             # decoded completions
-    logprobs: list[list[float]] | None = None  # [batch_size] × [seq_len] per-token log probs from generation
-    hints_used: list[dict[str, bool]] | None = None  # [batch_size] — {span_id: was_injected} per sample
+    token_ids: list[list[int]]  # [batch_size] × variable length
+    texts: list[str]  # decoded completions
+    logprobs: list[list[float]] | None = (
+        None  # [batch_size] × [seq_len] per-token log probs from generation
+    )
+    hints_used: list[dict[str, bool]] | None = (
+        None  # [batch_size] — {span_id: was_injected} per sample
+    )
 
 
 class HintInjector(Protocol):
@@ -77,6 +83,7 @@ def make_hamiltonian_hint_injector() -> HintInjector:
             gt = metadata.get("ground_truth", {})
             if isinstance(gt, str):
                 import json
+
                 try:
                     gt = json.loads(gt)
                 except json.JSONDecodeError:
@@ -111,7 +118,12 @@ class UnslothBackend:
     Single-GPU, single-process. No Ray.
     """
 
-    def __init__(self, model_config: ModelConfig, generation_config: GenerationConfig, max_prompt_length: int = 3200):
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        generation_config: GenerationConfig,
+        max_prompt_length: int = 3200,
+    ):
         self.model_config = model_config
         self.generation_config = generation_config
         self.max_prompt_length = max_prompt_length
@@ -123,8 +135,8 @@ class UnslothBackend:
 
     def load(self) -> tuple[Any, Any]:
         """Load model and tokenizer. Returns (model, tokenizer)."""
-        from unsloth import FastLanguageModel
         import unsloth.models.llama as _llama_mod
+        from unsloth import FastLanguageModel
 
         # Prevent Unsloth's patch_tokenizer from modifying our tokenizer/model.
         # It runs unconditionally (ignoring fix_tokenizer) and would:
@@ -142,14 +154,17 @@ class UnslothBackend:
         # which Unsloth requires for weight access. Both are expected and non-actionable
         # during init — we restore random state after load.
         import vllm.envs as _vllm_envs
+
         _orig_validate = _vllm_envs.validate_environ
         _vllm_envs.validate_environ = lambda hard_fail=False: None
         # Also patch on arg_utils module where it's imported by name
         from vllm.engine import arg_utils as _arg_utils
-        if hasattr(_arg_utils, 'envs'):
+
+        if hasattr(_arg_utils, "envs"):
             _arg_utils.envs.validate_environ = lambda hard_fail=False: None
         # Suppress seed=0 warning from arg_utils (inherent to MULTIPROCESSING=0)
         import logging
+
         _arg_utils_logger = logging.getLogger("vllm.engine.arg_utils")
         _arg_utils_level = _arg_utils_logger.level
         _arg_utils_logger.setLevel(logging.ERROR)
@@ -160,7 +175,7 @@ class UnslothBackend:
             if lora_rank_val > max_lora_rank_val:
                 raise ValueError(
                     f"lora_rank ({lora_rank_val}) exceeds max_lora_rank ({max_lora_rank_val}). "
-                    "vLLM will silently ignore the adapter. Increase max_lora_rank in config."
+                    "vLLM will silently ignore the adapter. Increase max_lora_rank in config.",
                 )
             model, tokenizer = FastLanguageModel.from_pretrained(
                 model_name=self.model_config.path,
@@ -173,13 +188,14 @@ class UnslothBackend:
         finally:
             _llama_mod.patch_tokenizer = _orig_patch
             _vllm_envs.validate_environ = _orig_validate
-            if hasattr(_arg_utils, 'envs'):
+            if hasattr(_arg_utils, "envs"):
                 _arg_utils.envs.validate_environ = _orig_validate
             _arg_utils_logger.setLevel(_arg_utils_level)
 
         # Clean up VLLM_ATTENTION_BACKEND env var that Unsloth sets.
         # Not needed for vLLM V1 (internal config), prevents future warnings.
         import os
+
         os.environ.pop("VLLM_ATTENTION_BACKEND", None)
 
         # Untie word embeddings BEFORE get_peft_model to prevent PEFT from
@@ -212,6 +228,7 @@ class UnslothBackend:
         # - "tie_word_embeddings" (warnings.warn from PEFT) — already handled above.
         import logging
         import warnings
+
         _tf_logger = logging.getLogger("transformers.modeling_utils")
         _tf_level = _tf_logger.level
         _tf_logger.setLevel(logging.ERROR)
@@ -243,7 +260,7 @@ class UnslothBackend:
         if not pad_token or pad_token_id < 0:
             raise ValueError(
                 "model.pad_token and model.pad_token_id must be set in YAML config. "
-                "Qwen3 example: pad_token='<|fim_pad|>', pad_token_id=151662"
+                "Qwen3 example: pad_token='<|fim_pad|>', pad_token_id=151662",
             )
         tokenizer.pad_token = pad_token
         tokenizer.pad_token_id = pad_token_id
@@ -253,20 +270,26 @@ class UnslothBackend:
 
         # Validate PAD token
         resolved_id = tokenizer.convert_tokens_to_ids(pad_token)
-        assert resolved_id == pad_token_id, \
-            f"{pad_token!r} resolves to {resolved_id}, not {pad_token_id} — wrong model or tokenizer"
+        assert (
+            resolved_id == pad_token_id
+        ), f"{pad_token!r} resolves to {resolved_id}, not {pad_token_id} — wrong model or tokenizer"
         vocab_size = getattr(model.config, "vocab_size", None)
         if vocab_size is not None:
-            assert pad_token_id < vocab_size, \
-                f"PAD token ID {pad_token_id} >= vocab_size {vocab_size} — token doesn't exist"
-        assert tokenizer.pad_token_id != tokenizer.eos_token_id, \
-            f"PAD ({tokenizer.pad_token_id}) == EOS ({tokenizer.eos_token_id}) — model will never learn to stop"
-        assert tokenizer.pad_token_id not in self.generation_config.stop_token_ids, \
-            f"PAD ({tokenizer.pad_token_id}) is a stop token — loss will mask stop signals"
+            assert (
+                pad_token_id < vocab_size
+            ), f"PAD token ID {pad_token_id} >= vocab_size {vocab_size} — token doesn't exist"
+        assert (
+            tokenizer.pad_token_id != tokenizer.eos_token_id
+        ), f"PAD ({tokenizer.pad_token_id}) == EOS ({tokenizer.eos_token_id}) — model will never learn to stop"
+        assert (
+            tokenizer.pad_token_id not in self.generation_config.stop_token_ids
+        ), f"PAD ({tokenizer.pad_token_id}) is a stop token — loss will mask stop signals"
 
-        print(f"Tokenizer: PAD={tokenizer.pad_token!r} (ID:{tokenizer.pad_token_id}), "
-              f"EOS={tokenizer.eos_token!r} (ID:{tokenizer.eos_token_id}), "
-              f"Stop tokens: {self.generation_config.stop_token_ids}")
+        print(
+            f"Tokenizer: PAD={tokenizer.pad_token!r} (ID:{tokenizer.pad_token_id}), "
+            f"EOS={tokenizer.eos_token!r} (ID:{tokenizer.eos_token_id}), "
+            f"Stop tokens: {self.generation_config.stop_token_ids}"
+        )
 
         self.model = model
         self.tokenizer = tokenizer
@@ -277,46 +300,53 @@ class UnslothBackend:
         # Patch vLLM max_logprobs: Unsloth sets max_logprobs=0 by default,
         # but LLDS needs logprobs=1. Find the vLLM engine and set max_logprobs.
         try:
-            llm = getattr(model, '_vllm_engine', None) or getattr(model, 'llm', None)
+            llm = getattr(model, "_vllm_engine", None) or getattr(model, "llm", None)
             if llm is None:
                 # Unsloth stores the LLM on the model — traverse attributes
                 for attr_name in dir(model):
                     attr = getattr(model, attr_name, None)
-                    if hasattr(attr, 'llm_engine'):
+                    if hasattr(attr, "llm_engine"):
                         llm = attr
                         break
             if llm is not None:
-                engine = getattr(llm, 'llm_engine', llm)
-                if hasattr(engine, 'model_config'):
+                engine = getattr(llm, "llm_engine", llm)
+                if hasattr(engine, "model_config"):
                     engine.model_config.max_logprobs = self.generation_config.max_logprobs
-                    print(f"vLLM max_logprobs patched to {self.generation_config.max_logprobs} for LLDS logprob extraction")
+                    print(
+                        f"vLLM max_logprobs patched to {self.generation_config.max_logprobs} for LLDS logprob extraction"
+                    )
                 else:
                     import warnings
+
                     warnings.warn(
                         "WS3-005: vLLM max_logprobs patch failed: engine has no model_config attribute. "
-                        "LLDS requires max_logprobs >= logprobs. Check vLLM version compatibility."
+                        "LLDS requires max_logprobs >= logprobs. Check vLLM version compatibility.",
+                        stacklevel=2,
                     )
                     raise RuntimeError(
                         "vLLM max_logprobs patch failed: engine has no model_config attribute. "
-                        "LLDS requires max_logprobs >= logprobs. Check vLLM version compatibility."
+                        "LLDS requires max_logprobs >= logprobs. Check vLLM version compatibility.",
                     )
             else:
                 import warnings
+
                 warnings.warn(
                     "WS3-005: vLLM max_logprobs patch failed: could not find vLLM engine. "
-                    "LLDS requires max_logprobs >= logprobs. Check Unsloth integration."
+                    "LLDS requires max_logprobs >= logprobs. Check Unsloth integration.",
+                    stacklevel=2,
                 )
                 raise RuntimeError(
                     "vLLM max_logprobs patch failed: could not find vLLM engine. "
-                    "LLDS requires max_logprobs >= logprobs. Check Unsloth integration."
+                    "LLDS requires max_logprobs >= logprobs. Check Unsloth integration.",
                 )
         except Exception as e:
             import warnings
-            warnings.warn(f"WS3-005: vLLM max_logprobs patch failed: {e}")
+
+            warnings.warn(f"WS3-005: vLLM max_logprobs patch failed: {e}", stacklevel=2)
             if self.generation_config.max_logprobs > 0:
                 raise RuntimeError(
                     f"Could not patch vLLM max_logprobs: {e}. "
-                    "LLDS is enabled but vLLM cannot return sufficient logprobs for all continuation tokens."
+                    "LLDS is enabled but vLLM cannot return sufficient logprobs for all continuation tokens.",
                 ) from e
 
         return model, tokenizer
@@ -335,6 +365,7 @@ class UnslothBackend:
         """
         import random
         import time
+
         import numpy as np
 
         if seed < 0:
@@ -389,25 +420,30 @@ class UnslothBackend:
         llds_enabled = self.generation_config.max_logprobs > 0
 
         # Verify max_logprobs >= requested_logprobs before generation
-        if hasattr(self.model, 'vllm_engine') or hasattr(getattr(self.model, 'model', None), 'vllm_engine'):
-            engine = getattr(self.model, 'vllm_engine', None) or getattr(getattr(self.model, 'model', None), 'vllm_engine', None)
+        if hasattr(self.model, "vllm_engine") or hasattr(
+            getattr(self.model, "model", None), "vllm_engine"
+        ):
+            engine = getattr(self.model, "vllm_engine", None) or getattr(
+                getattr(self.model, "model", None), "vllm_engine", None
+            )
             if engine is not None:
-                llm_engine = getattr(engine, 'llm_engine', engine)
-                if hasattr(llm_engine, 'model_config'):
-                    max_lp = getattr(llm_engine.model_config, 'max_logprobs', 0)
+                llm_engine = getattr(engine, "llm_engine", engine)
+                if hasattr(llm_engine, "model_config"):
+                    max_lp = getattr(llm_engine.model_config, "max_logprobs", 0)
                     if max_lp < requested_logprobs:
                         # GB2-001: Raise error instead of warning if LLDS enabled and max_logprobs insufficient
                         if llds_enabled:
                             raise ValueError(
                                 f"max_logprobs={max_lp} < requested logprobs={requested_logprobs}. "
-                                "LLDS requires max_logprobs >= 1. Set max_logprobs in vLLM engine config."
+                                "LLDS requires max_logprobs >= 1. Set max_logprobs in vLLM engine config.",
                             )
-                        else:
-                            import warnings
-                            warnings.warn(
-                                f"max_logprobs={max_lp} < requested logprobs={requested_logprobs}. "
-                                "vLLM will truncate logprobs output."
-                            )
+                        import warnings
+
+                        warnings.warn(
+                            f"max_logprobs={max_lp} < requested logprobs={requested_logprobs}. "
+                            "vLLM will truncate logprobs output.",
+                            stacklevel=2,
+                        )
 
         sampling_params = SamplingParams(
             temperature=self.generation_config.temperature,
@@ -448,8 +484,9 @@ class UnslothBackend:
                                 # H-2: Don't mark as used yet - wait until after overflow check
                             else:
                                 import logging
+
                                 logging.getLogger(__name__).warning(
-                                    f"MIO-003: Empty hint text after decoding for span {span_id} in sample {i}"
+                                    f"MIO-003: Empty hint text after decoding for span {span_id} in sample {i}",
                                 )
                                 hints_used_dict[span_id] = False
                         else:
@@ -458,24 +495,27 @@ class UnslothBackend:
                         hint_text = "\n".join(hint_lines)
                         combined_text = text.rstrip() + f"\n\n{hint_text}\n\n"
                         # Check if combined length would exceed max_tokens
-                        combined_tokens = self.tokenizer.encode(combined_text, add_special_tokens=False)
+                        combined_tokens = self.tokenizer.encode(
+                            combined_text, add_special_tokens=False
+                        )
                         if len(combined_tokens) > self.generation_config.max_tokens:
                             import logging
+
                             logging.getLogger(__name__).warning(
                                 f"Hint injection would exceed max_tokens ({len(combined_tokens)} > {self.generation_config.max_tokens}). "
-                                "Skipping hint injection for this sample."
+                                "Skipping hint injection for this sample.",
                             )
                             # H-2: Mark all hints as NOT used since injection was skipped
-                            for span_id in sample_hints.keys():
+                            for span_id in sample_hints:
                                 hints_used_dict[span_id] = False
                         else:
                             text = combined_text
                             # H-2: NOW mark hints as successfully used (AFTER successful injection)
-                            for span_id in sample_hints.keys():
+                            for span_id in sample_hints:
                                 hints_used_dict[span_id] = True
 
             prompts.append(text)
-            hints_used.append(hints_used_dict if hints_used_dict else {})
+            hints_used.append(hints_used_dict or {})
 
         lora_req = self.weight_loader.lora_request if self.weight_loader else None
         outputs = self.model.fast_generate(
@@ -504,10 +544,12 @@ class UnslothBackend:
             if completion_out.logprobs is not None and len(completion_out.logprobs) > 0:
                 if len(completion_out.logprobs) != len(completion_ids):
                     import warnings
+
                     warnings.warn(
                         f"vLLM logprobs length ({len(completion_out.logprobs)}) != "
                         f"completion length ({len(completion_ids)}) for prompt {idx}. "
-                        f"Setting this sample's logprobs to None (batch will continue)."
+                        f"Setting this sample's logprobs to None (batch will continue).",
+                        stacklevel=2,
                     )
                     all_logprobs.append(None)
                     continue
@@ -515,20 +557,24 @@ class UnslothBackend:
                 for t, pos_dict in enumerate(completion_out.logprobs):
                     if pos_dict is None:
                         import warnings
+
                         warnings.warn(
                             f"GB3-006: vLLM returned None logprobs at position {t} for prompt {idx}. "
-                            f"Using -inf as placeholder."
+                            f"Using -inf as placeholder.",
+                            stacklevel=2,
                         )
-                        sample_lps.append(float('-inf'))
+                        sample_lps.append(float("-inf"))
                         continue
                     # GB2-002: Continue loop on empty dict, fill with None placeholder
                     if not pos_dict:
                         import warnings
+
                         warnings.warn(
                             f"vLLM returned empty logprobs at position {t} for prompt {idx}. "
-                            f"Using -inf as placeholder (token was below cutoff)."
+                            f"Using -inf as placeholder (token was below cutoff).",
+                            stacklevel=2,
                         )
-                        sample_lps.append(float('-inf'))
+                        sample_lps.append(float("-inf"))
                         continue
                     # Extract by the actual sampled token_id — NOT by dict iteration order.
                     # With temperature > 0, the sampled token may differ from top-1.
@@ -539,35 +585,41 @@ class UnslothBackend:
                         # GEN-R1-3: vLLM should always include sampled token with logprobs >= 1.
                         # If missing, token was truncated from top-k — return -inf instead of wrong value.
                         import warnings
+
                         warnings.warn(
                             f"Sampled token {sampled_id} not in logprobs dict at position {t} "
-                            f"(keys: {list(pos_dict.keys())}). Returning -inf (token was below top-k cutoff)."
+                            f"(keys: {list(pos_dict.keys())}). Returning -inf (token was below top-k cutoff).",
+                            stacklevel=2,
                         )
-                        sample_lps.append(float('-inf'))
+                        sample_lps.append(float("-inf"))
             all_logprobs.append(sample_lps)
 
         # Guard against None entries (from logprobs length mismatch at line 375)
-        has_logprobs = all(lps is not None and len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
+        has_logprobs = (
+            all(lps is not None and len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
+        )
         if not has_logprobs and any(lps is not None and len(lps) > 0 for lps in all_logprobs):
             import logging
+
             # DP-R2-07: Log at WARNING level instead of DEBUG
             logging.getLogger(__name__).warning(
                 f"DP-R2-07: Partial logprobs: {sum(1 for lps in all_logprobs if lps is not None and len(lps) > 0)}"
-                f"/{len(all_logprobs)} samples have logprobs. LLDS disabled for this batch."
+                f"/{len(all_logprobs)} samples have logprobs. LLDS disabled for this batch.",
             )
         # MIO-006: Warn if hint_registry exists but hint_enabled is False
-        if not prompt_hints and hasattr(self, 'hint_registry') and self.hint_registry is not None:
+        if not prompt_hints and hasattr(self, "hint_registry") and self.hint_registry is not None:
             import logging
+
             logging.getLogger(__name__).warning(
                 "MIO-006: hint_registry exists but hint_enabled is False. "
-                "Failures will clear hints that are never injected."
+                "Failures will clear hints that are never injected.",
             )
         # R2-MIO-001: Return empty list [] instead of None for hints_used when no hints injected
         return GenerationOutput(
             token_ids=token_ids,
             texts=texts,
             logprobs=all_logprobs if has_logprobs else None,
-            hints_used=hints_used if hints_used else [],
+            hints_used=hints_used or [],
         )
 
     # Weight sync methods moved to Weight Sync Bus:

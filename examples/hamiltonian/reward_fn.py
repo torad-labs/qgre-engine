@@ -30,9 +30,9 @@ import sympy as sp
 
 # ─── Timeout utility for sympy operations ─────────────────────────────────────
 
+
 class SympyTimeoutError(Exception):
     """Raised when sympy operation exceeds time limit."""
-    pass
 
 
 @contextmanager
@@ -46,7 +46,7 @@ def sympy_timeout(seconds: int = 2):
         with sympy_timeout(2):
             result = sp.simplify(expr)
     """
-    if not hasattr(signal, 'SIGALRM'):
+    if not hasattr(signal, "SIGALRM"):
         # Windows or signal not available — no timeout
         yield
         return
@@ -62,6 +62,7 @@ def sympy_timeout(seconds: int = 2):
         signal.alarm(0)
         signal.signal(signal.SIGALRM, old_handler)
 
+
 try:
     from latex2sympy2_extended import latex2sympy as _latex2sympy
 except ImportError:
@@ -70,10 +71,12 @@ except ImportError:
 from qgre.segments import HAMILTONIAN_LABEL_ALIASES
 from qgre.types import RewardResult
 
+
 logger = logging.getLogger("qgre.hamiltonian_reward")
 
 
 # ─── Structured Output Parser (regex-free extraction) ─────────────────────────
+
 
 class StructuredOutputParser:
     """Line-based parser for Hamiltonian structured output.
@@ -104,7 +107,7 @@ class StructuredOutputParser:
 
     def __init__(self, text: str):
         self.text = text
-        self.lines = text.split('\n')
+        self.lines = text.split("\n")
         self._cache: dict[str, str | None] = {}
         self._equations_cache: list[str] | None = None
         self._all_expressions_cache: dict[str, list[str]] | None = None
@@ -113,21 +116,21 @@ class StructuredOutputParser:
         """Strip markdown artifacts from a line."""
         s = line.strip()
         # Strip markdown bold/italic markers from start
-        while s.startswith('*') or s.startswith('#'):
-            s = s.lstrip('*#').strip()
+        while s.startswith("*") or s.startswith("#"):
+            s = s.lstrip("*#").strip()
         # Strip trailing * markers
-        while s.endswith('*'):
-            s = s.rstrip('*').strip()
+        while s.endswith("*"):
+            s = s.rstrip("*").strip()
         # Strip **LABEL**: pattern — bold markers around label before colon
         # Handle cases like "MOMENTUM**: p = ..." → "MOMENTUM: p = ..."
         for i in range(len(s)):
-            if s[i:i+3] == '**:' or s[i:i+2] == '*:':
-                s = s[:i] + s[i+2:] if s[i:i+3] == '**:' else s[:i] + s[i+1:]
+            if s[i : i + 3] == "**:" or s[i : i + 2] == "*:":
+                s = s[:i] + s[i + 2 :] if s[i : i + 3] == "**:" else s[:i] + s[i + 1 :]
                 break
         # Strip LaTeX delimiters
-        if s.startswith('$'):
+        if s.startswith("$"):
             s = s[1:].strip()
-        if s.endswith('$'):
+        if s.endswith("$"):
             s = s[:-1].strip()
         return s
 
@@ -135,11 +138,24 @@ class StructuredOutputParser:
         """Extract the mathematical expression from content after label."""
         s = content.strip()
         # Strip leading variable name and = (e.g., "T = p²/4" → "p²/4")
-        if '=' in s:
-            parts = s.split('=', 1)
+        if "=" in s:
+            parts = s.split("=", 1)
             rhs = parts[-1].strip()
             # Check if RHS looks like math (not prose)
-            prose_words = {'the', 'is', 'was', 'from', 'and', 'for', 'with', 'where', 'since', 'given', 'that', 'this'}
+            prose_words = {
+                "the",
+                "is",
+                "was",
+                "from",
+                "and",
+                "for",
+                "with",
+                "where",
+                "since",
+                "given",
+                "that",
+                "this",
+            }
             words = rhs.lower().split()
             if not any(w in prose_words for w in words[:3]):  # Check first 3 words
                 return self._clean_expression(rhs)
@@ -149,10 +165,10 @@ class StructuredOutputParser:
         """Clean trailing artifacts from expression."""
         s = expr.strip()
         # Strip trailing markdown/LaTeX artifacts
-        while s and s[-1] in '*$\\':
+        while s and s[-1] in "*$\\":
             s = s[:-1].strip()
         # Strip trailing LaTeX line break
-        if s.endswith('\\\\'):
+        if s.endswith("\\\\"):
             s = s[:-2].strip()
         return s
 
@@ -165,12 +181,12 @@ class StructuredOutputParser:
             for name in all_names:
                 # Check for "LABEL:" or "LABEL :" pattern
                 if cleaned.startswith(name):
-                    rest = cleaned[len(name):].lstrip()
-                    if rest.startswith(':') or rest.startswith('='):
+                    rest = cleaned[len(name) :].lstrip()
+                    if rest.startswith(":") or rest.startswith("="):
                         content = rest[1:].strip()
                         return (canonical, content)
                     # Also match if there's content directly after (no colon)
-                    if rest and rest[0] in '=':
+                    if rest and rest[0] in "=":
                         return (canonical, rest)
         return None
 
@@ -215,10 +231,10 @@ class StructuredOutputParser:
             # In EQUATIONS section, look for indented equations
             if in_equations_section:
                 cleaned = self._clean_line(line)
-                if cleaned and '=' in cleaned:
+                if cleaned and "=" in cleaned:
                     # Check for derivative patterns: dq/dt, dp/dt, \frac{dq}{dt}
                     lower = cleaned.lower()
-                    if 'd' in lower and ('dt' in lower or '/dt' in lower or '{dt}' in lower):
+                    if "d" in lower and ("dt" in lower or "/dt" in lower or "{dt}" in lower):
                         equations.append(self._clean_expression(cleaned))
 
         # Also scan entire text for derivative expressions outside EQUATIONS section
@@ -231,14 +247,13 @@ class StructuredOutputParser:
             lower = cleaned.lower()
             # Match dX/dt = ... or \frac{dX}{dt} = ... (actual derivative equations)
             # Must start with d or \frac{d to be a Hamilton equation
-            if '=' in cleaned:
+            if "=" in cleaned:
                 # Check for dq/dt or dp/dt pattern at start of expression
-                if lower.startswith('d') and '/dt' in lower:
-                    expr = self._clean_expression(cleaned)
-                    if expr not in equations:
-                        equations.append(expr)
-                # Check for LaTeX fraction derivative
-                elif '\\frac{d' in cleaned.lower() or 'frac{d' in lower:
+                if (
+                    (lower.startswith("d")
+                    and "/dt" in lower)
+                    or ("\\frac{d" in cleaned.lower() or "frac{d" in lower)
+                ):
                     expr = self._clean_expression(cleaned)
                     if expr not in equations:
                         equations.append(expr)
@@ -259,11 +274,11 @@ class StructuredOutputParser:
 
         for line in self.lines:
             cleaned = self._clean_line(line)
-            if '=' not in cleaned:
+            if "=" not in cleaned:
                 continue
 
             # Split on first =
-            parts = cleaned.split('=', 1)
+            parts = cleaned.split("=", 1)
             if len(parts) != 2:
                 continue
 
@@ -271,7 +286,18 @@ class StructuredOutputParser:
             rhs = parts[1].strip()
 
             # Skip if RHS looks like prose
-            prose_words = {'the', 'is', 'was', 'from', 'and', 'for', 'with', 'where', 'since', 'given'}
+            prose_words = {
+                "the",
+                "is",
+                "was",
+                "from",
+                "and",
+                "for",
+                "with",
+                "where",
+                "since",
+                "given",
+            }
             rhs_words = rhs.lower().split()
             if any(w in prose_words for w in rhs_words[:3]):
                 continue
@@ -282,11 +308,11 @@ class StructuredOutputParser:
 
             # Check for derivative expressions: dq/dt, dp/dt, \frac{dq}{dt}
             lower_lhs = lhs.lower()
-            if '/dt' in lower_lhs or '{dt}' in lower_lhs:
+            if "/dt" in lower_lhs or "{dt}" in lower_lhs:
                 # Normalize derivative key to "dX/dt" format
                 # Handle various patterns
-                for var in ['q', 'p', 'x', 'y', 'r', 's', 'theta', 'p_theta', 'p_r']:
-                    if f'd{var}' in lower_lhs or var in lower_lhs:
+                for var in ["q", "p", "x", "y", "r", "s", "theta", "p_theta", "p_r"]:
+                    if f"d{var}" in lower_lhs or var in lower_lhs:
                         key = f"d{var}/dt"
                         expr = self._clean_expression(rhs)
                         if expr:
@@ -298,16 +324,22 @@ class StructuredOutputParser:
             # Handle cases like "T", "p", "H = ...", "KINETIC: T = ..."
             var_parts = lhs.split()
             if var_parts:
-                var = var_parts[-1].strip('*:$')
+                var = var_parts[-1].strip("*:$")
                 # Filter to single letters or known physics variables
-                if len(var) <= 3 or var.lower() in {'theta', 'omega', 'alpha', 'p_theta', 'p_x', 'p_y'}:
+                if len(var) <= 3 or var.lower() in {
+                    "theta",
+                    "omega",
+                    "alpha",
+                    "p_theta",
+                    "p_x",
+                    "p_y",
+                }:
                     expr = self._clean_expression(rhs)
                     if expr:
                         results.setdefault(var, []).append(expr)
 
         self._all_expressions_cache = results
         return results
-
 
     def _find_final_output_boundary(self) -> int:
         """Find the character position where FINAL OUTPUT begins.
@@ -369,8 +401,12 @@ class StructuredOutputParser:
         3. Equation patterns (dX/dt = ..., frac{dX}{dt} = ...)
         """
         spans: dict[str, list[tuple[int, int]]] = {
-            "COORDINATES": [], "MOMENTUM": [], "KINETIC": [], "POTENTIAL": [],
-            "HAMILTONIAN": [], "EQUATIONS": [],
+            "COORDINATES": [],
+            "MOMENTUM": [],
+            "KINETIC": [],
+            "POTENTIAL": [],
+            "HAMILTONIAN": [],
+            "EQUATIONS": [],
         }
 
         # Find where FINAL OUTPUT begins — everything before is reasoning
@@ -402,10 +438,14 @@ class StructuredOutputParser:
             # Also find VAR = expr patterns in the line (FINAL OUTPUT only)
             # Skip if line was already matched as a labeled section (avoid duplicates)
             cleaned = self._clean_line(line)
-            if '=' in cleaned and not match:
+            if "=" in cleaned and not match:
                 # Find VAR = patterns by looking for single-letter vars followed by =
-                for var, label in [('H', 'HAMILTONIAN'), ('V', 'POTENTIAL'),
-                                   ('T', 'KINETIC'), ('p', 'MOMENTUM')]:
+                for var, label in [
+                    ("H", "HAMILTONIAN"),
+                    ("V", "POTENTIAL"),
+                    ("T", "KINETIC"),
+                    ("p", "MOMENTUM"),
+                ]:
                     # Look for "VAR =" or "VAR=" pattern anywhere in the line
                     # Use exact string search, not regex
                     idx = 0
@@ -415,10 +455,10 @@ class StructuredOutputParser:
                         if found == -1:
                             break
                         # Check if followed by = (possibly with spaces)
-                        after = cleaned[found + len(var):].lstrip()
-                        if after.startswith('='):
+                        after = cleaned[found + len(var) :].lstrip()
+                        if after.startswith("="):
                             # Check it's a standalone var (not part of a word)
-                            is_standalone = (found == 0 or not cleaned[found-1].isalnum())
+                            is_standalone = found == 0 or not cleaned[found - 1].isalnum()
                             if is_standalone:
                                 spans[label].append((line_start, line_end))
                                 break  # One match per line per var is enough
@@ -431,18 +471,18 @@ class StructuredOutputParser:
                 lower = cleaned.lower()
                 has_derivative = False
                 # Check for dX/dt pattern
-                if 'd' in lower:
-                    d_idx = lower.find('d')
+                if "d" in lower:
+                    d_idx = lower.find("d")
                     while d_idx >= 0 and d_idx < len(lower) - 3:
                         # Look for /dt after d + letter
                         if d_idx + 1 < len(lower) and lower[d_idx + 1].isalpha():
-                            rest = lower[d_idx + 2:]
-                            if '/dt' in rest:
+                            rest = lower[d_idx + 2 :]
+                            if "/dt" in rest:
                                 has_derivative = True
                                 break
-                        d_idx = lower.find('d', d_idx + 1)
+                        d_idx = lower.find("d", d_idx + 1)
                 # Check for frac{dX}{dt} pattern
-                if 'frac{d' in lower and 'dt}' in lower:
+                if "frac{d" in lower and "dt}" in lower:
                     has_derivative = True
 
                 if has_derivative:
@@ -459,6 +499,7 @@ class StructuredOutputParser:
 
 # ─── Parser factory (for consistent usage) ────────────────────────────────────
 
+
 def parse_structured_output(text: str) -> StructuredOutputParser:
     """Create a parser for structured Hamiltonian output."""
     return StructuredOutputParser(text)
@@ -466,12 +507,18 @@ def parse_structured_output(text: str) -> StructuredOutputParser:
 
 # Common physics degree → radian mappings (shared by parser and normalizer)
 _COMMON_DEGREES = {"30": "pi/6", "45": "pi/4", "60": "pi/3", "90": "pi/2"}
-_COMMON_DEGREES_LATEX = {"30": r"\frac{\pi}{6}", "45": r"\frac{\pi}{4}", "60": r"\frac{\pi}{3}", "90": r"\frac{\pi}{2}"}
+_COMMON_DEGREES_LATEX = {
+    "30": r"\frac{\pi}{6}",
+    "45": r"\frac{\pi}{4}",
+    "60": r"\frac{\pi}{3}",
+    "90": r"\frac{\pi}{2}",
+}
 
 _DIAG_PATH = Path("output/hamiltonian/diagnostics.jsonl")
 
 
 # ─── Expression normalization ─────────────────────────────────────────────────
+
 
 def _normalize_text(s: str) -> str:
     """Normalize text for fuzzy matching."""
@@ -502,6 +549,7 @@ def _normalize_for_sympy(expr_str: str) -> str:
     s = re.sub(r"(\d+)\^\\circ", lambda m: _COMMON_DEGREES.get(m.group(1), m.group(1)), s)
     s = re.sub(r"(\d+)\^\{\\circ\}", lambda m: _COMMON_DEGREES.get(m.group(1), m.group(1)), s)
     s = re.sub(r"(\d+)°", lambda m: _COMMON_DEGREES.get(m.group(1), m.group(1)), s)
+
     # Bare sin(60) etc — assume degrees for common physics angles
     def _replace_trig(match, fn_name):
         angle = match.group(1)
@@ -509,6 +557,7 @@ def _normalize_for_sympy(expr_str: str) -> str:
             return f"{fn_name}({_COMMON_DEGREES[angle]})"
         else:
             return match.group(0)  # Return original unchanged
+
     s = re.sub(r"sin\((\d+)\)", lambda m: _replace_trig(m, "sin"), s)
     s = re.sub(r"cos\((\d+)\)", lambda m: _replace_trig(m, "cos"), s)
     # LaTeX velocity markers → _VDOT_ (velocity form marker)
@@ -540,14 +589,36 @@ def _normalize_for_sympy(expr_str: str) -> str:
     # Implicit multiplication
     s = re.sub(r"(\d)([a-zA-Z_(])", r"\1*\2", s)
     s = re.sub(r"([A-Z])([a-z])", r"\1*\2", s)
-    _KNOWN_NAMES = {"sin", "cos", "tan", "exp", "log", "sqrt", "ln", "pi",
-                    "theta", "omega", "alpha", "beta", "gamma", "delta",
-                    "theta1", "theta2", "p_theta", "p_r", "p_s", "p_x", "p_y"}
+    _KNOWN_NAMES = {
+        "sin",
+        "cos",
+        "tan",
+        "exp",
+        "log",
+        "sqrt",
+        "ln",
+        "pi",
+        "theta",
+        "omega",
+        "alpha",
+        "beta",
+        "gamma",
+        "delta",
+        "theta1",
+        "theta2",
+        "p_theta",
+        "p_r",
+        "p_s",
+        "p_x",
+        "p_y",
+    }
+
     def _split_vars(match):
         word = match.group(0)
         if word.lower() in _KNOWN_NAMES:
             return word
         return "*".join(word)
+
     s = re.sub(r"[a-z]{2,}", _split_vars, s)
     s = re.sub(r"(\))\s*([a-zA-Z_(])", r"\1*\2", s)
     s = re.sub(r"([a-zA-Z0-9_])\s*(\()", r"\1*\2", s)
@@ -574,8 +645,14 @@ def _parse_math(expr_str: str) -> sp.Basic | None:
     cleaned = re.sub(r"^\$+|\$+$", "", raw).strip()
 
     # Pre-process degree notation before any parser (neither handles it correctly)
-    cleaned = re.sub(r"(\d+)\^\s*\\circ", lambda m: _COMMON_DEGREES_LATEX.get(m.group(1), m.group(1)), cleaned)
-    cleaned = re.sub(r"(\d+)\^\s*\{\\circ\}", lambda m: _COMMON_DEGREES_LATEX.get(m.group(1), m.group(1)), cleaned)
+    cleaned = re.sub(
+        r"(\d+)\^\s*\\circ", lambda m: _COMMON_DEGREES_LATEX.get(m.group(1), m.group(1)), cleaned
+    )
+    cleaned = re.sub(
+        r"(\d+)\^\s*\{\\circ\}",
+        lambda m: _COMMON_DEGREES_LATEX.get(m.group(1), m.group(1)),
+        cleaned,
+    )
 
     # Try latex2sympy first — handles all LaTeX natively
     if _latex2sympy is not None and "\\" in cleaned:
@@ -614,13 +691,24 @@ def _parse_math(expr_str: str) -> sp.Basic | None:
 # ─── Sympy helpers ────────────────────────────────────────────────────────────
 
 _SYMPY_LOCALS = {
-    "x": sp.Symbol("x"), "y": sp.Symbol("y"), "r": sp.Symbol("r", positive=True),
-    "s": sp.Symbol("s"), "q": sp.Symbol("q"),
-    "p": sp.Symbol("p"), "p_x": sp.Symbol("p_x"), "p_y": sp.Symbol("p_y"),
-    "p_r": sp.Symbol("p_r", positive=True), "p_s": sp.Symbol("p_s"),
-    "p_theta": sp.Symbol("p_theta"), "p1": sp.Symbol("p1"), "p2": sp.Symbol("p2"),
-    "theta": sp.Symbol("theta"), "theta1": sp.Symbol("theta1"), "theta2": sp.Symbol("theta2"),
-    "x1": sp.Symbol("x1"), "x2": sp.Symbol("x2"),
+    "x": sp.Symbol("x"),
+    "y": sp.Symbol("y"),
+    "r": sp.Symbol("r", positive=True),
+    "s": sp.Symbol("s"),
+    "q": sp.Symbol("q"),
+    "p": sp.Symbol("p"),
+    "p_x": sp.Symbol("p_x"),
+    "p_y": sp.Symbol("p_y"),
+    "p_r": sp.Symbol("p_r", positive=True),
+    "p_s": sp.Symbol("p_s"),
+    "p_theta": sp.Symbol("p_theta"),
+    "p1": sp.Symbol("p1"),
+    "p2": sp.Symbol("p2"),
+    "theta": sp.Symbol("theta"),
+    "theta1": sp.Symbol("theta1"),
+    "theta2": sp.Symbol("theta2"),
+    "x1": sp.Symbol("x1"),
+    "x2": sp.Symbol("x2"),
     "m": sp.Symbol("m", positive=True),
     "k": sp.Symbol("k", positive=True),
     "F": sp.Symbol("F"),
@@ -713,7 +801,7 @@ def _remap_variables(student: sp.Basic, teacher: sp.Basic) -> sp.Basic:
     if len(student_coords) == len(teacher_coords) and student_coords != teacher_coords:
         s_sorted = sorted(student_coords, key=lambda s: s.name)
         t_sorted = sorted(teacher_coords, key=lambda s: s.name)
-        for sv, tv in zip(s_sorted, t_sorted):
+        for sv, tv in zip(s_sorted, t_sorted, strict=False):
             if sv != tv:
                 subs[sv] = tv
 
@@ -721,7 +809,7 @@ def _remap_variables(student: sp.Basic, teacher: sp.Basic) -> sp.Basic:
     if len(student_momenta) == len(teacher_momenta) and student_momenta != teacher_momenta:
         s_sorted = sorted(student_momenta, key=lambda s: s.name)
         t_sorted = sorted(teacher_momenta, key=lambda s: s.name)
-        for sv, tv in zip(s_sorted, t_sorted):
+        for sv, tv in zip(s_sorted, t_sorted, strict=False):
             if sv != tv:
                 subs[sv] = tv
 
@@ -831,8 +919,8 @@ def _score_expression(
 
     # Handle chained equalities: "(6/2)*x² = 3x²" → try final expression first
     # Many derivations show work via "expr1 = expr2 = ... = final". We want the final.
-    if '=' in student_str:
-        parts = [p.strip() for p in student_str.split('=')]
+    if "=" in student_str:
+        parts = [p.strip() for p in student_str.split("=")]
         # Try the last part first (most simplified form)
         student = _try_sympify(parts[-1])
         # If that fails, try the first part (may be more explicit)
@@ -903,10 +991,16 @@ def _score_expression(
     # Numerical equivalence check at two points (use remapped candidate)
     candidate = candidates[0]
     try:
-        free = (candidate.free_symbols | teacher.free_symbols) - {sp.Symbol('pi')}
+        free = (candidate.free_symbols | teacher.free_symbols) - {sp.Symbol("pi")}
         if free:
-            _probes = [sp.Rational(3, 7), sp.Rational(5, 11), sp.Rational(7, 13),
-                       sp.Rational(11, 17), sp.Rational(13, 19), sp.Rational(17, 23)]
+            _probes = [
+                sp.Rational(3, 7),
+                sp.Rational(5, 11),
+                sp.Rational(7, 13),
+                sp.Rational(11, 17),
+                sp.Rational(13, 19),
+                sp.Rational(17, 23),
+            ]
             free_list = sorted(free, key=str)
             probe_set_1 = {s: _probes[j % len(_probes)] for j, s in enumerate(free_list)}
             probe_set_2 = {s: _probes[(j + 1) % len(_probes)] for j, s in enumerate(free_list)}
@@ -952,7 +1046,7 @@ def _score_expression(
             return 0.2 + 0.5 * structural_score
 
         # Fallback: numerical closeness for non-polynomial expressions (trig, exp, etc.)
-        free = (candidate.free_symbols | teacher.free_symbols) - {sp.Symbol('pi')}
+        free = (candidate.free_symbols | teacher.free_symbols) - {sp.Symbol("pi")}
         numerical_score = 0.0
         if free:
             test_point = {s: sp.Rational(3, 7) for s in free}
@@ -1014,6 +1108,7 @@ def _extract_labeled(text: str, label: str) -> str | None:
 
 # ─── Section-agnostic expression finder ──────────────────────────────────────
 
+
 def _find_all_expressions(text: str) -> dict[str, list[str]]:
     """Extract ALL 'X = expr' patterns from the text, grouped by variable name.
 
@@ -1042,8 +1137,7 @@ def _best_match(
     best = 0.0
     for expr in candidates:
         score = _score_expression(expr, teacher_str, variables or [], constant_subs=constant_subs)
-        if score > best:
-            best = score
+        best = max(best, score)
         if best >= 1.0:
             break
     return best
@@ -1061,8 +1155,8 @@ def _extract_equations_block(text: str) -> list[str]:
     # Extract RHS from each equation
     rhs_list = []
     for eq in equations:
-        if '=' in eq:
-            rhs = eq.split('=', 1)[-1].strip()
+        if "=" in eq:
+            rhs = eq.split("=", 1)[-1].strip()
             if rhs:
                 rhs_list.append(rhs)
         else:
@@ -1093,12 +1187,15 @@ def _extract_numbers_from_prompt(prompt: str) -> set[str]:
     nums = set()
     for m in re.finditer(r"[=]\s*(\d+(?:\.\d+)?)", prompt):
         nums.add(m.group(1))
-    for m in re.finditer(r"(?:mass|constant|length|radius|velocity|charge|field)\s+.*?(\d+(?:\.\d+)?)", prompt):
+    for m in re.finditer(
+        r"(?:mass|constant|length|radius|velocity|charge|field)\s+.*?(\d+(?:\.\d+)?)", prompt
+    ):
         nums.add(m.group(1))
     return nums
 
 
 # ─── Quality scorers ──────────────────────────────────────────────────────────
+
 
 def _score_format(text: str) -> float:
     """q_format: structured response with labeled sections."""
@@ -1127,8 +1224,23 @@ def _score_format(text: str) -> float:
 
 def _score_has_math(text: str) -> float:
     """q_has_math: has mathematical content."""
-    indicators = ["=", "**2", "^2", "²", "/2", "p^2", "p²", "p**2",
-                   "cos(", "sin(", "exp(", "sqrt(", "H =", "T =", "V ="]
+    indicators = [
+        "=",
+        "**2",
+        "^2",
+        "²",
+        "/2",
+        "p^2",
+        "p²",
+        "p**2",
+        "cos(",
+        "sin(",
+        "exp(",
+        "sqrt(",
+        "H =",
+        "T =",
+        "V =",
+    ]
     count = sum(1 for p in indicators if p.lower() in text.lower())
     return min(1.0, count / 3)
 
@@ -1143,7 +1255,7 @@ def _score_momentum_defined(text: str) -> float:
     if momentum_str:
         # Check if expression has numbers and variables
         has_numbers = any(c.isdigit() for c in momentum_str)
-        has_expression = any(c.isalpha() or c in '*/+-' for c in momentum_str)
+        has_expression = any(c.isalpha() or c in "*/+-" for c in momentum_str)
         if has_numbers and has_expression:
             return 1.0
         if has_expression:
@@ -1157,7 +1269,7 @@ def _score_momentum_defined(text: str) -> float:
         # Check if any p = ... expression contains mass * velocity pattern
         for expr in p_candidates:
             lower = expr.lower()
-            if 'd' in lower or any(c.isdigit() for c in expr):
+            if "d" in lower or any(c.isdigit() for c in expr):
                 return 0.5
 
     # Check for "conjugate momentum" text
@@ -1432,7 +1544,9 @@ def _score_correct_H(text: str, meta: dict) -> float:
         return 0.1  # Distinct signal: "you plugged in numbers, keep it symbolic"
 
     # Try direct match first
-    direct_score = _score_expression(extracted_H, expected_H, [], constant_subs=meta.get("_constant_subs"))
+    direct_score = _score_expression(
+        extracted_H, expected_H, [], constant_subs=meta.get("_constant_subs")
+    )
     if direct_score >= 0.7:
         return direct_score
 
@@ -1488,8 +1602,12 @@ def _score_consistency(text: str, meta: dict) -> float:
     consistency_scores = []
     for coord in coord_list:
         # Try candidate momentum names in priority order
-        candidates = [f"p_{coord}", "p", coord.replace("x", "p") if coord.startswith("x") else None,
-                      f"p{coord[-1]}" if coord[-1].isdigit() else None]
+        candidates = [
+            f"p_{coord}",
+            "p",
+            coord.replace("x", "p") if coord.startswith("x") else None,
+            f"p{coord[-1]}" if coord[-1].isdigit() else None,
+        ]
         candidates = [c for c in candidates if c is not None]
         p_name = next((c for c in candidates if c in h_sym_names), candidates[0])
 
@@ -1551,7 +1669,12 @@ def _score_correct_coefficient(text: str, meta: dict) -> float:
             if extracted_H is not None:
                 any_extracted = True
                 # CFG-R1-3: Use .get() consistently to avoid KeyError
-                h_score = _score_expression(extracted_H, meta.get("H_expr", ""), [], constant_subs=meta.get("_constant_subs"))
+                h_score = _score_expression(
+                    extracted_H,
+                    meta.get("H_expr", ""),
+                    [],
+                    constant_subs=meta.get("_constant_subs"),
+                )
                 component_scores.append(h_score)
 
         # ── Score equations ──────────────────────────────────────────────────
@@ -1571,7 +1694,10 @@ def _score_correct_coefficient(text: str, meta: dict) -> float:
                         part_scores = []
                         for exp_part in expected_parts:
                             best = max(
-                                (_score_expression(ext, exp_part, [], constant_subs=csubs) for ext in extracted_eqs),
+                                (
+                                    _score_expression(ext, exp_part, [], constant_subs=csubs)
+                                    for ext in extracted_eqs
+                                ),
                                 default=0.0,
                             )
                             part_scores.append(best)
@@ -1586,7 +1712,10 @@ def _score_correct_coefficient(text: str, meta: dict) -> float:
                         part_scores = []
                         for exp_part in expected_parts:
                             best = max(
-                                (_score_expression(ext, exp_part, [], constant_subs=csubs) for ext in extracted_eqs),
+                                (
+                                    _score_expression(ext, exp_part, [], constant_subs=csubs)
+                                    for ext in extracted_eqs
+                                ),
                                 default=0.0,
                             )
                             part_scores.append(best)
@@ -1660,7 +1789,9 @@ def _score_derivative_correct(text: str, meta: dict) -> float:
 
         for exp_part in expected_parts:
             for ext in extracted:
-                score = _score_expression(ext, exp_part, [], constant_subs=meta.get("_constant_subs"))
+                score = _score_expression(
+                    ext, exp_part, [], constant_subs=meta.get("_constant_subs")
+                )
                 if score > best_score:
                     best_score = score
                     best_student_str = ext
@@ -1759,6 +1890,7 @@ def _score_defines_momentum(text: str) -> float:
 
 # ─── Span finder (runs on RAW text, positions valid for char→token mapping) ───
 
+
 def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
     """Find character spans of scored expression patterns in RAW completion text.
 
@@ -1828,6 +1960,7 @@ def _find_expression_spans(text: str) -> dict[str, list[tuple[int, int]]]:
 
 # ─── Main reward function ─────────────────────────────────────────────────────
 
+
 def hamiltonian_reward(
     prompt: str,
     completion: str,
@@ -1841,6 +1974,7 @@ def hamiltonian_reward(
     Phase 4: q_correct_H, q_consistency — full Hamiltonian + internal consistency
     """
     import copy
+
     meta = copy.deepcopy(metadata) if metadata else {}  # Deep copy to avoid mutation
     meta["prompt"] = prompt  # Make prompt available to scoring functions
     # Extract physical constants from prompt once — shared by all scorers

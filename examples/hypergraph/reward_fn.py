@@ -8,17 +8,26 @@
 
 from qgre.types import RewardResult
 
+
 # Quality keys matching STEP_QUALITIES in the engine
 ALL_QUALITIES = [
     # Step 1
-    "q_format_tags", "q_tag_content", "q_node_in_prompt", "q_node_format", "q_node_length",
+    "q_format_tags",
+    "q_tag_content",
+    "q_node_in_prompt",
+    "q_node_format",
+    "q_node_length",
     # Step 2
     "q_chain_s2_refs_s1",
     # Step 3
-    "q_chain_s3_refs_s2", "q_self_consistency",
+    "q_chain_s3_refs_s2",
+    "q_self_consistency",
     # Step 4
-    "q_step4_valid_json", "q_step4_has_keys", "q_existence_correct",
-    "q_archetype_correct", "q_node_f1",
+    "q_step4_valid_json",
+    "q_step4_has_keys",
+    "q_existence_correct",
+    "q_archetype_correct",
+    "q_node_f1",
     # Global (not step-specific, contributes to overall reward only)
     "q_eos_correct",
 ]
@@ -26,10 +35,24 @@ ALL_QUALITIES = [
 # Phase → active qualities (progressive gating)
 PHASE_QUALITIES = {
     1: ["q_format_tags", "q_tag_content", "q_node_in_prompt", "q_node_format", "q_node_length"],
-    2: ["q_format_tags", "q_tag_content", "q_node_in_prompt", "q_node_format", "q_node_length",
-        "q_chain_s2_refs_s1"],
-    3: ["q_format_tags", "q_tag_content", "q_node_in_prompt", "q_node_format", "q_node_length",
-        "q_chain_s2_refs_s1", "q_chain_s3_refs_s2", "q_self_consistency"],
+    2: [
+        "q_format_tags",
+        "q_tag_content",
+        "q_node_in_prompt",
+        "q_node_format",
+        "q_node_length",
+        "q_chain_s2_refs_s1",
+    ],
+    3: [
+        "q_format_tags",
+        "q_tag_content",
+        "q_node_in_prompt",
+        "q_node_format",
+        "q_node_length",
+        "q_chain_s2_refs_s1",
+        "q_chain_s3_refs_s2",
+        "q_self_consistency",
+    ],
     4: ALL_QUALITIES,
 }
 
@@ -40,7 +63,7 @@ def reward_fn(prompt: str, completion: str, meta: dict | None = None) -> RewardR
     Always returns phase 1 with perfect format scores and zero content scores.
     Replace with real reward_fn for actual training.
     """
-    scores = {q: 0.0 for q in ALL_QUALITIES}
+    scores = dict.fromkeys(ALL_QUALITIES, 0.0)
 
     # Step 1 qualities: check if completion has any step tags (simple heuristic)
     has_step1 = "<step1_extraction>" in completion

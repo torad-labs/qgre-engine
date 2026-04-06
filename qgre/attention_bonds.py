@@ -62,17 +62,19 @@ def compute_bond_strength(
         >>> bond = compute_bond_strength(attention, seq_len=100)
     """
     if attention is None:
-        fallback_device = device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        fallback_device = (
+            device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
         return torch.zeros(batch_size, seq_len, device=fallback_device)
 
     # Validate input shape
     if attention.dim() != 4:
         raise ValueError(
             f"Expected 4D attention tensor [batch, heads, seq, seq], got {attention.dim()}D. "
-            "Pass attention from a single layer, not the full tuple."
+            "Pass attention from a single layer, not the full tuple.",
         )
 
-    batch_size, n_heads, full_seq, _ = attention.shape
+    batch_size, _n_heads, full_seq, _ = attention.shape
     device = attention.device
 
     # Handle edge case: single token completion
@@ -82,9 +84,11 @@ def compute_bond_strength(
     # Handle edge case: seq_len exceeds full_seq
     if seq_len > full_seq:
         import warnings
+
         warnings.warn(
             f"Bond strength validation: seq_len={seq_len} > full_seq={full_seq}. "
-            f"Attention shape may be malformed. Clamping to full_seq."
+            f"Attention shape may be malformed. Clamping to full_seq.",
+            stacklevel=2,
         )
         seq_len = full_seq
 
@@ -116,7 +120,7 @@ def compute_bond_strength(
 
         else:
             raise ValueError(
-                f"Unknown mode: {mode}. Must be 'max_received', 'sum_received', or 'mean_received'"
+                f"Unknown mode: {mode}. Must be 'max_received', 'sum_received', or 'mean_received'",
             )
 
     # Final token always has zero bond strength (no later tokens to attend to it)
@@ -161,7 +165,7 @@ def select_attention_layer(
 
     if actual_idx < 0 or actual_idx >= n_layers:
         raise ValueError(
-            f"layer_idx {layer_idx} (resolved to {actual_idx}) out of range for {n_layers} layers"
+            f"layer_idx {layer_idx} (resolved to {actual_idx}) out of range for {n_layers} layers",
         )
 
     return attentions[actual_idx]
@@ -201,6 +205,7 @@ def compute_causal_decay(seq_len: int) -> float:
     This ensures longer sequences don't over-dampen early tokens.
     """
     import math
+
     # Normalize to reference length of 128 tokens
     ratio = max(seq_len, 1) / 128.0
     decay = 1.0 / (1.0 + math.log2(max(ratio, 1.0)))
@@ -276,7 +281,9 @@ def compute_entropy_importance(
     # R3-RSP-007: Normalize entropy using theoretical max (log vocab_size) instead of per-sample max
     # to avoid batch-dependent scaling. vocab_size is inferred from logits.shape[-1].
     vocab_size = completion_logits_f32.shape[-1]
-    theoretical_max_entropy = torch.log(torch.tensor(vocab_size, dtype=torch.float32, device=device))
+    theoretical_max_entropy = torch.log(
+        torch.tensor(vocab_size, dtype=torch.float32, device=device)
+    )
     entropy_norm = entropy / theoretical_max_entropy.clamp(min=1e-6)  # [batch, actual_len]
 
     # Entropy importance: low entropy = high importance (inverted)
@@ -304,7 +311,7 @@ def compute_entropy_importance(
         importance = entropy_importance * position_weight
     else:
         raise ValueError(
-            f"Unknown mode: {mode}. Must be 'entropy', 'position', or 'entropy_position'"
+            f"Unknown mode: {mode}. Must be 'entropy', 'position', or 'entropy_position'",
         )
 
     # Pad to requested seq_len if needed
@@ -341,7 +348,7 @@ def apply_importance_constraint(
     if strength < 0.0:
         raise ValueError(
             f"R3-RSP-001: strength must be >= 0.0, got {strength}. "
-            "Negative strength causes dampening=0 or negative → division by zero or sign inversion."
+            "Negative strength causes dampening=0 or negative → division by zero or sign inversion.",
         )
 
     # Compute dampening factor
@@ -349,9 +356,7 @@ def apply_importance_constraint(
 
     # Gate by advantage sign: apply dampening to both positive and negative
     # but symmetrically (same dampening factor for both directions)
-    constrained = raw_advantage / dampening
-
-    return constrained
+    return raw_advantage / dampening
 
 
 # =============================================================================
@@ -404,20 +409,29 @@ def compute_normalized_entropy(
     # CR-002: Track occurrence counts and sample positions for debugging
     if torch.isnan(normalized).any():
         import warnings
-        if not hasattr(compute_normalized_entropy, '_nan_count'):
+
+        if not hasattr(compute_normalized_entropy, "_nan_count"):
             compute_normalized_entropy._nan_count = 0
         nan_count_batch = torch.isnan(normalized).sum().item()
         compute_normalized_entropy._nan_count += nan_count_batch
         # Log on first occurrence and every 100th
-        if compute_normalized_entropy._nan_count == nan_count_batch or compute_normalized_entropy._nan_count % 100 < nan_count_batch:
+        if (
+            compute_normalized_entropy._nan_count == nan_count_batch
+            or compute_normalized_entropy._nan_count % 100 < nan_count_batch
+        ):
             nan_positions = torch.nonzero(torch.isnan(normalized))
             sample_positions = nan_positions[:5].tolist() if len(nan_positions) > 0 else []
             warnings.warn(
                 f"CR-002: NaN in normalized entropy (batch: {nan_count_batch}, total: {compute_normalized_entropy._nan_count}). "
                 f"Sample positions: {sample_positions}. Replacing with 0.5. "
-                "Investigate logit computation — check for -inf/+inf in input logits."
+                "Investigate logit computation — check for -inf/+inf in input logits.",
+                stacklevel=2,
             )
-    normalized = torch.where(torch.isnan(normalized), torch.tensor(0.5, device=normalized.device, dtype=normalized.dtype), normalized)
+    normalized = torch.where(
+        torch.isnan(normalized),
+        torch.tensor(0.5, device=normalized.device, dtype=normalized.dtype),
+        normalized,
+    )
 
     return normalized.clamp(0.0, 1.0)
 

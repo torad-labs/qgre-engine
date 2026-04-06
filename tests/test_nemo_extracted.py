@@ -1,22 +1,19 @@
 """Tests for NeMo RL extracted modules (Step 0b)."""
 
-import torch
 import pytest
+import torch
 
 
 def test_import_loss_functions():
     """import succeeds with no external deps."""
-    from qgre.nemo_extracted.loss_functions import ClippedPGLossFn, ClippedPGLossConfig
 
 
 def test_import_kl():
     """import succeeds."""
-    from qgre.nemo_extracted.kl import calculate_kl, masked_mean
 
 
 def test_import_logits():
     """import succeeds."""
-    from qgre.nemo_extracted.logits import logprobs_from_logits, compute_response_logprobs
 
 
 def test_clipped_pg_loss_nonzero():
@@ -166,9 +163,9 @@ def test_selective_log_softmax_fp32_equivalence():
     lp = torch.nn.functional.log_softmax(logits, dim=-1)
     expected = lp.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
 
-    assert torch.allclose(result, expected, atol=1e-5), (
-        f"max diff: {(result - expected).abs().max().item()}"
-    )
+    assert torch.allclose(
+        result, expected, atol=1e-5
+    ), f"max diff: {(result - expected).abs().max().item()}"
     assert (result <= 0).all(), "log probs must be ≤ 0"
 
 
@@ -188,9 +185,9 @@ def test_selective_log_softmax_bf16_equivalence():
     expected = lp.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1).float()
 
     # bf16 log_softmax has ~0.05 max error vs fp32 reference (expected for half precision)
-    assert torch.allclose(result, expected, atol=0.05), (
-        f"max diff: {(result - expected).abs().max().item()}"
-    )
+    assert torch.allclose(
+        result, expected, atol=0.05
+    ), f"max diff: {(result - expected).abs().max().item()}"
     assert (result <= 0).all(), "log probs must be ≤ 0"
 
 
@@ -224,9 +221,9 @@ def test_logprobs_from_logits_selective_vs_old():
     lp = torch.nn.functional.log_softmax(logits, dim=-1)
     expected = lp.gather(dim=-1, index=labels.unsqueeze(-1)).squeeze(-1).float()
 
-    assert torch.allclose(result, expected, atol=1e-5), (
-        f"max diff: {(result - expected).abs().max().item()}"
-    )
+    assert torch.allclose(
+        result, expected, atol=1e-5
+    ), f"max diff: {(result - expected).abs().max().item()}"
 
 
 # --- GRPO-λ eligibility trace tests ---

@@ -1,13 +1,16 @@
 """Tests for schema validation at serialization boundaries."""
+
 import math
+
 import pytest
+
 from qgre.schema import (
-    validate_schema,
-    validate_field,
-    FieldSpec,
-    Required,
     GAME_STATE_SCHEMA,
     TRAINER_STATE_SCHEMA,
+    FieldSpec,
+    Required,
+    validate_field,
+    validate_schema,
 )
 
 
@@ -95,9 +98,12 @@ class TestSchemaValidation:
     def test_path_in_error_messages(self):
         """Error messages should include the field path."""
         schema = {
-            "nested": FieldSpec(dict, nested_schema={
-                "inner": FieldSpec(int, Required.YES),
-            }),
+            "nested": FieldSpec(
+                dict,
+                nested_schema={
+                    "inner": FieldSpec(int, Required.YES),
+                },
+            ),
         }
         with pytest.raises(ValueError, match="nested.inner"):
             validate_schema({"nested": {}}, schema)
@@ -179,6 +185,7 @@ class TestBugClassPrevention:
         """Priority weights must be non-negative."""
         # R3-3: Priority weights accept negative/NaN
         from qgre.schema import validate_priority_weights
+
         assert validate_priority_weights({"a": 1.0, "b": 2.0}) is True
         assert validate_priority_weights({"a": -1.0}) is False
         assert validate_priority_weights({"a": float("nan")}) is False

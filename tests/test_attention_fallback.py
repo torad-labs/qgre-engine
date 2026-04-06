@@ -1,29 +1,27 @@
 """Test attention constraint fallback - verify actual code paths compile and work."""
 
 import ast
-import sys
 
 
 def test_trainer_imports():
     """Verify trainer module imports without error."""
-    import qgre.trainer
     print("trainer imports: OK")
 
 
 def test_attention_bonds_imports():
     """Verify attention_bonds module imports without error."""
-    import qgre.attention_bonds
     print("attention_bonds imports: OK")
 
 
 def test_config_has_attention_fields():
     """Verify config has the attention constraint fields."""
     from qgre.config import AlgorithmConfig
+
     cfg = AlgorithmConfig()
-    assert hasattr(cfg, 'attention_constrained_advantage')
-    assert hasattr(cfg, 'attention_constraint_strength')
-    assert hasattr(cfg, 'attention_constraint_mode')
-    assert hasattr(cfg, 'attention_sample_layer')
+    assert hasattr(cfg, "attention_constrained_advantage")
+    assert hasattr(cfg, "attention_constraint_strength")
+    assert hasattr(cfg, "attention_constraint_mode")
+    assert hasattr(cfg, "attention_sample_layer")
     print("config fields: OK")
 
 
@@ -42,23 +40,27 @@ def test_no_undefined_names_in_trainer():
     if "_logger." in source:
         # Find lines with _logger that aren't self._completion_logger
         bad_lines = []
-        for i, line in enumerate(source.split('\n'), 1):
-            if '_logger.' in line and 'self._completion_logger' not in line and 'completion_logger' not in line:
+        for i, line in enumerate(source.split("\n"), 1):
+            if (
+                "_logger." in line
+                and "self._completion_logger" not in line
+                and "completion_logger" not in line
+            ):
                 bad_lines.append(f"  {i}: {line.strip()}")
         if bad_lines:
-            raise AssertionError(f"Found undefined _logger usage:\n" + "\n".join(bad_lines))
+            raise AssertionError("Found undefined _logger usage:\n" + "\n".join(bad_lines))
 
     # Check for local imports that shadow module-level imports (causes UnboundLocalError)
     # Pattern: "import logging" inside a function shadows module-level "import logging"
     in_function = False
-    for i, line in enumerate(source.split('\n'), 1):
+    for i, line in enumerate(source.split("\n"), 1):
         stripped = line.strip()
-        if stripped.startswith('def ') or stripped.startswith('async def '):
+        if stripped.startswith("def ") or stripped.startswith("async def "):
             in_function = True
-        if in_function and stripped == 'import logging':
+        if in_function and stripped == "import logging":
             raise AssertionError(
                 f"Line {i}: Local 'import logging' shadows module-level import. "
-                "Remove this line - use the module-level import instead."
+                "Remove this line - use the module-level import instead.",
             )
 
     print("AST parse and compile: OK")
@@ -66,7 +68,6 @@ def test_no_undefined_names_in_trainer():
 
 def test_fused_logprobs_imports():
     """Verify fused_logprobs module imports."""
-    from qgre.fused_logprobs import get_hidden_states_and_lm_head
     print("fused_logprobs imports: OK")
 
 

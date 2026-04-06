@@ -2,19 +2,24 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import torch
-import torch.nn as nn
 import pytest
+import torch
+from torch import nn
 
+from qgre.advantages import build_phase_qualities
 from qgre.config import QGREConfig
 from qgre.data import PromptBatch
-from qgre.advantages import build_phase_qualities
-from qgre.segments import HYPERGRAPH_V1_STEP_QUALITIES
+from qgre.segments import (
+    CLOSE_ANGLE,
+    CLOSE_SLASH,
+    HYPERGRAPH_V1_STEP_QUALITIES,
+    OPEN_ANGLE,
+    STEP_TOKEN,
+)
 from qgre.trainer import QGRETrainer
 from qgre.types import RewardResult
-from qgre.segments import OPEN_ANGLE, STEP_TOKEN, CLOSE_ANGLE, CLOSE_SLASH
 
 
 TEST_SQ = HYPERGRAPH_V1_STEP_QUALITIES
@@ -50,6 +55,7 @@ class MockModel(nn.Module):
 
         class _Config:
             pass
+
         self.config = _Config()
         self.config.vocab_size = vocab_size
 
@@ -65,9 +71,17 @@ class MockModel(nn.Module):
 def _make_tokens(n=32):
     """Simple token sequence with step 1 structure."""
     return [
-        OPEN_ANGLE, STEP_TOKEN, 16, 9999, CLOSE_ANGLE,  # <step1>
-        *[100 + i for i in range(n - 10)],               # content
-        CLOSE_SLASH, STEP_TOKEN, 16, 9999, CLOSE_ANGLE,  # </step1>
+        OPEN_ANGLE,
+        STEP_TOKEN,
+        16,
+        9999,
+        CLOSE_ANGLE,  # <step1>
+        *[100 + i for i in range(n - 10)],  # content
+        CLOSE_SLASH,
+        STEP_TOKEN,
+        16,
+        9999,
+        CLOSE_ANGLE,  # </step1>
     ]
 
 
@@ -114,8 +128,13 @@ def test_config_new_fields_defaults():
     """New configurable fields have correct defaults."""
     cfg = _cfg()
     assert cfg.model.lora_target_modules == [
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
     ]
     assert cfg.model.modules_to_save == ["lm_head"]  # embed_tokens removed — fim_pad is pre-trained
     assert cfg.generation.max_logprobs == 5
@@ -132,8 +151,12 @@ def test_config_new_fields_defaults():
 def test_config_custom_target_modules_from_yaml():
     """Custom lora_target_modules from YAML."""
     raw = {
-        "model": {"path": "test", "pad_token": "<pad>", "pad_token_id": 0,
-                   "lora_target_modules": ["qkv_proj", "o_proj"]},
+        "model": {
+            "path": "test",
+            "pad_token": "<pad>",
+            "pad_token_id": 0,
+            "lora_target_modules": ["qkv_proj", "o_proj"],
+        },
         "data": {"train_files": ["dummy.parquet"]},
         "generation": {"stop_token_ids": [2]},
         "algorithm": {"step_qualities": {1: ["q_test"]}},
@@ -164,6 +187,7 @@ def test_config_validate_empty_stop_tokens_warns():
     cfg = _cfg()
     cfg.generation.stop_token_ids = []
     import warnings
+
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         cfg.validate()
@@ -173,6 +197,7 @@ def test_config_validate_empty_stop_tokens_warns():
 def test_config_stop_token_ids_empty_default():
     """Default stop_token_ids is empty (forces explicit config)."""
     from qgre.config import GenerationConfig
+
     gen = GenerationConfig()
     assert gen.stop_token_ids == []
 
@@ -191,7 +216,9 @@ def test_trainer_forward_finite_loss():
         trainer = QGRETrainer(
             model=model,
             tokenizer=None,
-            reward_fn=lambda *a, **k: RewardResult(reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1),
+            reward_fn=lambda *a, **k: RewardResult(
+                reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1
+            ),
             config=cfg,
         )
         trainer.setup_optimizer()
@@ -231,12 +258,16 @@ def test_mode_switch_spo_vs_grpo():
     """Config mode='spo' vs 'grpo' → different estimator mode."""
     cfg_spo = _cfg()
     cfg_spo.algorithm.mode = "spo"
-    trainer_spo = QGRETrainer(model=MockModel(), tokenizer=None, reward_fn=lambda *a: None, config=cfg_spo)
+    trainer_spo = QGRETrainer(
+        model=MockModel(), tokenizer=None, reward_fn=lambda *a: None, config=cfg_spo
+    )
     assert trainer_spo.advantage_estimator.mode == "spo"
 
     cfg_grpo = _cfg()
     cfg_grpo.algorithm.mode = "grpo"
-    trainer_grpo = QGRETrainer(model=MockModel(), tokenizer=None, reward_fn=lambda *a: None, config=cfg_grpo)
+    trainer_grpo = QGRETrainer(
+        model=MockModel(), tokenizer=None, reward_fn=lambda *a: None, config=cfg_grpo
+    )
     assert trainer_grpo.advantage_estimator.mode == "grpo"
 
 
@@ -251,8 +282,11 @@ def test_gradient_accumulation_equivalence():
         torch.manual_seed(42)
         model = MockModel()
         trainer = QGRETrainer(
-            model=model, tokenizer=None,
-            reward_fn=lambda *a, **k: RewardResult(reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1),
+            model=model,
+            tokenizer=None,
+            reward_fn=lambda *a, **k: RewardResult(
+                reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1
+            ),
             config=cfg,
         )
         trainer.setup_optimizer()
@@ -281,13 +315,12 @@ def test_gradient_accumulation_equivalence():
         assert any_changed, "Weights should change after gradient_accumulation_steps steps"
 
 
-
 def test_phase_qualities_mapping():
     """build_phase_qualities produces correct progressive gating."""
     pq = build_phase_qualities(HYPERGRAPH_V1_STEP_QUALITIES)
-    assert len(pq[1]) == 5   # Step 1 only
-    assert len(pq[2]) == 6   # Step 1 + 2
-    assert len(pq[3]) == 8   # Step 1 + 2 + 3
+    assert len(pq[1]) == 5  # Step 1 only
+    assert len(pq[2]) == 6  # Step 1 + 2
+    assert len(pq[3]) == 8  # Step 1 + 2 + 3
     assert len(pq[4]) == 13  # All steps
 
 
@@ -313,8 +346,11 @@ def test_trainer_accepts_custom_step_qualities():
     custom_sq = {1: ["q_json_valid"], 2: ["q_grounding"], 3: ["q_accuracy"]}
     cfg = _cfg()
     trainer = QGRETrainer(
-        model=MockModel(), tokenizer=None, reward_fn=lambda *a: None,
-        config=cfg, step_qualities=custom_sq,
+        model=MockModel(),
+        tokenizer=None,
+        reward_fn=lambda *a: None,
+        config=cfg,
+        step_qualities=custom_sq,
     )
     assert trainer.step_qualities == custom_sq
     assert len(trainer.phase_qualities) == 3
@@ -326,8 +362,11 @@ def test_trainer_accepts_custom_segmenter():
 
     cfg = _cfg()
     trainer = QGRETrainer(
-        model=MockModel(), tokenizer=None, reward_fn=lambda *a: None,
-        config=cfg, segmenter=uniform_segmenter,
+        model=MockModel(),
+        tokenizer=None,
+        reward_fn=lambda *a: None,
+        config=cfg,
+        segmenter=uniform_segmenter,
     )
     assert trainer.advantage_estimator.segmenter is uniform_segmenter
 
@@ -339,6 +378,7 @@ def test_resume_without_model_state_raises():
     """Resume from checkpoint missing model_state_dict → RuntimeError."""
     import tempfile
     from pathlib import Path
+
     import torch as _torch
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -361,6 +401,7 @@ def test_resume_without_model_state_raises():
 def test_config_unknown_key_warns():
     """Unknown YAML key in config → warning emitted."""
     import warnings
+
     from qgre.config import QGREConfig
 
     raw = {
@@ -390,11 +431,13 @@ def test_step_records_mastery_and_advances_phase():
         cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
 
         from qgre.types import GameState
+
         gs = GameState(mastery_threshold=0.7)
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None,
-                              reward_fn=lambda *a: None, config=cfg, game_state=gs)
+        trainer = QGRETrainer(
+            model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg, game_state=gs
+        )
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -404,21 +447,35 @@ def test_step_records_mastery_and_advances_phase():
         # All phase keys (including phase-2) must be present in reward output per C2.2 validation.
         for _ in range(25):
             rrs = [
-                RewardResult(reward=0.9, scores={
-                    "q_format_tags": 0.95, "q_tag_content": 0.90,
-                    "q_node_in_prompt": 0.85, "q_node_format": 0.90, "q_node_length": 0.88,
-                    "q_chain_s2_refs_s1": 0.0,
-                }),
-                RewardResult(reward=0.8, scores={
-                    "q_format_tags": 0.88, "q_tag_content": 0.85,
-                    "q_node_in_prompt": 0.80, "q_node_format": 0.85, "q_node_length": 0.82,
-                    "q_chain_s2_refs_s1": 0.0,
-                }),
+                RewardResult(
+                    reward=0.9,
+                    scores={
+                        "q_format_tags": 0.95,
+                        "q_tag_content": 0.90,
+                        "q_node_in_prompt": 0.85,
+                        "q_node_format": 0.90,
+                        "q_node_length": 0.88,
+                        "q_chain_s2_refs_s1": 0.0,
+                    },
+                ),
+                RewardResult(
+                    reward=0.8,
+                    scores={
+                        "q_format_tags": 0.88,
+                        "q_tag_content": 0.85,
+                        "q_node_in_prompt": 0.80,
+                        "q_node_format": 0.85,
+                        "q_node_length": 0.82,
+                        "q_chain_s2_refs_s1": 0.0,
+                    },
+                ),
             ]
             metrics = trainer.step(batch, [tokens, tokens], rrs)
 
         # After 25 steps with high step-1 scores, phase should have advanced
-        assert trainer.game_state.phase >= 2, f"Phase should have advanced, got {trainer.game_state.phase}"
+        assert (
+            trainer.game_state.phase >= 2
+        ), f"Phase should have advanced, got {trainer.game_state.phase}"
         assert "mastery/default/step_1" in metrics
 
 
@@ -430,11 +487,13 @@ def test_step_uses_engine_phase_not_reward_phase():
         cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
 
         from qgre.types import GameState
+
         gs = GameState()  # Engine starts at phase 1 (default tier)
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None,
-                              reward_fn=lambda *a: None, config=cfg, game_state=gs)
+        trainer = QGRETrainer(
+            model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg, game_state=gs
+        )
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -464,8 +523,7 @@ def test_length_penalty_applied_when_high_correctness():
         cfg.algorithm.length_penalty_threshold = 0.3
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None,
-                              reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -476,7 +534,9 @@ def test_length_penalty_applied_when_high_correctness():
             RewardResult(reward=0.8, scores={"q_format_tags": 0.8, "q_tag_content": 0.8}),
         ]
         metrics = trainer.step(batch, [tokens, tokens], rrs)
-        assert "length_penalty" in metrics, "Length penalty should be in metrics when correctness is high"
+        assert (
+            "length_penalty" in metrics
+        ), "Length penalty should be in metrics when correctness is high"
 
 
 def test_length_penalty_skipped_when_low_correctness():
@@ -489,8 +549,7 @@ def test_length_penalty_skipped_when_low_correctness():
         cfg.algorithm.length_penalty_threshold = 0.9
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None,
-                              reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -501,7 +560,9 @@ def test_length_penalty_skipped_when_low_correctness():
             RewardResult(reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}),
         ]
         metrics = trainer.step(batch, [tokens, tokens], rrs)
-        assert "length_penalty" not in metrics, "Length penalty should NOT be applied when correctness is low"
+        assert (
+            "length_penalty" not in metrics
+        ), "Length penalty should NOT be applied when correctness is low"
 
 
 # --- Fix 1: KL defaults ---
@@ -524,8 +585,7 @@ def test_kl_penalty_zero_when_disabled():
         cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None,
-                              reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -549,8 +609,7 @@ def test_neg_logprob_mean_is_metric_only():
         cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None,
-                              reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -583,8 +642,9 @@ def test_completion_log_is_decoded_text():
                 return "decoded text for test"
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=FakeTokenizer(),
-                              reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(
+            model=model, tokenizer=FakeTokenizer(), reward_fn=lambda *a: None, config=cfg
+        )
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -597,9 +657,11 @@ def test_completion_log_is_decoded_text():
         # Capture what the completion logger receives
         logged = []
         orig_log = trainer.completion_logger.log_completion
+
         def capture_log(**kwargs):
             logged.append(kwargs)
             orig_log(**kwargs)
+
         trainer.completion_logger.log_completion = capture_log
 
         trainer.step(batch, [tokens, tokens], rrs)
@@ -607,9 +669,7 @@ def test_completion_log_is_decoded_text():
         assert len(logged) >= 1
         # The completion= kwarg should contain decoded text
         comp = logged[0].get("completion", "")
-        assert "decoded text" in comp, (
-            f"Expected decoded text, got: {comp}"
-        )
+        assert "decoded text" in comp, f"Expected decoded text, got: {comp}"
 
 
 # --- Fix 6: Gradient accumulation loss metric ---
@@ -627,8 +687,7 @@ def test_gradient_accumulation_loss_accumulated():
         cfg.algorithm.grpo.n = 2  # Match n_completions
 
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None,
-                              reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
@@ -664,8 +723,11 @@ def test_fused_logprobs_path():
 
         model = MockModel()
         trainer = QGRETrainer(
-            model=model, tokenizer=None,
-            reward_fn=lambda *a, **k: RewardResult(reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1),
+            model=model,
+            tokenizer=None,
+            reward_fn=lambda *a, **k: RewardResult(
+                reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1
+            ),
             config=cfg,
         )
         trainer.setup_optimizer()
@@ -688,8 +750,7 @@ def test_mastery_threshold_from_config():
     """TrainingConfig.mastery_threshold is passed to GameState."""
     cfg = _cfg()
     cfg.training.mastery_threshold = 0.65
-    trainer = QGRETrainer(model=MockModel(), tokenizer=None,
-                          reward_fn=lambda *a: None, config=cfg)
+    trainer = QGRETrainer(model=MockModel(), tokenizer=None, reward_fn=lambda *a: None, config=cfg)
     assert trainer.game_state.mastery_threshold == 0.65
 
 

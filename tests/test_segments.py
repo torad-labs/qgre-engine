@@ -1,9 +1,16 @@
 """Tests for token segmentation (Step 0d — segmentation)."""
 
 from qgre.segments import (
-    CLOSE_ANGLE, CLOSE_SLASH, OPEN_ANGLE, STEP_NUM_TOKENS, STEP_TOKEN,
-    THINK_END, THINK_START, segment_completion,
-    _hif_json_segmenter_impl, make_hif_json_segmenter,
+    CLOSE_ANGLE,
+    CLOSE_SLASH,
+    OPEN_ANGLE,
+    STEP_NUM_TOKENS,
+    STEP_TOKEN,
+    THINK_END,
+    THINK_START,
+    _hif_json_segmenter_impl,
+    make_hif_json_segmenter,
+    segment_completion,
 )
 
 
@@ -12,11 +19,11 @@ def test_segment_known_sequence(known_token_ids):
     regions = segment_completion(known_token_ids)
 
     # <think> block: tokens 0-4
-    assert regions[0] == "THINK"   # THINK_START
+    assert regions[0] == "THINK"  # THINK_START
     assert regions[1] == "THINK"
     assert regions[2] == "THINK"
     assert regions[3] == "THINK"
-    assert regions[4] == "THINK"   # THINK_END
+    assert regions[4] == "THINK"  # THINK_END
 
     # <step1_extraction> opening tag: tokens 5-9 → FORMAT
     assert regions[5] == "FORMAT"  # <
@@ -48,9 +55,18 @@ def test_segment_known_sequence(known_token_ids):
 def test_segment_no_think_block():
     """nothink template: no THINK tokens → no THINK regions."""
     tokens = [
-        OPEN_ANGLE, STEP_TOKEN, 16, 94842, CLOSE_ANGLE,  # <step1_extraction>
-        100, 101,  # content
-        CLOSE_SLASH, STEP_TOKEN, 16, 94842, CLOSE_ANGLE,  # </step1_extraction>
+        OPEN_ANGLE,
+        STEP_TOKEN,
+        16,
+        94842,
+        CLOSE_ANGLE,  # <step1_extraction>
+        100,
+        101,  # content
+        CLOSE_SLASH,
+        STEP_TOKEN,
+        16,
+        94842,
+        CLOSE_ANGLE,  # </step1_extraction>
     ]
     regions = segment_completion(tokens)
 
@@ -63,8 +79,15 @@ def test_segment_no_think_block():
 def test_segment_malformed_tags():
     """Missing closing tag → region extends to end as current type."""
     tokens = [
-        OPEN_ANGLE, STEP_TOKEN, 16, 94842, CLOSE_ANGLE,  # <step1_extraction>
-        100, 101, 102, 103,  # content with no closing tag
+        OPEN_ANGLE,
+        STEP_TOKEN,
+        16,
+        94842,
+        CLOSE_ANGLE,  # <step1_extraction>
+        100,
+        101,
+        102,
+        103,  # content with no closing tag
     ]
     regions = segment_completion(tokens)
 
@@ -198,6 +221,7 @@ def test_hif_segmenter_make_factory():
 
 def test_hif_segmenter_decode_failure():
     """If tokenizer decode fails, fall back to think-annotated + STEP_5 default."""
+
     class BrokenTokenizer:
         def decode(self, ids, skip_special_tokens=False):
             raise RuntimeError("decode failed")

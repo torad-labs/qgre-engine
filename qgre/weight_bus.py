@@ -15,8 +15,10 @@ from __future__ import annotations
 from enum import Enum
 from typing import TYPE_CHECKING
 
+
 if TYPE_CHECKING:
-    import torch.nn as nn
+    from torch import nn
+
     from qgre.types import TrainingContext
     from qgre.weight_export import WeightExporter
     from qgre.weight_load import WeightLoader
@@ -24,7 +26,7 @@ if TYPE_CHECKING:
 
 class SyncStrategy(Enum):
     DIRECT_COPY = "direct_copy"  # Default: GPU tensor copy into vLLM LoRA buffers
-    MERGE = "merge"              # Full-precision only: merge LoRA into base weights
+    MERGE = "merge"  # Full-precision only: merge LoRA into base weights
 
 
 class WeightBus:
@@ -46,7 +48,7 @@ class WeightBus:
         exporter: WeightExporter,
         loader: WeightLoader,
         model: nn.Module,
-        ctx: "TrainingContext",
+        ctx: TrainingContext,
         modules_to_save: list[str] | None = None,
     ) -> None:
         """Push updated weights from training model to inference engine.
@@ -66,7 +68,9 @@ class WeightBus:
         try:
             if self.strategy == SyncStrategy.MERGE:
                 exporter.merge_lora(model)
-                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save), ctx)
+                loader.sync_modules_to_save(
+                    exporter.get_modules_to_save(model, expected=modules_to_save), ctx
+                )
                 # MERGE modifies base weights in-place — flush vLLM KV cache to prevent stale keys/values
                 loader.flush_kv_cache()
                 sync_executed = True
@@ -74,19 +78,24 @@ class WeightBus:
                 # WS-R3-04: Check if dropout is active before sync
                 try:
                     from qgre.lora_dropout import apply_lora_dropout
-                    dropout_active = getattr(apply_lora_dropout, '_dropout_active', False)
+
+                    dropout_active = getattr(apply_lora_dropout, "_dropout_active", False)
                 except ImportError:
                     # SFH-003: Log import failure so users know dropout checking is disabled
                     import warnings
+
                     warnings.warn(
                         "SFH-003: lora_dropout module not available — dropout_active check disabled. "
-                        "If you expect LoRA dropout to be active, verify qgre.lora_dropout module exists."
+                        "If you expect LoRA dropout to be active, verify qgre.lora_dropout module exists.",
+                        stacklevel=2,
                     )
                     dropout_active = False
 
                 loader.sync_lora_direct(model, ctx, first_call=not self._initialized)
                 # Get fresh state_dict inside sync_modules_to_save to avoid stale tensor references
-                loader.sync_modules_to_save(exporter.get_modules_to_save(model, expected=modules_to_save), ctx)
+                loader.sync_modules_to_save(
+                    exporter.get_modules_to_save(model, expected=modules_to_save), ctx
+                )
                 # WS-R3-04: Only mark sync_executed if dropout wasn't active
                 sync_executed = not dropout_active
                 # WS-R3-04: Only set initialized if sync actually executed (dropout not active)

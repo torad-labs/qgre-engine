@@ -15,29 +15,32 @@ Reference: Liger-Kernel PR #672 (fused GRPO loss, 46GB savings).
 from __future__ import annotations
 
 import torch
-import torch.nn as nn
+from torch import nn
+
 
 try:
     import triton
     import triton.language as tl
+
     HAS_TRITON = True
 except ImportError:
     HAS_TRITON = False
 
 
 if HAS_TRITON:
+
     @triton.jit
     def _fused_logprob_kernel(
-        hidden_ptr,        # [seq, hidden_dim]
-        weight_ptr,        # [vocab, hidden_dim] (lm_head.weight)
-        label_ptr,         # [seq]
-        output_ptr,        # [seq]
-        bias_ptr,          # [vocab] or null
+        hidden_ptr,  # [seq, hidden_dim]
+        weight_ptr,  # [vocab, hidden_dim] (lm_head.weight)
+        label_ptr,  # [seq]
+        output_ptr,  # [seq]
+        bias_ptr,  # [vocab] or null
         seq_len,
         hidden_dim: tl.constexpr,
         vocab_size,
         HAS_BIAS: tl.constexpr,
-        BLOCK_V: tl.constexpr,   # Must divide vocab_size (128 for Qwen3)
+        BLOCK_V: tl.constexpr,  # Must divide vocab_size (128 for Qwen3)
     ):
         """One program per sequence position. Tiles over vocab to compute logprob."""
         pid = tl.program_id(0)
@@ -88,7 +91,7 @@ if HAS_TRITON:
             # Gather label logit if in this tile
             label_in_tile = (label >= v_start) & (label < v_start + BLOCK_V)
             if label_in_tile:
-                label_idx = label - v_start
+                label - v_start
                 # GB3-003: Explicit -inf assignment if label not found (was implicit)
                 label_logit = tl.load(
                     weight_ptr + label * hidden_dim + h_offs,
@@ -146,6 +149,7 @@ def triton_logprobs_from_hidden(
     if not HAS_TRITON:
         # Fallback to PyTorch selective_log_softmax path
         from qgre.fused_logprobs import chunked_logprobs_from_hidden
+
         return chunked_logprobs_from_hidden(hidden_states, lm_head, labels)
 
     batch, seq_len, hidden_dim = hidden_states.shape
@@ -161,7 +165,7 @@ def triton_logprobs_from_hidden(
                 f"L2: Triton logprob kernel: label out of bounds. "
                 f"Label range [{label_min}, {label_max}] exceeds vocab_size={vocab_size}. "
                 f"Invalid labels would cause -inf logprobs without masking. "
-                f"Check tokenizer and label data."
+                f"Check tokenizer and label data.",
             )
 
     # Qwen3: vocab=151936, divisible by 128 but NOT 256
@@ -172,7 +176,7 @@ def triton_logprobs_from_hidden(
         raise ValueError(
             f"Triton logprob kernel requires vocab_size % BLOCK_V == 0, "
             f"got vocab_size={vocab_size}, BLOCK_V={BLOCK_V}. "
-            f"Use a different BLOCK_V or disable fused logprobs."
+            f"Use a different BLOCK_V or disable fused logprobs.",
         )
 
     # Return empty tensor early if seq_len=0 or batch=0
@@ -186,30 +190,35 @@ def triton_logprobs_from_hidden(
     if lm_head.weight.device != ref_device:
         raise RuntimeError(
             f"Device mismatch: hidden_states on {ref_device}, lm_head.weight on {lm_head.weight.device}. "
-            "All tensors must be on the same device for Triton kernel."
+            "All tensors must be on the same device for Triton kernel.",
         )
     if has_bias and lm_head.bias.device != ref_device:
         raise RuntimeError(
             f"Device mismatch: hidden_states on {ref_device}, lm_head.bias on {lm_head.bias.device}. "
-            "All tensors must be on the same device for Triton kernel."
+            "All tensors must be on the same device for Triton kernel.",
         )
 
     for b in range(batch):
         h = hidden_states[b].contiguous()  # [seq, hidden_dim]
-        lab = labels[b].contiguous()       # [seq]
-        out = result[b]                    # [seq]
+        lab = labels[b].contiguous()  # [seq]
+        out = result[b]  # [seq]
 
         if lab.device != ref_device:
             raise RuntimeError(
                 f"Device mismatch: batch {b} labels on {lab.device}, expected {ref_device}. "
-                "All tensors must be on the same device for Triton kernel."
+                "All tensors must be on the same device for Triton kernel.",
             )
 
         grid = (seq_len,)
         _fused_logprob_kernel[grid](
-            h, lm_head.weight, lab, out,
+            h,
+            lm_head.weight,
+            lab,
+            out,
             lm_head.bias if has_bias else h,  # dummy ptr when no bias
-            seq_len, hidden_dim, vocab_size,
+            seq_len,
+            hidden_dim,
+            vocab_size,
             HAS_BIAS=has_bias,
             BLOCK_V=BLOCK_V,
         )
@@ -218,7 +227,7 @@ def triton_logprobs_from_hidden(
         if torch.isnan(out).any():
             raise RuntimeError(
                 f"LP-R2-07: NaN detected in Triton logprob output for batch {b}. "
-                "This indicates inf/nan in hidden states. Check model stability."
+                "This indicates inf/nan in hidden states. Check model stability.",
             )
 
     return result

@@ -2,19 +2,22 @@ from __future__ import annotations
 
 import re
 import warnings
-from collections import defaultdict, deque
-from pathlib import Path
-
+from collections import deque
 from dataclasses import asdict
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    import torch
 
 from qgre.types import (
     CHECKPOINT_SCHEMA_VERSION,
-    QUALITY_WINDOW_SIZE,
-    GameState,
-    CheckpointState,
-    TrainerState,
-    DataLoaderState,
     AdvantageEstimatorState,
+    CheckpointState,
+    DataLoaderState,
+    GameState,
+    TrainerState,
     WeightLoaderState,
 )
 
@@ -53,8 +56,8 @@ def gamestate_from_dict(d: dict) -> GameState:
     validation pass. Restores: list → deque (with maxlen). Handles both old 1D
     and new 2D format.
     """
-    from qgre.schema import validate_schema, GAME_STATE_SCHEMA
-    import math
+
+    from qgre.schema import GAME_STATE_SCHEMA, validate_schema
 
     # Schema validation: one pass, all type checks
     validated = validate_schema(d, GAME_STATE_SCHEMA, "game_state")
@@ -88,7 +91,8 @@ def gamestate_from_dict(d: dict) -> GameState:
     step_mastery_raw = validated["step_mastery"]
     if step_mastery_raw is not None and not tm:
         gs.tier_mastery["default"] = _restore_step_mastery(
-            step_mastery_raw, gs.quality_window_size
+            step_mastery_raw,
+            gs.quality_window_size,
         )
 
     # Initialize missing tier_mastery entries for active_tiers
@@ -110,14 +114,14 @@ def _restore_tier_mastery(tm: dict, quality_window_size: int) -> dict:
         if not isinstance(step_windows, dict):
             raise TypeError(
                 f"SCHEMA: tier_mastery['{tier}'] expected dict, "
-                f"got {type(step_windows).__name__}"
+                f"got {type(step_windows).__name__}",
             )
         result[tier] = {}
         for step_num, window_data in step_windows.items():
             if not isinstance(window_data, dict):
                 raise TypeError(
                     f"SCHEMA: tier_mastery['{tier}'][{step_num}] expected dict, "
-                    f"got {type(window_data).__name__}"
+                    f"got {type(window_data).__name__}",
                 )
             maxlen = quality_window_size
             values = window_data.get("values", [])
@@ -128,20 +132,22 @@ def _restore_tier_mastery(tm: dict, quality_window_size: int) -> dict:
                 warnings.warn(
                     f"SCHEMA: Checkpoint maxlen={ckpt_maxlen} differs from config "
                     f"quality_window_size={maxlen} for tier '{tier}' step {step_num}. "
-                    f"Data loss: {data_loss} entries."
+                    f"Data loss: {data_loss} entries.",
+                    stacklevel=2,
                 )
             # Filter NaN/Inf
             filtered = [v for v in values if math.isfinite(v)]
             if len(filtered) < len(values):
                 warnings.warn(
                     f"SCHEMA: Filtered {len(values) - len(filtered)} NaN/Inf values "
-                    f"from tier_mastery['{tier}'][{step_num}]"
+                    f"from tier_mastery['{tier}'][{step_num}]",
+                    stacklevel=2,
                 )
             try:
                 step_key = int(step_num)
             except (ValueError, TypeError) as e:
                 raise ValueError(
-                    f"SCHEMA: Cannot convert step_num '{step_num}' to int for tier '{tier}': {e}"
+                    f"SCHEMA: Cannot convert step_num '{step_num}' to int for tier '{tier}': {e}",
                 ) from e
             result[tier][step_key] = deque(filtered, maxlen=maxlen)
     return result
@@ -153,14 +159,14 @@ def _restore_step_mastery(step_mastery: dict, quality_window_size: int) -> dict:
 
     if not isinstance(step_mastery, dict):
         raise TypeError(
-            f"SCHEMA: step_mastery expected dict, got {type(step_mastery).__name__}"
+            f"SCHEMA: step_mastery expected dict, got {type(step_mastery).__name__}",
         )
     result = {}
     for step_num, window_data in step_mastery.items():
         if not isinstance(window_data, dict):
             raise TypeError(
                 f"SCHEMA: step_mastery[{step_num}] expected dict, "
-                f"got {type(window_data).__name__}"
+                f"got {type(window_data).__name__}",
             )
         maxlen = window_data.get("maxlen", quality_window_size)
         values = window_data.get("values", [])
@@ -168,7 +174,8 @@ def _restore_step_mastery(step_mastery: dict, quality_window_size: int) -> dict:
         if len(filtered) < len(values):
             warnings.warn(
                 f"SCHEMA: Filtered {len(values) - len(filtered)} NaN/Inf values "
-                f"from step_mastery[{step_num}]"
+                f"from step_mastery[{step_num}]",
+                stacklevel=2,
             )
         result[int(step_num)] = deque(filtered, maxlen=maxlen)
     return result
@@ -182,8 +189,8 @@ def save_checkpoint(
     scheduler_state_dict: dict | None = None,
     game_state: GameState | None = None,
     advantage_estimator_state: dict | None = None,
-    rng_state=None,
-    cuda_rng_state=None,
+    rng_state: tuple | None = None,
+    cuda_rng_state: torch.Tensor | None = None,
     vprm_critic_state: dict | None = None,
     vprm_optimizer_state: dict | None = None,
     accumulated_loss: float = 0.0,
@@ -235,10 +242,14 @@ def save_checkpoint(
     advantage_estimator = AdvantageEstimatorState(state_dict=advantage_estimator_state)
 
     # Build WeightLoaderState — use provided state if available, otherwise default
-    weight_loader = weight_loader_state if weight_loader_state is not None else WeightLoaderState(
-        load_lora_called=False,
-        initialized=False,
-        cleaned_up=False,
+    weight_loader = (
+        weight_loader_state
+        if weight_loader_state is not None
+        else WeightLoaderState(
+            load_lora_called=False,
+            initialized=False,
+            cleaned_up=False,
+        )
     )
 
     # Build CheckpointState
@@ -270,7 +281,7 @@ def save_checkpoint(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Atomic write: write to temp file, then rename to avoid partial writes
-    temp_path = path.with_suffix('.tmp')
+    temp_path = path.with_suffix(".tmp")
     try:
         # Delete stale temp file if exists
         temp_path.unlink(missing_ok=True)
@@ -281,9 +292,10 @@ def save_checkpoint(
         # Clean up temp file on failure
         try:
             temp_path.unlink(missing_ok=True)
-        except Exception as cleanup_err:
+        except OSError as cleanup_err:
             warnings.warn(
-                f"Failed to clean up temp file {temp_path} after checkpoint save error: {cleanup_err}"
+                f"Failed to clean up temp file {temp_path} after checkpoint save error: {cleanup_err}",
+                stacklevel=2,
             )
         raise RuntimeError(f"Failed to save checkpoint to {path}: {e}") from e
 
@@ -295,9 +307,10 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
     Attempts to load from the specified path. If loading fails (corrupted checkpoint),
     tries loading from the previous checkpoint in the directory.
     """
-    import torch
     import warnings
     from pathlib import Path
+
+    import torch
 
     path = Path(path)
     try:
@@ -311,7 +324,8 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
             warnings.warn(
                 f"Checkpoint {path} missing schema_version. "
                 f"Assuming old format, will migrate to StateSpec.",
-                UserWarning
+                UserWarning,
+                stacklevel=2,
             )
             raw_checkpoint["schema_version"] = 1  # Old format
 
@@ -321,7 +335,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
         except (ValueError, TypeError) as e:
             raise TypeError(
                 f"Checkpoint {path} has invalid schema_version type: {type(checkpoint_schema).__name__}. "
-                f"Expected int. Cannot safely restore checkpoint. Error: {e}"
+                f"Expected int. Cannot safely restore checkpoint. Error: {e}",
             ) from e
 
         # Schema version mismatch is now a warning, not an error (migration handles it)
@@ -330,7 +344,8 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                 f"Checkpoint schema version mismatch: checkpoint has version {checkpoint_schema}, "
                 f"current code expects version {CHECKPOINT_SCHEMA_VERSION}. "
                 f"Migration will be attempted.",
-                UserWarning
+                UserWarning,
+                stacklevel=2,
             )
 
         # Validate required keys for old format
@@ -348,7 +363,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
             except (ValueError, TypeError) as e:
                 raise TypeError(
                     f"Checkpoint {path} has invalid global_step type: {type(raw_checkpoint['global_step']).__name__}. "
-                    f"Expected int. Error: {e}"
+                    f"Expected int. Error: {e}",
                 ) from e
 
         # CP2-002: Convert game_state dict to GameState before CheckpointState.from_dict()
@@ -361,23 +376,24 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                     raise RuntimeError(
                         f"Failed to restore game_state from checkpoint {path}. "
                         f"Checkpoint may be corrupted or from incompatible version. "
-                        f"Original error: {e}"
+                        f"Original error: {e}",
                     ) from e
 
         # Convert to CheckpointState (handles migration from old format)
-        checkpoint_state = CheckpointState.from_dict(raw_checkpoint)
-        return checkpoint_state
+        return CheckpointState.from_dict(raw_checkpoint)
     except (FileNotFoundError, ValueError, TypeError, RuntimeError, KeyError, EOFError) as e:
         # Catch checkpoint-specific errors only — let system errors (MemoryError,
         # KeyboardInterrupt, SystemExit, ImportError) propagate
         warnings.warn(
             f"CHECKPOINT CORRUPTION DETECTED: Failed to load checkpoint from {path}: {e}. "
             "Falling back to previous checkpoint. This may result in data loss (lost training progress). "
-            "Attempting to load previous checkpoint..."
+            "Attempting to load previous checkpoint...",
+            stacklevel=2,
         )
         # Try to find previous checkpoint
         checkpoint_dir = Path(path).parent
         import re
+
         pattern = re.compile(r"global_step_(\d+)")
         match = pattern.search(Path(path).name)
         if match:
@@ -393,7 +409,8 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                 prev_path = max(candidates, key=lambda x: x[0])[1]
                 warnings.warn(
                     f"FALLBACK CHECKPOINT LOADED: {prev_path}. "
-                    f"Original checkpoint {path} was corrupted. Training progress may be lost."
+                    f"Original checkpoint {path} was corrupted. Training progress may be lost.",
+                    stacklevel=2,
                 )
                 raw_checkpoint = torch.load(prev_path, map_location="cpu", weights_only=False)
 
@@ -403,7 +420,8 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                     warnings.warn(
                         f"Fallback checkpoint {prev_path} missing schema_version. "
                         f"Assuming old format, will migrate.",
-                        UserWarning
+                        UserWarning,
+                        stacklevel=2,
                     )
                     raw_checkpoint["schema_version"] = 1
 
@@ -413,7 +431,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                 except (ValueError, TypeError) as e:
                     raise TypeError(
                         f"Fallback checkpoint {prev_path} has invalid schema_version type: {type(checkpoint_schema).__name__}. "
-                        f"Expected int. Cannot safely restore checkpoint. Error: {e}"
+                        f"Expected int. Cannot safely restore checkpoint. Error: {e}",
                     ) from e
 
                 # Schema mismatch is warning, not error (migration handles it)
@@ -422,7 +440,8 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                         f"Fallback checkpoint schema version mismatch: checkpoint has version {checkpoint_schema}, "
                         f"current code expects version {CHECKPOINT_SCHEMA_VERSION}. "
                         f"Migration will be attempted.",
-                        UserWarning
+                        UserWarning,
+                        stacklevel=2,
                     )
 
                 # C2-4: Validate fallback checkpoint (old format)
@@ -439,7 +458,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                     except (ValueError, TypeError) as e:
                         raise TypeError(
                             f"Fallback checkpoint {prev_path} has invalid global_step type: {type(raw_checkpoint['global_step']).__name__}. "
-                            f"Expected int. Error: {e}"
+                            f"Expected int. Error: {e}",
                         ) from e
 
                 if raw_checkpoint.get("game_state") is not None:
@@ -450,15 +469,14 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                         except Exception as e:
                             raise RuntimeError(
                                 f"Failed to restore game_state from fallback checkpoint {prev_path}. "
-                                f"Original error: {e}"
+                                f"Original error: {e}",
                             ) from e
 
                 # Convert to CheckpointState (handles migration)
-                checkpoint_state = CheckpointState.from_dict(raw_checkpoint)
-                return checkpoint_state
+                return CheckpointState.from_dict(raw_checkpoint)
         # No previous checkpoint found — re-raise with context
         raise RuntimeError(
-            f"Checkpoint load failed for {path} and no previous checkpoint found: {e}"
+            f"Checkpoint load failed for {path} and no previous checkpoint found: {e}",
         ) from e
 
 

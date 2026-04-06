@@ -6,12 +6,11 @@ captures gradient magnitudes and weight deltas at every backward pass.
 
 import json
 import sys
-import os
-from pathlib import Path
 from collections import defaultdict
+from pathlib import Path
 
-import torch
 import numpy as np
+
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -44,13 +43,16 @@ def install_hooks(model):
 
             def make_hook(n):
                 def hook(grad):
-                    GRAD_LOG.append({
-                        "step": STEP_COUNTER[0],
-                        "name": n,
-                        "grad_norm": grad.norm().item(),
-                        "grad_mean": grad.mean().item(),
-                        "grad_max": grad.abs().max().item(),
-                    })
+                    GRAD_LOG.append(
+                        {
+                            "step": STEP_COUNTER[0],
+                            "name": n,
+                            "grad_norm": grad.norm().item(),
+                            "grad_mean": grad.mean().item(),
+                            "grad_max": grad.abs().max().item(),
+                        }
+                    )
+
                 return hook
 
             hooks.append(param.register_hook(make_hook(name)))
@@ -108,11 +110,13 @@ def analyze_results(tracked_params, config_advantage_scale, lr):
 
         if "lm_head" in name:
             # Per-row delta for physics tokens
-            print(f"    Physics token lm_head row deltas:")
+            print("    Physics token lm_head row deltas:")
             for tok_name, tok_id in physics_tokens.items():
                 row_delta = delta[tok_id].norm().item()
                 logit_nudge = hidden_norm * row_delta
-                print(f"      '{tok_name}' (id={tok_id}): delta_norm={row_delta:.8f}, est_logit_nudge={logit_nudge:.6f}")
+                print(
+                    f"      '{tok_name}' (id={tok_id}): delta_norm={row_delta:.8f}, est_logit_nudge={logit_nudge:.6f}"
+                )
 
             # Average per-row delta across all vocab
             per_row_delta = delta.norm(dim=1).mean().item()
@@ -131,9 +135,7 @@ def analyze_results(tracked_params, config_advantage_scale, lr):
         return
 
     # Average lm_head gradient norm per step
-    lm_grad_norms = [
-        e["grad_norm"] for e in GRAD_LOG if "lm_head" in e["name"]
-    ]
+    lm_grad_norms = [e["grad_norm"] for e in GRAD_LOG if "lm_head" in e["name"]]
     avg_lm_grad = np.mean(lm_grad_norms) if lm_grad_norms else 0
 
     # lm_head weight change per step
@@ -150,7 +152,9 @@ def analyze_results(tracked_params, config_advantage_scale, lr):
 
             logit_gap = 89.84  # measured earlier
 
-            print(f"\n  lm_head analysis ({n_steps} steps, advantage_scale={config_advantage_scale}):")
+            print(
+                f"\n  lm_head analysis ({n_steps} steps, advantage_scale={config_advantage_scale}):"
+            )
             print(f"    Avg gradient norm per step: {avg_lm_grad:.6f}")
             print(f"    Total weight delta norm: {total_delta:.8f}")
             print(f"    Per-step weight delta: {per_step_delta:.8f}")
@@ -158,11 +162,13 @@ def analyze_results(tracked_params, config_advantage_scale, lr):
             print(f"    Logit nudge per step: {logit_nudge_per_step:.8f}")
             print(f"    Logit gap (physics tokens): {logit_gap:.2f}")
             print(f"    Nudge as % of gap per step: {logit_nudge_per_step/logit_gap*100:.6f}%")
-            print(f"    Steps to close 10% of gap: {0.1*logit_gap/max(logit_nudge_per_step, 1e-15):.0f}")
+            print(
+                f"    Steps to close 10% of gap: {0.1*logit_gap/max(logit_nudge_per_step, 1e-15):.0f}"
+            )
 
             # Optimal scale for different nudge targets
             if logit_nudge_per_step > 0:
-                print(f"\n  Optimal advantage_scale for target nudge %:")
+                print("\n  Optimal advantage_scale for target nudge %:")
                 for pct in [0.01, 0.05, 0.1, 0.5, 1.0, 5.0]:
                     target = pct / 100 * logit_gap
                     scale = config_advantage_scale * (target / logit_nudge_per_step)
@@ -173,21 +179,27 @@ def analyze_results(tracked_params, config_advantage_scale, lr):
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with open(output_dir / "probe_results.json", "w") as f:
-        json.dump({
-            "config": {"advantage_scale": config_advantage_scale, "lr": lr, "n_steps": n_steps},
-            "grad_log": GRAD_LOG,
-        }, f, indent=2)
+        json.dump(
+            {
+                "config": {"advantage_scale": config_advantage_scale, "lr": lr, "n_steps": n_steps},
+                "grad_log": GRAD_LOG,
+            },
+            f,
+            indent=2,
+        )
 
     print(f"\nFull data saved to {output_dir / 'probe_results.json'}")
 
 
 def main():
     config_path = sys.argv[1] if len(sys.argv) > 1 else "examples/hamiltonian/config.yaml"
-    reward_module = sys.argv[2] if len(sys.argv) > 2 else "examples.hamiltonian.reward_fn:hamiltonian_reward"
+    reward_module = (
+        sys.argv[2] if len(sys.argv) > 2 else "examples.hamiltonian.reward_fn:hamiltonian_reward"
+    )
     n_steps = int(sys.argv[3]) if len(sys.argv) > 3 else 25
 
-    from qgre.config import QGREConfig
     from qgre.__main__ import import_reward_fn, import_segmenter
+    from qgre.config import QGREConfig
 
     config = QGREConfig.from_yaml(config_path)
     config.training.total_steps = n_steps
@@ -197,18 +209,25 @@ def main():
     segmenter = import_segmenter(config.algorithm.segmenter)
 
     from qgre.generation import UnslothBackend
-    backend = UnslothBackend(config.model, config.generation, max_prompt_length=config.data.max_prompt_length)
+
+    backend = UnslothBackend(
+        config.model, config.generation, max_prompt_length=config.data.max_prompt_length
+    )
     model, tokenizer = backend.load()
     backend.restore_random_state(config.training.seed)
 
     from qgre.data import QGREDataLoader, load_prompts_from_parquet
+
     all_prompts = []
     for f in config.data.train_files:
         all_prompts.extend(load_prompts_from_parquet(f))
 
-    n_completions = config.algorithm.spo.n if config.algorithm.mode == "spo" else config.algorithm.grpo.n
+    n_completions = (
+        config.algorithm.spo.n if config.algorithm.mode == "spo" else config.algorithm.grpo.n
+    )
     dataloader = QGREDataLoader(
-        prompts=all_prompts, tokenizer=tokenizer,
+        prompts=all_prompts,
+        tokenizer=tokenizer,
         max_prompt_length=config.data.max_prompt_length,
         train_batch_size=config.data.train_batch_size,
         n_completions=n_completions,
@@ -218,9 +237,14 @@ def main():
     )
 
     from qgre.trainer import QGRETrainer
+
     trainer = QGRETrainer(
-        model=model, tokenizer=tokenizer, reward_fn=reward_fn,
-        config=config, generation_backend=backend, segmenter=segmenter,
+        model=model,
+        tokenizer=tokenizer,
+        reward_fn=reward_fn,
+        config=config,
+        generation_backend=backend,
+        segmenter=segmenter,
     )
 
     # Install hooks AFTER trainer setup (model may be modified)

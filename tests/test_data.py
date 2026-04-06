@@ -2,7 +2,7 @@
 
 import pytest
 
-from qgre.data import QGREDataLoader, PromptBatch
+from qgre.data import PromptBatch, QGREDataLoader
 
 
 class FakeTokenizer:
@@ -48,9 +48,9 @@ def test_load_prompts(sample_prompts, tokenizer):
 def test_overlong_filter(tokenizer):
     """Mix of short and long prompts → only short ones kept."""
     prompts = [
-        {"prompt": "Hi"},          # 2 chars → short
-        {"prompt": "Hello world"}, # 11 chars → short
-        {"prompt": "A" * 500},     # 500 chars → overlong
+        {"prompt": "Hi"},  # 2 chars → short
+        {"prompt": "Hello world"},  # 11 chars → short
+        {"prompt": "A" * 500},  # 500 chars → overlong
     ]
     loader = QGREDataLoader(
         prompts=prompts,
@@ -64,6 +64,7 @@ def test_overlong_filter(tokenizer):
 def test_all_prompts_filtered_raises(sample_prompts, tokenizer):
     """All prompts filtered → raises ValueError."""
     import pytest
+
     with pytest.raises(ValueError, match="All .* prompts filtered"):
         QGREDataLoader(
             prompts=sample_prompts,
@@ -242,9 +243,9 @@ def test_set_priorities_changes_sampling(sample_prompts, tokenizer):
     sampled_ids = [pid for batch in batches for pid in batch.prompt_ids]
     # First prompt should dominate (>50% of samples)
     first_count = sampled_ids.count(all_ids[0])
-    assert first_count > len(sampled_ids) * 0.3, (
-        f"High-priority prompt sampled {first_count}/{len(sampled_ids)} times, expected >30%"
-    )
+    assert (
+        first_count > len(sampled_ids) * 0.3
+    ), f"High-priority prompt sampled {first_count}/{len(sampled_ids)} times, expected >30%"
 
 
 def test_set_priorities_none_falls_back_to_uniform(sample_prompts, tokenizer):

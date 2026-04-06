@@ -5,6 +5,7 @@ __version__ = "0.1.0"
 from qgre.segments import Segmenter, qwen3_xml_segmenter, uniform_segmenter
 from qgre.types import GameState, RewardResult
 
+
 __all__ = [
     "GameState",
     "RewardResult",
