@@ -60,17 +60,25 @@ class HintRegistry:
         self,
         mastery_threshold: float = 0.8,
         success_streak_to_clear: int = 2,
+        seed: int | None = None,
     ):
         """Initialize hint registry.
 
         Args:
             mastery_threshold: Mastery score at which hints stop completely.
             success_streak_to_clear: Consecutive successes without hint needed to clear.
+            seed: Random seed for hint injection probability. None = system random (default).
         """
         self.mastery_threshold = mastery_threshold
         self.success_streak_to_clear = success_streak_to_clear
         # Key: (prompt_id, span_id) -> HintEntry
         self._hints: dict[tuple[int, str], HintEntry] = {}
+        # R3-MIO-002: Add optional seed parameter, default to None for system random
+        import random
+        if seed is None:
+            self._random = random.Random()
+        else:
+            self._random = random.Random(seed)
 
     def flag_for_hint(
         self,
@@ -84,6 +92,10 @@ class HintRegistry:
 
         If already flagged, updates hint tokens (in case ground truth changed).
         Resets success streak since we're re-flagging.
+
+        MIO-004: Expected ordering — hints extracted BEFORE flagging in same batch.
+        mastery_fn uses value BEFORE this batch's training updates it.
+        This is intentional: we flag based on pre-training mastery.
 
         Args:
             prompt_id: Prompt identifier.
@@ -137,8 +149,8 @@ class HintRegistry:
         if hint_prob <= 0:
             return None
 
-        # Probabilistic injection
-        if random.random() < hint_prob:
+        # Probabilistic injection (R2-MIO-003: use seeded random)
+        if self._random.random() < hint_prob:
             entry.total_uses += 1
             return entry.hint_tokens
         return None
@@ -233,7 +245,15 @@ class HintRegistry:
         """
         if mastery >= self.mastery_threshold:
             return 0.0
-        return max(0.0, 1.0 - mastery / self.mastery_threshold)
+        prob = 1.0 - mastery / self.mastery_threshold
+        # R3-MIO-001: Clamp probability to [0.0, 1.0] and warn if mastery is negative
+        if mastery < 0.0:
+            import warnings
+            warnings.warn(
+                f"R3-MIO-001: Negative mastery {mastery} detected in hint probability calculation. "
+                f"Clamping probability from {prob} to [0.0, 1.0]."
+            )
+        return max(0.0, min(1.0, prob))
 
     def clear_all(self) -> int:
         """Clear all hints (e.g., at epoch boundary).
@@ -289,14 +309,32 @@ class HintRegistry:
             mastery_threshold=data.get("mastery_threshold", 0.8),
             success_streak_to_clear=data.get("success_streak_to_clear", 2),
         )
+        # R2-CSM-004: Validate hints field is a list before iteration
+        hints_data = data.get("hints", [])
+        if not isinstance(hints_data, list):
+            warnings.warn(
+                f"R2-CSM-004: hints field is not a list (type: {type(hints_data).__name__}). "
+                "Skipping hint registry restoration."
+            )
+            return registry
         skipped_entries = 0
         first_error_msg = ""  # Initialize before loop to avoid UnboundLocalError
-        for hint_data in data.get("hints", []):
+        for hint_data in hints_data:
             try:
+                # R2-MIO-002: Skip entries with empty hint_tokens during deserialization
+                hint_tokens = hint_data["hint_tokens"]
+                if not hint_tokens or (isinstance(hint_tokens, list) and len(hint_tokens) == 0):
+                    skipped_entries += 1
+                    if skipped_entries == 1:
+                        warnings.warn(
+                            "R2-MIO-002: Skipping hint entry with empty hint_tokens. "
+                            "This creates zombie entries. Checkpoint may be corrupted."
+                        )
+                    continue
                 entry = HintEntry(
                     prompt_id=hint_data["prompt_id"],
                     span_id=hint_data["span_id"],
-                    hint_tokens=hint_data["hint_tokens"],
+                    hint_tokens=hint_tokens,
                     mastery_at_flag=hint_data["mastery_at_flag"],
                     flagged_step=hint_data["flagged_step"],
                     success_count=hint_data.get("success_count", 0),
@@ -318,6 +356,11 @@ class HintRegistry:
             warnings.warn(
                 f"HintRegistry.from_dict: skipped {skipped_entries}/{total_entries} corrupted entries.{first_err}{all_corrupted}"
             )
+            if skipped_entries == total_entries:
+                raise ValueError(
+                    f"HintRegistry.from_dict: ALL {total_entries} entries corrupted. "
+                    "Checkpoint may be incompatible or corrupt. Cannot restore empty hint registry."
+                )
         return registry
 
     def __len__(self) -> int:

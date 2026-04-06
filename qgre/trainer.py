@@ -34,6 +34,7 @@ from qgre.types import (
     CheckpointState,
     GameState,
     RewardResult,
+    SampleData,
     TrainerState,
     TrainingContext,
 )
@@ -201,6 +202,13 @@ class QGRETrainer:
                     f"EGRS: Hint registry initialized with generic extractor. "
                     f"Mapping: {config.egrs.hint_extractor_mapping}"
                 )
+            elif config.egrs.hint_extractor == "generic" and not config.egrs.hint_extractor_mapping:
+                # R3-CSM-007: Warn if generic extractor requested but mapping is empty
+                logging.getLogger(__name__).warning(
+                    "R3-CSM-007: hint_extractor='generic' but hint_extractor_mapping is empty/None. "
+                    "Generic extractor requires mapping. Falling back to no extractor (generic hints only)."
+                )
+                self.hint_extractor = None
             else:
                 logging.getLogger(__name__).info(
                     "EGRS: Hint registry initialized without extractor. "
@@ -615,14 +623,28 @@ class QGRETrainer:
         for i, adv in enumerate(token_advantages):
             padded_advs[i, :len(adv)] = adv.to(device)
 
-        # Generation-time logprobs for LLDS (when available from backend)
-        # Shape: [batch, max_comp_len] — logprob[i,t] is log P_gen(token_t | tokens_<t)
-        # These are shifted by 1 relative to token positions (logprob[t] predicts token[t]),
-        # matching the convention used in the loss function.
-        gen_logprobs_padded = None
+        # Build per-sample KL region weights from segmenter regions (THR-style, PLAN.md lines 798-802)
+        # These go into SampleData for clean SPO filter reindexing.
+        # Gate: skip entirely when KL is disabled (default config).
+        alg = self.config.algorithm
+        per_sample_kl_weights: list[torch.Tensor | None] = []
+        if alg.kl_cov_ratio > 0 and alg.loss_mode == "kl_cov":
+            region_map = {"THINK": alg.kl_think_multiplier, "FORMAT": alg.kl_format_multiplier}
+            for i, regions in enumerate(batch_regions):
+                kl_weights = torch.ones(len(regions), device=device)
+                for t, region in enumerate(regions):
+                    if region in region_map:
+                        kl_weights[t] = region_map[region]
+                    elif region.startswith("STEP_"):
+                        kl_weights[t] = alg.kl_step_multiplier
+                per_sample_kl_weights.append(kl_weights)
+        else:
+            per_sample_kl_weights = [None] * len(completions)
+
+        # Validate generation-time logprobs for LLDS (when available from backend)
+        # Store per-sample tensors in SampleData; padding happens after SPO filter.
+        per_sample_gen_logprobs: list[torch.Tensor | None] = []
         if generation_logprobs is not None:
-            # Validate: logprobs must match completion lengths (generation.py should enforce,
-            # but double-check here to prevent silent LLDS corruption from 0.0 padding)
             valid = True
             for i, (lps, comp) in enumerate(zip(generation_logprobs, completions)):
                 if len(lps) != len(comp):
@@ -635,13 +657,32 @@ class QGRETrainer:
                     valid = False
                     break
             if valid:
-                gen_logprobs_padded = torch.zeros(len(completions), max_comp_len, device=device)
-                for i, lps in enumerate(generation_logprobs):
-                    lp_tensor = torch.tensor(lps, dtype=torch.float32, device=device)
-                    gen_logprobs_padded[i, :len(lps)] = lp_tensor
+                for lps in generation_logprobs:
+                    per_sample_gen_logprobs.append(torch.tensor(lps, dtype=torch.float32, device=device))
             else:
                 self._has_stored_logprobs = False
+                per_sample_gen_logprobs = [None] * len(completions)
+        else:
+            per_sample_gen_logprobs = [None] * len(completions)
 
+        # Build samples list — single source of truth for per-sample data.
+        # SPO filter reindexing becomes one line instead of 6 separate list operations.
+        # All downstream code accesses samples[i].field instead of mapping indices.
+        samples: list[SampleData] = [
+            SampleData(
+                completion=completions[i],
+                reward_result=reward_results[i],
+                context=batch_contexts[i],
+                active_qualities=active_qualities[i],
+                regions=batch_regions[i] if batch_regions else None,
+                token_masks=batch_token_masks[i] if batch_token_masks and i < len(batch_token_masks) else None,
+                kl_region_weights=per_sample_kl_weights[i],
+                gen_logprobs=per_sample_gen_logprobs[i],
+            )
+            for i in range(len(completions))
+        ]
+
+        # Build padded batch tensors for model input
         comp_tensor = torch.zeros(len(completions), max_comp_len, dtype=torch.long, device=device)
         for i, c in enumerate(completions):
             comp_tensor[i, :len(c)] = torch.tensor(c, dtype=torch.long, device=device)
@@ -654,30 +695,9 @@ class QGRETrainer:
         for i, c in enumerate(completions):
             comp_attention_mask[i, :len(c)] = 1
 
-        # Build KL region weights from segmenter regions (THR-style, PLAN.md lines 798-802)
-        # Gate: skip entirely when KL is disabled (default config). Saves the tensor
-        # allocation + nested Python loop over every token every step.
-        alg = self.config.algorithm
-        if alg.kl_cov_ratio > 0 and alg.loss_mode == "kl_cov":
-            kl_region_weights = torch.ones(len(completions), max_comp_len, device=device)
-            region_map = {"THINK": alg.kl_think_multiplier, "FORMAT": alg.kl_format_multiplier}
-            for i, regions in enumerate(batch_regions):
-                for t, region in enumerate(regions):
-                    if t < max_comp_len:
-                        if region in region_map:
-                            kl_region_weights[i, t] = region_map[region]
-                        elif region.startswith("STEP_"):
-                            kl_region_weights[i, t] = alg.kl_step_multiplier
-        else:
-            kl_region_weights = None
-
-        # TL-R2-01: Don't delete batch_regions, it's accessed later in VPRM path
-        # if not self.config.vprm.enabled:
-        #     del batch_regions  # No longer needed — regions already mapped to KL weights or skipped
-
         # SPO low-advantage filter: skip sequences with near-zero signal (PLAN.md lines 658-671)
-        _spo_filter_idx = None  # Maps filtered indices → original batch indices
-        _spo_filter_applied = False  # Track if filter was applied to reindex kl_region_weights
+        # R2-MTO-005: Track original batch size separately from filtered batch size
+        original_batch_size = len(completions)
         if self.config.algorithm.mode == "spo":
             useful = (padded_advs.abs() > self.config.algorithm.spo_filter_threshold).any(dim=-1)
             # Track filter stats for data starvation detection
@@ -707,18 +727,17 @@ class QGRETrainer:
                            "global_step": self.global_step, "phase": self.game_state.phase, "skipped": True}
                 self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics, batch_contexts=batch_contexts)
                 # Log completions even on skipped steps
-                for i, rr in enumerate(reward_results):
-                    comp_tokens = completions[i]
+                for i, sample in enumerate(samples):
                     if self.tokenizer is not None:
-                        comp_text = self.tokenizer.decode(comp_tokens, skip_special_tokens=True)
+                        comp_text = self.tokenizer.decode(sample.completion, skip_special_tokens=True)
                     else:
-                        comp_text = str(comp_tokens)
+                        comp_text = str(sample.completion)
                     self.completion_logger.log_completion(
                         step=self.global_step,
                         prompt=batch.raw_prompts[i] if i < len(batch.raw_prompts) else "",
                         completion=comp_text,
-                        reward=rr.reward,
-                        reward_components=rr.scores,
+                        reward=sample.reward_result.reward,
+                        reward_components=sample.reward_result.scores,
                         phase=self.game_state.phase,
                     )
                 self.global_step += 1
@@ -729,18 +748,34 @@ class QGRETrainer:
                 padded_advs = padded_advs[idx]
                 comp_tensor = comp_tensor[idx]
                 comp_attention_mask = comp_attention_mask[idx]
-                if kl_region_weights is not None:
-                    kl_region_weights = kl_region_weights[idx]
-                if gen_logprobs_padded is not None:
-                    gen_logprobs_padded = gen_logprobs_padded[idx]
-                # TL-R2-07: Reindex batch_token_masks after SPO filter
-                if batch_token_masks:
-                    batch_token_masks = [batch_token_masks[i] for i in idx.tolist()]
-                # Track original indices for VPRM region/reward lookup
-                _spo_filter_idx = idx.tolist()
-                _spo_filter_applied = True
-            else:
-                _spo_filter_idx = None
+                # Single reindex: samples holds all per-sample data including kl_region_weights and gen_logprobs
+                samples = [samples[i] for i in idx.tolist()]
+
+        # Rebuild batch tensors from samples (after SPO filter if applied)
+        max_comp_len = comp_tensor.shape[1]
+        device = comp_tensor.device
+
+        # Rebuild gen_logprobs_padded from samples
+        has_gen_lp = any(s.gen_logprobs is not None for s in samples)
+        if has_gen_lp:
+            gen_logprobs_padded = torch.zeros(len(samples), max_comp_len, device=device)
+            for i, s in enumerate(samples):
+                if s.gen_logprobs is not None:
+                    lp_len = min(len(s.gen_logprobs), max_comp_len)
+                    gen_logprobs_padded[i, :lp_len] = s.gen_logprobs[:lp_len]
+        else:
+            gen_logprobs_padded = None
+
+        # Rebuild kl_region_weights from samples
+        has_kl_weights = any(s.kl_region_weights is not None for s in samples)
+        if has_kl_weights:
+            kl_region_weights = torch.ones(len(samples), max_comp_len, device=device)
+            for i, s in enumerate(samples):
+                if s.kl_region_weights is not None:
+                    kl_len = min(len(s.kl_region_weights), max_comp_len)
+                    kl_region_weights[i, :kl_len] = s.kl_region_weights[:kl_len]
+        else:
+            kl_region_weights = None
 
         # Response mask
         prompt_lengths = [0] * comp_tensor.shape[0]
@@ -1113,8 +1148,9 @@ class QGRETrainer:
                         frontier_steps=frontier_steps,
                         frontier_amplification=self.config.algorithm.frontier_amplification,
                         min_regions=self.config.vprm.spo_fallback_min_regions,
-                        aspiration_beta=self.advantage_estimator._aspiration_beta * batch_contexts[orig_i].aspiration_warmup if orig_i < len(batch_contexts) else 0.0,
-                        aspiration_target=batch_contexts[orig_i].aspiration_target if orig_i < len(batch_contexts) else 0.8,
+                        # R3-MTO-005: Use filtered_i to index batch_contexts (reindexed after SPO filter)
+                        aspiration_beta=self.advantage_estimator._aspiration_beta * batch_contexts[filtered_i].aspiration_warmup if filtered_i < len(batch_contexts) else 0.0,
+                        aspiration_target=batch_contexts[filtered_i].aspiration_target if filtered_i < len(batch_contexts) else 0.8,
                         ctx=self.ctx,
                         token_masks=sample_token_masks,  # Pass span masks for span-aware critic
                         bond_strength=sample_bond_strength,  # Pass attention bond strength
@@ -1164,8 +1200,16 @@ class QGRETrainer:
                     span_correct = compute_span_correctness(
                         sample_rr, self.step_qualities, egrs_cfg.reward_threshold
                     )
-                    # Get token entropy for this sample (trim to match)
-                    comp_len = min(len(sample_regions), mb_token_entropy.shape[1])
+                    # R3-MTO-002: Use sample_regions length to slice mb_token_entropy, not the other way around
+                    comp_len = len(sample_regions)
+                    # Clamp to available entropy if sample longer than entropy tensor
+                    if mb_token_entropy.shape[1] < comp_len:
+                        import warnings
+                        warnings.warn(
+                            f"R3-MTO-002: sample_regions length ({comp_len}) exceeds mb_token_entropy.shape[1] "
+                            f"({mb_token_entropy.shape[1]}). Clamping to entropy length."
+                        )
+                        comp_len = mb_token_entropy.shape[1]
                     sample_entropy = mb_token_entropy[mb_i, :comp_len]
                     sample_advs = mb_advs[mb_i, :comp_len]
                     # Get importance for ERIC dampening (if available)
@@ -1269,8 +1313,13 @@ class QGRETrainer:
                                 if q_mask_shifted.shape[0] >= min_len:
                                     q_mask_shifted = q_mask_shifted[:min_len]
                                 else:
-                                    # Pad with zeros — no advantage signal for positions beyond mask
+                                    # MTO-006: Warn when padding is needed (indicates tokenization mismatch)
                                     pad_len = min_len - q_mask_shifted.shape[0]
+                                    import warnings
+                                    warnings.warn(
+                                        f"MTO-006: q_mask for {q_name} length {q_mask_shifted.shape[0]} < min_len {min_len}. "
+                                        f"Padding with {pad_len} zeros. This indicates tokenization mismatch."
+                                    )
                                     q_mask_shifted = torch.cat([
                                         q_mask_shifted,
                                         torch.zeros(pad_len, device=q_mask.device, dtype=q_mask.dtype)
@@ -1290,7 +1339,9 @@ class QGRETrainer:
             lp_coef = self.config.algorithm.length_penalty_coef
             if lp_coef > 0:
                 lp_thresh = self.config.algorithm.length_penalty_threshold
-                group_correctness = sum(rr.reward for rr in reward_results) / len(reward_results)
+                # R2-MTO-003: Compute group_correctness AFTER filtering, using filtered reward_results
+                mb_reward_results = reward_results[mb_start:mb_end]
+                group_correctness = sum(rr.reward for rr in mb_reward_results) / len(mb_reward_results)
                 if group_correctness > lp_thresh:
                     # High correctness → add length penalty to encourage efficiency
                     seq_lengths = mb_mask[:, :min_len].sum(dim=-1)
@@ -1331,6 +1382,13 @@ class QGRETrainer:
                 adj_shifted = mb_entropy_adjustments[:, 1:]
                 ent_shifted = mb_token_entropy[:, 1:]
                 adj_min_len = min(adj_shifted.shape[1], ent_shifted.shape[1], min_len)
+                # MTO-003: Validate entropy_adjustments and mask have same sequence length
+                if adj_shifted.shape[1] != mb_mask.shape[1]:
+                    import warnings
+                    warnings.warn(
+                        f"MTO-003: EGRS entropy_adjustments shape[1]={adj_shifted.shape[1]} != "
+                        f"mb_mask shape[1]={mb_mask.shape[1]}. Misalignment may apply loss to wrong positions."
+                    )
                 # Mask to completion tokens only
                 egrs_mask = mb_mask[:, :adj_min_len].float()
                 egrs_adj = adj_shifted[:, :adj_min_len]
@@ -1413,8 +1471,8 @@ class QGRETrainer:
         # Track accumulated loss across gradient accumulation steps
         self._accumulated_loss += total_loss
         self._accumulation_count += 1
-        # TL-R2-04: Track actual samples for accurate loss averaging
-        self._accumulated_samples += actual_batch
+        # R2-MTO-005: Track original samples (not filtered) for accurate metrics denominator
+        self._accumulated_samples += original_batch_size
 
         # Optimizer step (backward already done in micro-batches above)
         if (self.global_step + 1) % self.config.training.gradient_accumulation_steps == 0:
@@ -1589,11 +1647,17 @@ class QGRETrainer:
         metrics["reward/mean"] = reward_mean
         metrics["global_step"] = self.global_step
 
-        # Track completion lengths for verbosity drift detection
+        # R3-MTO-004: Track completion lengths for verbosity drift detection (after SPO filter)
+        # completions was already reindexed by SPO filter at line ~750, so these metrics reflect filtered batch
         comp_lengths = [len(c) for c in completions]
-        metrics["completion_length/mean"] = float(sum(comp_lengths) / len(comp_lengths))
-        metrics["completion_length/max"] = float(max(comp_lengths))
-        metrics["completion_length/min"] = float(min(comp_lengths))
+        if comp_lengths:
+            metrics["completion_length/mean"] = float(sum(comp_lengths) / len(comp_lengths))
+            metrics["completion_length/max"] = float(max(comp_lengths))
+            metrics["completion_length/min"] = float(min(comp_lengths))
+        else:
+            metrics["completion_length/mean"] = 0.0
+            metrics["completion_length/max"] = 0.0
+            metrics["completion_length/min"] = 0.0
 
         self._record_mastery_and_advance(reward_results, active_qualities, batch, metrics, batch_contexts=batch_contexts)
 
@@ -1684,29 +1748,44 @@ class QGRETrainer:
         optimizer_loaded = False
         if checkpoint.optimizer_state_dict and self.optimizer:
             ckpt_opt = checkpoint.optimizer_state_dict
-            ckpt_groups = len(ckpt_opt.get("param_groups", []))
-            model_groups = len(self.optimizer.param_groups)
-
-            if ckpt_groups != model_groups:
-                print(f"┌{'─'*60}┐")
-                print(f"│{'⚠️  CHECKPOINT CONFIG MISMATCH':^60}│")
-                print(f"├{'─'*60}┤")
-                print(f"│  Checkpoint optimizer: {ckpt_groups} param groups{' '*(35-len(str(ckpt_groups)))}│")
-                print(f"│  Current optimizer:    {model_groups} param groups{' '*(35-len(str(model_groups)))}│")
-                print(f"│  (modules_to_save likely changed){' '*24}│")
-                print(f"├{'─'*60}┤")
-                print(f"│  Model weights: ✓ LOADED{' '*34}│")
-                print(f"│  Optimizer state: ✗ RESET (momentum lost){' '*16}│")
-                print(f"│  Game state: ✓ LOADED{' '*36}│")
-                print(f"│  Step counter: ✓ LOADED{' '*34}│")
-                print(f"└{'─'*60}┘")
+            # R2-CSM-002: Validate optimizer state dict structure before load
+            if not isinstance(ckpt_opt, dict) or "state" not in ckpt_opt or "param_groups" not in ckpt_opt:
+                import warnings
+                warnings.warn(
+                    "R2-CSM-002: Malformed optimizer_state_dict (missing 'state' or 'param_groups'). "
+                    "Skipping optimizer restore, momentum lost."
+                )
             else:
-                self.optimizer.load_state_dict(ckpt_opt)
-                optimizer_loaded = True
+                ckpt_groups = len(ckpt_opt.get("param_groups", []))
+                model_groups = len(self.optimizer.param_groups)
+
+                if ckpt_groups != model_groups:
+                    print(f"┌{'─'*60}┐")
+                    print(f"│{'⚠️  CHECKPOINT CONFIG MISMATCH':^60}│")
+                    print(f"├{'─'*60}┤")
+                    print(f"│  Checkpoint optimizer: {ckpt_groups} param groups{' '*(35-len(str(ckpt_groups)))}│")
+                    print(f"│  Current optimizer:    {model_groups} param groups{' '*(35-len(str(model_groups)))}│")
+                    print(f"│  (modules_to_save likely changed){' '*24}│")
+                    print(f"├{'─'*60}┤")
+                    print(f"│  Model weights: ✓ LOADED{' '*34}│")
+                    print(f"│  Optimizer state: ✗ RESET (momentum lost){' '*16}│")
+                    print(f"│  Game state: ✓ LOADED{' '*36}│")
+                    print(f"│  Step counter: ✓ LOADED{' '*34}│")
+                    print(f"└{'─'*60}┘")
+                else:
+                    self.optimizer.load_state_dict(ckpt_opt)
+                    optimizer_loaded = True
 
         scheduler_loaded = False
         if checkpoint.scheduler_state_dict and self.scheduler:
-            if optimizer_loaded:
+            # R2-CSM-003: Validate scheduler state dict is non-empty before load
+            if not isinstance(checkpoint.scheduler_state_dict, dict) or not checkpoint.scheduler_state_dict:
+                import warnings
+                warnings.warn(
+                    "R2-CSM-003: Empty or invalid scheduler_state_dict. "
+                    "Skipping scheduler restore, learning rate schedule will restart."
+                )
+            elif optimizer_loaded:
                 # Check if T_max changed (indicating new schedule)
                 if hasattr(self.scheduler, "T_max"):
                     ckpt_T_max = checkpoint.scheduler_state_dict.get("T_max")
@@ -1754,15 +1833,25 @@ class QGRETrainer:
             from qgre.critic import VPRMCritic
             device = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
 
-            # C12: Validate step_qualities match between checkpoint and config
+            # R2-CSM-001: Validate required keys exist before access
+            required_keys = {"hidden_dim", "step_qualities", "model_state"}
+            missing_keys = required_keys - set(checkpoint.vprm_critic_state.keys())
+            if missing_keys:
+                raise KeyError(
+                    f"R2-CSM-001: VPRM critic state missing required keys: {missing_keys}. "
+                    f"Available keys: {list(checkpoint.vprm_critic_state.keys())}. "
+                    "Checkpoint may be corrupted or from incompatible version."
+                )
+
+            # CSM-007: Validate step_qualities match between checkpoint and config (raise, not warn)
             ckpt_step_qualities = checkpoint.vprm_critic_state["step_qualities"]
             config_step_qualities = self.step_qualities
             if ckpt_step_qualities != config_step_qualities:
-                import warnings
-                warnings.warn(
-                    f"C12: step_qualities mismatch between checkpoint and config. "
+                raise ValueError(
+                    f"CSM-007: step_qualities mismatch between checkpoint and config. "
                     f"Checkpoint: {ckpt_step_qualities}, Config: {config_step_qualities}. "
-                    "This may cause missing critic heads or incompatible predictions."
+                    "Cannot restore VPRM critic with different step_qualities (shape mismatch). "
+                    "Update config to match checkpoint, or start fresh training."
                 )
 
             # C14: Restore with intermediate_dim from current config, not checkpoint
@@ -1785,7 +1874,15 @@ class QGRETrainer:
                 lr=self._vprm_config.lr,
             )
             if checkpoint.vprm_optimizer_state:
-                self.vprm_optimizer.load_state_dict(checkpoint.vprm_optimizer_state)
+                # R2-CSM-006: Validate vprm_optimizer_state has required structure
+                if not isinstance(checkpoint.vprm_optimizer_state, dict) or "state" not in checkpoint.vprm_optimizer_state or "param_groups" not in checkpoint.vprm_optimizer_state:
+                    import warnings
+                    warnings.warn(
+                        "R2-CSM-006: Malformed vprm_optimizer_state (missing 'state' or 'param_groups'). "
+                        "Skipping VPRM optimizer restore."
+                    )
+                else:
+                    self.vprm_optimizer.load_state_dict(checkpoint.vprm_optimizer_state)
             self._vprm_initialized = True
         # Restore EGRS hint registry (if saved)
         if checkpoint.hint_registry_state and self.config.egrs.enabled:
@@ -1793,6 +1890,14 @@ class QGRETrainer:
             self.hint_registry = HintRegistry.from_dict(checkpoint.hint_registry_state)
             logging.getLogger(__name__).info(
                 f"EGRS: Restored hint registry with {len(self.hint_registry)} entries"
+            )
+        # CSM-003: Warn if hint_registry_state exists but EGRS disabled
+        elif checkpoint.hint_registry_state and not self.config.egrs.enabled:
+            import warnings
+            warnings.warn(
+                "CSM-003: Checkpoint contains hint_registry_state but EGRS is disabled in config. "
+                f"All {len(checkpoint.hint_registry_state.get('hints', []))} flagged hints will be LOST. "
+                "Set egrs.enabled=True to restore hint registry."
             )
         # CheckpointState: RNG state is in trainer
         if checkpoint.trainer.rng_state is not None:
@@ -2236,6 +2341,13 @@ class QGRETrainer:
                                 if tokens:
                                     # Decode hint tokens to text
                                     hint_text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                                    # MIO-007: Validate hint text length
+                                    if len(hint_text) > 512:
+                                        logging.getLogger(__name__).warning(
+                                            f"MIO-007: Hint text for {span_id} exceeds 512 chars ({len(hint_text)}). "
+                                            "May exceed max_prompt_length. Truncating."
+                                        )
+                                        hint_text = hint_text[:512]
                                     text_hints[span_id] = f"Hint for {span_id}: {hint_text}"
                                     real_hint_count += 1
                                 else:
@@ -2291,16 +2403,16 @@ class QGRETrainer:
                     # Aggregate: (prompt_id, span_id) -> {successes_without_hint, successes_with_hint, failures}
                     span_outcomes: dict[tuple[int, str], dict[str, int]] = {}
                     for i, (pid, rr) in enumerate(zip(batch.prompt_ids, reward_results)):
-                        hint_was_used = (
-                            output.hints_used is not None
-                            and i < len(output.hints_used)
-                            and output.hints_used[i]
-                        )
+                        # MIO-001: hints_used is now dict[str, bool] mapping span_id → was_injected
+                        hints_dict = {}
+                        if output.hints_used is not None and i < len(output.hints_used):
+                            hints_dict = output.hints_used[i]
                         span_correct = compute_span_correctness(
                             rr, self.step_qualities, self.config.egrs.reward_threshold
                         )
                         for step_num, is_correct in span_correct.items():
                             span_id = f"STEP_{step_num}" if step_num > 0 else "THINK"
+                            hint_was_used = hints_dict.get(span_id, False)
                             key = (pid, span_id)
                             if key not in span_outcomes:
                                 span_outcomes[key] = {"success_no_hint": 0, "success_with_hint": 0, "failure": 0}
@@ -2312,21 +2424,24 @@ class QGRETrainer:
                             else:
                                 span_outcomes[key]["failure"] += 1
 
-                    # Now update registry once per (prompt_id, span_id)
+                    # MIO-005: Majority voting for graduation
                     for (pid, span_id), counts in span_outcomes.items():
-                        if counts["failure"] > 0:
-                            # Any failure means model hasn't learned - reset streak
+                        total = counts["success_no_hint"] + counts["success_with_hint"] + counts["failure"]
+                        if total == 0:
+                            continue
+                        # Majority failure: reset streak
+                        if counts["failure"] > total / 2:
                             if (pid, span_id) in self.hint_registry:
                                 self.hint_registry.record_failure(pid, span_id)
-                        elif counts["success_no_hint"] > 0 and counts["success_with_hint"] == 0:
-                            # All successes were WITHOUT hint - can graduate
+                        # Majority success without hint: can graduate
+                        elif counts["success_no_hint"] > total / 2:
                             graduated = self.hint_registry.record_success(pid, span_id, hint_was_used=False)
                             if graduated and self.global_step % 50 == 0:
                                 logging.getLogger(__name__).info(
                                     f"EGRS: Prompt {pid} {span_id} graduated (no longer needs hints)"
                                 )
+                        # Otherwise (mixed, or majority success with hint): record success with hint
                         else:
-                            # All succeeded but some needed hint - don't graduate yet
                             self.hint_registry.record_success(pid, span_id, hint_was_used=True)
 
                 # 3. Train step (training mode)

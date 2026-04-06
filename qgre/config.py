@@ -47,6 +47,38 @@ class DataConfig:
                 "difficulty_schedule is deprecated. Use tier_order + initial_tiers for 2D curriculum. "
                 "difficulty_schedule will be removed in a future version."
             )
+        # R3-CSM-009: Validate initial_tiers is list or None
+        if self.initial_tiers is not None and not isinstance(self.initial_tiers, list):
+            raise TypeError(
+                f"R3-CSM-009: initial_tiers must be a list or None, got {type(self.initial_tiers).__name__}. "
+                f"Use [{self.initial_tiers!r}] if you meant a single-item list."
+            )
+        # R3-CSM-002: Validate initial_tiers not empty when tier_order is non-empty
+        if self.tier_order and not self.initial_tiers:
+            raise ValueError(
+                f"R3-CSM-002: tier_order is non-empty {self.tier_order} but initial_tiers is empty. "
+                "Curriculum requires starting tiers. Set initial_tiers or leave tier_order empty."
+            )
+        # R3-CSM-003: Validate tier_order not empty when initial_tiers is non-empty
+        if self.initial_tiers and not self.tier_order:
+            raise ValueError(
+                f"R3-CSM-003: initial_tiers is non-empty {self.initial_tiers} but tier_order is empty. "
+                "Curriculum requires progression order. Set tier_order or leave initial_tiers empty."
+            )
+        # R3-CSM-004: Validate no duplicate tiers in tier_order
+        if self.tier_order and len(self.tier_order) != len(set(self.tier_order)):
+            duplicates = [t for t in self.tier_order if self.tier_order.count(t) > 1]
+            raise ValueError(
+                f"R3-CSM-004: tier_order contains duplicate tiers: {duplicates}. "
+                f"Each tier should appear only once in progression."
+            )
+        # R3-CSM-010: Validate no duplicate tiers in initial_tiers
+        if self.initial_tiers and len(self.initial_tiers) != len(set(self.initial_tiers)):
+            duplicates = [t for t in self.initial_tiers if self.initial_tiers.count(t) > 1]
+            raise ValueError(
+                f"R3-CSM-010: initial_tiers contains duplicate tiers: {duplicates}. "
+                f"Each tier should appear only once in starting set."
+            )
         # DP3-009: Validate initial_tiers subset of tier_order
         if self.tier_order and self.initial_tiers:
             tier_order_set = set(self.tier_order)
@@ -258,6 +290,24 @@ class AlgorithmConfig:
     attention_position_decay: float | None = None  # Position weight decay. None = auto from seq_len. Manual: 0.5=sqrt, 1.0=linear
     attention_sample_layer: int = -1  # DEPRECATED: entropy-based constraint doesn't need attention layers
 
+    def __post_init__(self):
+        """Validate AlgorithmConfig after initialization."""
+        # R3-CSM-005: Validate step_qualities values are lists
+        if self.step_qualities is not None:
+            for step, qualities in self.step_qualities.items():
+                if not isinstance(qualities, list):
+                    raise TypeError(
+                        f"R3-CSM-005: step_qualities values must be lists. "
+                        f"Step {step} has value {qualities!r} of type {type(qualities).__name__}. "
+                        f"Use [{qualities!r}] if you meant a single-item list."
+                    )
+                # R3-CSM-008: Validate no empty quality lists
+                if not qualities:
+                    raise ValueError(
+                        f"R3-CSM-008: step_qualities step {step} has empty quality list. "
+                        f"Empty quality list produces zero gradient. Remove the step or add qualities."
+                    )
+
 
 @dataclass
 class TrainingConfig:
@@ -408,10 +458,19 @@ class QGREConfig:
             # CFG-R1-7: Ensure step_qualities keys are ints with clear error message
             if "step_qualities" in algo_fields and algo_fields["step_qualities"] is not None:
                 try:
-                    algo_fields["step_qualities"] = {
-                        int(k): list(v) for k, v in algo_fields["step_qualities"].items()
-                    }
+                    # R3-CSM-001: Check if value is string before converting to list
+                    converted = {}
+                    for k, v in algo_fields["step_qualities"].items():
+                        if isinstance(v, str):
+                            raise TypeError(
+                                f"R3-CSM-001: step_qualities values must be lists, not strings. "
+                                f"Got string '{v}' for step {k}. Use [{v!r}] instead of {v!r}."
+                            )
+                        converted[int(k)] = list(v)
+                    algo_fields["step_qualities"] = converted
                 except (ValueError, TypeError) as e:
+                    if "R3-CSM-001" in str(e):
+                        raise
                     raise ValueError(
                         f"algorithm.step_qualities keys must be integers (step numbers). "
                         f"Got non-integer key: {e}"
@@ -449,5 +508,13 @@ class QGREConfig:
                 )
             cfg.tutorial = TutorialConfig(skill_tree=skill_tree, **tut_fields)
         if "egrs" in d:
-            cfg.egrs = EGRSConfig(**_pick(EGRSConfig, d["egrs"], "egrs"))
+            egrs_fields = _pick(EGRSConfig, d["egrs"], "egrs")
+            # CSM-005: Validate hint_extractor_mapping is a dict
+            if "hint_extractor_mapping" in egrs_fields and egrs_fields["hint_extractor_mapping"] is not None:
+                if not isinstance(egrs_fields["hint_extractor_mapping"], dict):
+                    raise TypeError(
+                        f"CSM-005: egrs.hint_extractor_mapping expected dict, got {type(egrs_fields['hint_extractor_mapping']).__name__}. "
+                        "Check YAML formatting — must be a mapping, not a string."
+                    )
+            cfg.egrs = EGRSConfig(**egrs_fields)
         return cfg

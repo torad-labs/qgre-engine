@@ -103,6 +103,14 @@ def gamestate_from_dict(d: dict) -> GameState:
             # C2-1: Use current quality_window_size when restoring deques
             maxlen = gs.quality_window_size
             values = window_data.get("values", [])
+            # CSM-006: Warn when checkpoint maxlen differs from config quality_window_size
+            ckpt_maxlen = window_data.get("maxlen")
+            if ckpt_maxlen is not None and ckpt_maxlen != maxlen:
+                import warnings
+                warnings.warn(
+                    f"CSM-006: Checkpoint maxlen={ckpt_maxlen} differs from config quality_window_size={maxlen} "
+                    f"for tier '{tier}' step {step_num}. Using config value (checkpoint ignored)."
+                )
             # C2-3: Filter out NaN/Inf values when restoring
             import math
             filtered_values = [v for v in values if math.isfinite(v)]

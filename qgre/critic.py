@@ -223,7 +223,8 @@ class VPRMCritic(nn.Module):
         for step_id in step_ids_present:
             mask = (region_ids == step_id).float()
             count = mask.sum()
-            if count > 0:
+            # R3-RSP-008: Change threshold from count > 0 to count > 1e-6 to prevent near-zero division
+            if count > 1e-6:
                 pooled = (hidden_states * mask.unsqueeze(-1)).sum(dim=0) / count
                 # RL3-004: Track NaN replacement count
                 if torch.isnan(pooled).any():
@@ -375,10 +376,10 @@ class VPRMCritic(nn.Module):
                 continue
 
             mask = token_masks[q_name]
-            # Convert to float mask for pooling (handles both bool and float masks)
+            # RSP-003: Filter out REPETITION_MARKER (-1.0) from pooling
             # For span masks: 1.0 = first occurrence, REPETITION_MARKER (-1.0) = repeat
-            # Pool over ALL non-zero positions (both first and repeat)
-            float_mask = (mask != 0).float()
+            # Pool only first occurrences (1.0 values), not repeats
+            float_mask = (mask == 1.0).float()
 
             # Align mask to hidden_states length (mask may be completion-only, hidden_states may include prompt)
             hs_len = hidden_states.shape[0]
@@ -430,6 +431,14 @@ class VPRMCritic(nn.Module):
             if online_pred.requires_grad:
                 reward_target = torch.tensor(actual, device=ctx.device, dtype=online_pred.dtype)
                 critic_losses[q_name] = (online_pred - reward_target) ** 2
+
+        # R2-RSP-004: Log warning when all qualities return None for a sample
+        if all(v is None for v in advantages.values()):
+            import logging
+            logging.getLogger(__name__).warning(
+                f"R2-RSP-004: All qualities returned None from critic (all missing from masks). "
+                f"Quality names: {self.quality_names}, masks: {list(token_masks.keys())}"
+            )
 
         return advantages, critic_losses
 

@@ -412,8 +412,15 @@ class CheckpointState:
                 )
                 game_state = GameState()
             elif isinstance(game_state_raw, dict):
-                # Don't reconstruct GameState from dict here — checkpoint.py handles that
-                # via gamestate_from_dict which handles deque reconstruction
+                # R3-CSM-006: Don't reconstruct GameState from dict here — checkpoint.py handles that
+                # via gamestate_from_dict which handles deque reconstruction.
+                # WARNING: Caller must convert game_state from dict to GameState using gamestate_from_dict.
+                import warnings
+                warnings.warn(
+                    "R3-CSM-006: CheckpointState.from_dict returning game_state as dict. "
+                    "Caller must convert using gamestate_from_dict() before use.",
+                    UserWarning
+                )
                 game_state = game_state_raw  # Will be converted by caller
             else:
                 game_state = game_state_raw
@@ -477,6 +484,35 @@ class RewardResult:
     # Character offsets into the completion text. When populated, the engine
     # uses these for per-token advantage assignment instead of the segmenter.
     # Reward functions that don't populate this field get the legacy segmenter path.
+
+
+@dataclass
+class SampleData:
+    """Per-sample data bundle — eliminates parallel list reindexing bugs.
+
+    All per-sample state is stored in a single object. SPO filter reindexing
+    becomes `samples = [samples[i] for i in idx]` — no way to miss a field.
+    Downstream code accesses samples[i].field instead of mapping filtered
+    indices back to original batch indices.
+
+    Fields:
+        completion: Token IDs for this sample's generated text
+        reward_result: Reward function output (scores, spans, etc.)
+        context: Prompt identity and metadata (tier, skill, aspiration)
+        active_qualities: Quality keys active for this sample's tier/phase
+        regions: Segmenter output (optional, None when using span-based advantages)
+        token_masks: Per-quality token masks from scored_spans (optional)
+        kl_region_weights: Per-token KL multipliers from region segmentation (optional)
+        gen_logprobs: Generation-time logprobs for LLDS (optional, pre-padding)
+    """
+    completion: list[int]
+    reward_result: RewardResult
+    context: PromptContext
+    active_qualities: list[str]
+    regions: list[str] | None = None
+    token_masks: dict[str, torch.Tensor] | None = None
+    kl_region_weights: torch.Tensor | None = None
+    gen_logprobs: torch.Tensor | None = None
 
 
 @dataclass

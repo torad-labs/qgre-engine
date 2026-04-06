@@ -726,10 +726,11 @@ class QGREStepAdvantageEstimator:
                     # Clamp variance BEFORE computing effective_lr
                     new_var = old_var + self._var_lr * ((r - new_mean) ** 2 - old_var)
                     if new_var < 0:
-                        # Negative variance indicates numerical instability in EMA — log and clamp
+                        # RSP-005: Negative variance indicates numerical instability in EMA
                         warnings.warn(
-                            f"Negative variance {new_var:.6f} for prompt {pid} step {step_num}. "
-                            f"old_var={old_var:.6f}, r={r:.4f}, r_mean={r_mean:.4f}. Clamping to 0."
+                            f"RSP-005: Negative variance {new_var:.6f} for prompt {pid} step {step_num}. "
+                            f"old_var={old_var:.6f}, r={r:.4f}, r_mean={r_mean:.4f}, new_mean={new_mean:.4f}. "
+                            "Clamping to 0 — baseline may drift."
                         )
                         new_var = 0.0
                     self._reward_var[pid][step_num] = max(0.0, new_var)
@@ -996,6 +997,8 @@ class QGREStepAdvantageEstimator:
             dtype = ctx.dtype if ctx is not None else torch.float32
             token_advs = torch.zeros(seq_len, device=device, dtype=dtype)
             overlap_count = torch.zeros(seq_len, device=device, dtype=dtype)
+            # R3-RSP-009: Track first-occurrence advantages to cap repetition penalty accumulation
+            first_occurrence_advs = torch.zeros(seq_len, device=device, dtype=dtype)
             masks = batch_token_masks[i]
 
             # RL3-008: Track skipped qualities and raise if all skipped due to SHAPE MISMATCH
@@ -1034,6 +1037,8 @@ class QGREStepAdvantageEstimator:
                 # Repetition: always penalize with -|q_adv| * multiplier
                 # This ensures repeating correct = net negative, repeating wrong = even more negative
                 token_advs += q_adv * first_mask
+                # R3-RSP-009: Track first-occurrence advantage magnitude for capping repetition penalty
+                first_occurrence_advs = torch.maximum(first_occurrence_advs, torch.abs(q_adv * first_mask))
                 token_advs += -abs(q_adv) * REPETITION_PENALTY_MULTIPLIER * repeat_mask
 
                 # For overlap normalization, count both first and repeat as participating
@@ -1050,8 +1055,26 @@ class QGREStepAdvantageEstimator:
             # Normalize: tokens in multiple quality spans get their advantage divided by overlap count.
             # Example: token in both q_format and q_correct_H spans → advantage / 2
             # Tokens with zero overlap (thinking, whitespace) get advantage = 0 (no training signal).
+            # R3-RSP-006: Log warning if any tokens have zero overlap count before clamping
+            zero_overlap_mask = (overlap_count == 0.0)
+            if zero_overlap_mask.any():
+                zero_count = zero_overlap_mask.sum().item()
+                import warnings
+                warnings.warn(
+                    f"R3-RSP-006: {zero_count} tokens in sample {i} have zero overlap "
+                    f"(missing from all quality masks). These tokens get zero advantage silently."
+                )
             overlap_count = torch.clamp(overlap_count, min=1.0)
             token_advs = token_advs / overlap_count
+
+            # R3-RSP-009: Cap accumulated repetition penalty to not exceed first-occurrence magnitude
+            # This prevents multiple repeat annotations from training correct token as wrong.
+            # For tokens with first_occurrence_advs > 0, ensure token_advs >= -first_occurrence_advs.
+            token_advs = torch.where(
+                first_occurrence_advs > 0,
+                torch.maximum(token_advs, -first_occurrence_advs),
+                token_advs
+            )
 
             # Scale advantages to fit model's logit resolution
             if self._advantage_scale != 1.0:
@@ -1197,22 +1220,27 @@ def compute_advantages_vprm(
 
     # Broadcast per-quality advantages to per-token by region
     step_nums = sorted(step_qualities.keys())
+    # R2-RSP-003: Initialize step_advs with ALL step_nums including those with virtual steps mapped
+    step_advs: dict[int, float] = {step_num: 0.0 for step_num in step_nums}
+    if step_region_map:
+        for vs in step_region_map.keys():
+            if vs not in step_advs:
+                step_advs[vs] = 0.0
     # Build per-step advantages from quality advantages
-    step_advs: dict[int, float] = {}
     for step_num in step_nums:
         qualities = [q for q in step_qualities[step_num] if q in active_qualities]
         if qualities:
-            vals = [v for v in (advs_dict.get(q, 0.0) for q in qualities) if v is not None]
-            # A2-2: Log warning when quality is dropped due to missing critic region
-            dropped_count = len(qualities) - len(vals)
-            if dropped_count > 0:
+            # RSP-001: Warn when quality returns None from critic (silent advantage erasure)
+            quality_advs = [(q, advs_dict.get(q, 0.0)) for q in qualities]
+            dropped = [q for q, v in quality_advs if v is None]
+            vals = [v for q, v in quality_advs if v is not None]
+            if dropped:
                 import logging
                 logging.getLogger(__name__).warning(
-                    f"A2-2: {dropped_count} qualities dropped for step {step_num} due to missing critic region (None values)"
+                    f"RSP-001: {len(dropped)} qualities returned None from critic for step {step_num}. "
+                    f"Dropped qualities: {dropped}. This erases advantage signal for this step."
                 )
             step_advs[step_num] = sum(vals) / len(vals) if vals else 0.0
-        else:
-            step_advs[step_num] = 0.0
 
     # RL3-007: Document virtual step behavior and add metric
     if step_region_map:

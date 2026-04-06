@@ -27,6 +27,7 @@ def compute_bond_strength(
     attention: torch.Tensor,
     seq_len: int,
     mode: str = "max_received",
+    batch_size: int = 1,
 ) -> torch.Tensor:
     """Compute bond strength for each token in completion from a single attention layer.
 
@@ -43,6 +44,7 @@ def compute_bond_strength(
             - "max_received": max attention from any later token across heads
             - "sum_received": sum of attention from all later tokens
             - "mean_received": mean of attention from all later tokens
+        batch_size: Batch size for fallback when attention=None.
 
     Returns:
         Tensor of shape [batch, seq_len] with bond strength values.
@@ -58,7 +60,7 @@ def compute_bond_strength(
         >>> bond = compute_bond_strength(attention, seq_len=100)
     """
     if attention is None:
-        return torch.zeros(1, seq_len, device="cuda" if torch.cuda.is_available() else "cpu")
+        return torch.zeros(batch_size, seq_len, device="cuda" if torch.cuda.is_available() else "cpu")
 
     # Validate input shape
     if attention.dim() != 4:
@@ -263,10 +265,11 @@ def compute_entropy_importance(
     # Entropy: H = -sum(p * log(p))
     entropy = -(probs * log_probs).sum(dim=-1)  # [batch, actual_len]
 
-    # Normalize entropy to [0, 1] per batch
-    # Max entropy = log(vocab_size), but use observed max for robustness
-    entropy_max = entropy.max(dim=-1, keepdim=True)[0].clamp(min=1e-6)
-    entropy_norm = entropy / entropy_max  # [batch, actual_len]
+    # R3-RSP-007: Normalize entropy using theoretical max (log vocab_size) instead of per-sample max
+    # to avoid batch-dependent scaling. vocab_size is inferred from logits.shape[-1].
+    vocab_size = completion_logits_f32.shape[-1]
+    theoretical_max_entropy = torch.log(torch.tensor(vocab_size, dtype=torch.float32, device=device))
+    entropy_norm = entropy / theoretical_max_entropy.clamp(min=1e-6)  # [batch, actual_len]
 
     # Entropy importance: low entropy = high importance (inverted)
     entropy_importance = 1.0 - entropy_norm
@@ -320,6 +323,13 @@ def apply_importance_constraint(
     Returns:
         Constrained advantage tensor with same shape as input.
     """
+    # R3-RSP-001/002/003: Validate strength >= 0.0 to prevent division by zero or sign flip
+    if strength < 0.0:
+        raise ValueError(
+            f"R3-RSP-001: strength must be >= 0.0, got {strength}. "
+            "Negative strength causes dampening=0 or negative → division by zero or sign inversion."
+        )
+
     # Compute dampening factor
     dampening = 1.0 + strength * importance
 

@@ -188,7 +188,8 @@ def test_egrs_mastery_decay_with_game_state():
     assert abs(step2_mastery - 0.2) < 0.01, f"STEP_2 mastery should be ~0.2, got {step2_mastery}"
 
     # Create registry with hints for both spans
-    registry = HintRegistry(mastery_threshold=0.8)
+    # R3-MIO-002: Pass seed for deterministic test behavior
+    registry = HintRegistry(mastery_threshold=0.8, seed=42)
     registry.flag_for_hint(1, "STEP_1", [100], 0.0, 0)
     registry.flag_for_hint(1, "STEP_2", [200], 0.0, 0)
 
@@ -204,9 +205,7 @@ def test_egrs_mastery_decay_with_game_state():
             return 0.0
         return mastery_fn
 
-    # Get hints with mastery decay
-    import random
-    random.seed(42)
+    # Get hints with mastery decay (seed=42 ensures deterministic random)
     hints = registry.get_hints_for_prompt(1, mastery_fn=make_mastery_fn("default"))
 
     # STEP_1 (mastery=0.9 > threshold=0.8) should NOT inject

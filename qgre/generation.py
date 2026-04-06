@@ -19,7 +19,7 @@ class GenerationOutput:
     token_ids: list[list[int]]   # [batch_size] × variable length
     texts: list[str]             # decoded completions
     logprobs: list[list[float]] | None = None  # [batch_size] × [seq_len] per-token log probs from generation
-    hints_used: list[bool] | None = None  # [batch_size] — True if hint was injected for this sample
+    hints_used: list[dict[str, bool]] | None = None  # [batch_size] — {span_id: was_injected} per sample
 
 
 class HintInjector(Protocol):
@@ -433,19 +433,33 @@ class UnslothBackend:
                 text = text.rstrip() + "<think>\n</think>\n\n"
 
             # Inject hints if available for this prompt (EGRS Phase 5)
-            hint_injected = False
+            hints_used_dict: dict[str, bool] = {}
             if prompt_hints and i in prompt_hints:
                 sample_hints = prompt_hints[i]
                 if sample_hints:
                     # Format hints as guidance text appended to prompt
-                    hint_lines = [f"[{hint}]" for hint in sample_hints.values() if hint]
+                    hint_lines = []
+                    for span_id, hint in sample_hints.items():
+                        if hint:
+                            # MIO-003: Decode and validate hint is not empty
+                            hint_str = str(hint).strip()
+                            if hint_str:
+                                hint_lines.append(f"[{hint_str}]")
+                                hints_used_dict[span_id] = True
+                            else:
+                                import logging
+                                logging.getLogger(__name__).warning(
+                                    f"MIO-003: Empty hint text after decoding for span {span_id} in sample {i}"
+                                )
+                                hints_used_dict[span_id] = False
+                        else:
+                            hints_used_dict[span_id] = False
                     if hint_lines:
                         hint_text = "\n".join(hint_lines)
                         text = text.rstrip() + f"\n\n{hint_text}\n\n"
-                        hint_injected = True
 
             prompts.append(text)
-            hints_used.append(hint_injected)
+            hints_used.append(hints_used_dict if hints_used_dict else {})
 
         lora_req = self.weight_loader.lora_request if self.weight_loader else None
         outputs = self.model.fast_generate(
@@ -525,11 +539,19 @@ class UnslothBackend:
                 f"DP-R2-07: Partial logprobs: {sum(1 for lps in all_logprobs if lps is not None and len(lps) > 0)}"
                 f"/{len(all_logprobs)} samples have logprobs. LLDS disabled for this batch."
             )
+        # MIO-006: Warn if hint_registry exists but hint_enabled is False
+        if not prompt_hints and hasattr(self, 'hint_registry') and self.hint_registry is not None:
+            import logging
+            logging.getLogger(__name__).warning(
+                "MIO-006: hint_registry exists but hint_enabled is False. "
+                "Failures will clear hints that are never injected."
+            )
+        # R2-MIO-001: Return empty dict {} instead of None for hints_used when no hints injected
         return GenerationOutput(
             token_ids=token_ids,
             texts=texts,
             logprobs=all_logprobs if has_logprobs else None,
-            hints_used=hints_used if prompt_hints else None,
+            hints_used=hints_used if hints_used else {},
         )
 
     # Weight sync methods moved to Weight Sync Bus:
