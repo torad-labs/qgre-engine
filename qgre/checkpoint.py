@@ -84,16 +84,11 @@ def gamestate_from_dict(d: dict) -> GameState:
         if tier not in gs.tier_steps_at_phase_start:
             gs.tier_steps_at_phase_start[tier] = gs.step_count
 
-    # C3: Initialize missing tier_mastery entries for active_tiers
-    for tier in gs.active_tiers:
-        if tier not in gs.tier_mastery:
-            gs.tier_mastery[tier] = {}
-
     # Restore tier_mastery from serialized format
     tm = d.get("tier_mastery", {})
-    gs.tier_mastery = {}
     for tier, step_windows in tm.items():
-        gs.tier_mastery[tier] = {}
+        if tier not in gs.tier_mastery:
+            gs.tier_mastery[tier] = {}
         for step_num, window_data in step_windows.items():
             # CP3-001: Add isinstance check on window_data before .get()
             if not isinstance(window_data, dict):
@@ -141,6 +136,12 @@ def gamestate_from_dict(d: dict) -> GameState:
             maxlen = window_data.get("maxlen", QUALITY_WINDOW_SIZE)
             values = window_data.get("values", [])
             gs.tier_mastery["default"][int(step_num)] = deque(values, maxlen=maxlen)
+
+    # Initialize missing tier_mastery entries for active_tiers (after restoration)
+    # This handles tiers that were unlocked but have no checkpoint data yet
+    for tier in gs.active_tiers:
+        if tier not in gs.tier_mastery:
+            gs.tier_mastery[tier] = {}
 
     return gs
 

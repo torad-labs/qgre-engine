@@ -1141,9 +1141,8 @@ class QGRETrainer:
                             comp_len = sample_hs.shape[0]
                         sample_hs_trimmed = sample_hs[:comp_len]
 
-                        # Get span token masks for this sample if available
-                        # Note: batch_token_masks is reindexed by SPO filter (line 714), so use filtered_i not orig_i
-                        sample_token_masks = batch_token_masks[filtered_i] if batch_token_masks and filtered_i < len(batch_token_masks) else None
+                        # Get span token masks from step.samples (already filtered by TrainingStep)
+                        sample_token_masks = step.samples[filtered_i].token_masks
 
                         # Extract bond strength for this sample if available
                         sample_bond_strength = None
@@ -1315,14 +1314,11 @@ class QGRETrainer:
             if mb_per_token_loss is not None and batch_token_masks:
                 with torch.no_grad():
                     for mb_i_inner in range(mb_per_token_loss.shape[0]):
-                        # Map filtered index → original batch index for SPO filter
+                        # Use filtered_i to access step.samples (already filtered by TrainingStep)
                         filtered_i = mb_start + mb_i_inner
-                        if self._spo_filter_idx is not None:
-                            orig_i = self._spo_filter_idx[filtered_i]
-                        else:
-                            orig_i = filtered_i
-                        if orig_i < len(batch_token_masks) and batch_token_masks[orig_i]:
-                            for q_name, q_mask in batch_token_masks[orig_i].items():
+                        sample_masks = step.samples[filtered_i].token_masks
+                        if sample_masks:
+                            for q_name, q_mask in sample_masks.items():
                                 # Shift mask to align with loss positions (logprobs[t] predicts token[t+1])
                                 # q_mask is in token space [0..completion_len-1]
                                 # Loss is computed for positions predicting tokens [1..seq_len-1]
