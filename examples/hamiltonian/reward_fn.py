@@ -309,21 +309,72 @@ class StructuredOutputParser:
         return results
 
 
+    def _find_final_output_boundary(self) -> int:
+        """Find the character position where FINAL OUTPUT begins.
+
+        The model is instructed to "always end with these labeled lines".
+        FINAL OUTPUT is the LAST contiguous block of labeled sections.
+
+        Strategy: scan backwards from end to find where labeled sections cluster.
+        The boundary is the START of the LAST labeled section block.
+
+        Returns character position, or 0 if no labeled sections found.
+        """
+        # Collect all labeled section positions
+        labeled_positions: list[tuple[int, int, str]] = []  # (line_idx, char_start, label)
+        char_pos = 0
+        for i, line in enumerate(self.lines):
+            line_start = char_pos
+            match = self._match_label(line)
+            if match:
+                labeled_positions.append((i, line_start, match[0]))
+            char_pos += len(line) + 1  # +1 for newline
+
+        if not labeled_positions:
+            return 0  # No labels found — everything is reasoning
+
+        # Find the LAST contiguous block of labeled sections
+        # "Contiguous" means labels appear within N lines of each other
+        MAX_GAP = 5  # Allow up to 5 lines between labeled sections in final output
+
+        # Work backwards: find where the final block starts
+        final_block_start_idx = len(labeled_positions) - 1
+        for i in range(len(labeled_positions) - 1, 0, -1):
+            prev_line = labeled_positions[i - 1][0]
+            curr_line = labeled_positions[i][0]
+            if curr_line - prev_line > MAX_GAP:
+                # Gap too large — this is where the final block starts
+                final_block_start_idx = i
+                break
+        else:
+            # All labels are in one contiguous block
+            final_block_start_idx = 0
+
+        # The boundary is the char position of the first label in the final block
+        return labeled_positions[final_block_start_idx][1]
+
     def get_section_spans(self) -> dict[str, list[tuple[int, int]]]:
-        """Get character spans for each labeled section. No regex.
+        """Get character spans for each labeled section in FINAL OUTPUT only.
 
         Returns:
             {canonical_label: [(char_start, char_end), ...], ...}
 
-        Finds:
+        CRITICAL: Only spans from the FINAL OUTPUT region are returned.
+        Reasoning text (before the final output boundary) is EXCLUDED to prevent
+        training signal from tentative expressions like "H = p²/4 maybe?".
+
+        Finds in FINAL OUTPUT only:
         1. Labeled sections (HAMILTONIAN: ..., KINETIC: ..., etc.)
-        2. VAR = expr patterns anywhere in lines (H = ..., V = ..., etc.)
+        2. VAR = expr patterns (H = ..., V = ..., etc.)
         3. Equation patterns (dX/dt = ..., frac{dX}{dt} = ...)
         """
         spans: dict[str, list[tuple[int, int]]] = {
             "COORDINATES": [], "MOMENTUM": [], "KINETIC": [], "POTENTIAL": [],
             "HAMILTONIAN": [], "EQUATIONS": [],
         }
+
+        # Find where FINAL OUTPUT begins — everything before is reasoning
+        final_output_boundary = self._find_final_output_boundary()
 
         char_pos = 0
         current_label: str | None = None
@@ -332,6 +383,11 @@ class StructuredOutputParser:
         for i, line in enumerate(self.lines):
             line_start = char_pos
             line_end = char_pos + len(line)
+
+            # SKIP lines before the final output boundary
+            if line_start < final_output_boundary:
+                char_pos = line_end + 1
+                continue
 
             match = self._match_label(line)
             if match:
@@ -343,8 +399,7 @@ class StructuredOutputParser:
                 current_label = match[0]
                 current_start = line_start
 
-            # Also find VAR = expr patterns ANYWHERE in the line (not just labeled)
-            # This catches expressions in derivations like "derivation: H = p²/6"
+            # Also find VAR = expr patterns in the line (FINAL OUTPUT only)
             # Skip if line was already matched as a labeled section (avoid duplicates)
             cleaned = self._clean_line(line)
             if '=' in cleaned and not match:

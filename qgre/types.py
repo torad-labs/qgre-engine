@@ -184,6 +184,8 @@ class CheckpointState:
     # VPRM critic states (optional)
     vprm_critic_state: dict | None = None
     vprm_optimizer_state: dict | None = None
+    # EGRS hint registry state (optional)
+    hint_registry_state: dict | None = None
     # Training context (optional)
     training_context: dict | None = None
     # Schema version for migration
@@ -244,7 +246,8 @@ class CheckpointState:
         # Validate optional dict fields
         optional_dict_fields = [
             "model_state_dict", "optimizer_state_dict", "scheduler_state_dict",
-            "vprm_critic_state", "vprm_optimizer_state", "training_context"
+            "vprm_critic_state", "vprm_optimizer_state", "hint_registry_state",
+            "training_context"
         ]
         for field_name in optional_dict_fields:
             value = getattr(self, field_name, None)
@@ -259,7 +262,7 @@ class CheckpointState:
             "trainer", "dataloader", "advantage_estimator", "weight_loader",
             "game_state", "model_state_dict", "optimizer_state_dict",
             "scheduler_state_dict", "vprm_critic_state", "vprm_optimizer_state",
-            "training_context", "schema_version"
+            "hint_registry_state", "training_context", "schema_version"
         }
         actual_fields = set(self.__dict__.keys())
         extra_fields = actual_fields - expected_fields

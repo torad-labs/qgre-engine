@@ -64,6 +64,11 @@ algorithm:
   length_penalty_coef: 0.005
   length_penalty_threshold: 0.6
   advantage_scale: 0.1  # Calibrated via gradient probe - moves logits 0.06% of gap per step
+  # Attention-constrained advantage: dampen advantage for high-bond tokens
+  attention_constrained_advantage: true
+  attention_constraint_strength: 1.0
+  attention_constraint_mode: max_received
+  attention_sample_layer: -1  # Last layer
 
   step_qualities:
     1: [q_format, q_has_math]
@@ -100,6 +105,16 @@ vprm:
   lr: 0.0001
   clip_advantage: 5.0
   spo_fallback_min_regions: 2
+
+egrs:
+  enabled: true
+  reward_threshold: 0.5
+  entropy_threshold: 0.5
+  gate_temperature: 0.1
+  exploration_weight: 0.1
+  hint_enabled: true
+  mastery_threshold: 0.8
+  hint_extractor: hamiltonian  # Use Hamiltonian-specific extractor (T_expr, V_expr, H_expr)
 
 tutorial:
   enabled: true

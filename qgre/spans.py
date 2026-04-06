@@ -44,8 +44,9 @@ def build_char_to_token_map(
         return None
 
     # Get the full decoded text (this is what the reward function scored)
+    # CRITICAL: vLLM's output.text uses skip_special_tokens=True, so we must match
     try:
-        full_text = tokenizer.decode(token_ids, skip_special_tokens=False)
+        full_text = tokenizer.decode(token_ids, skip_special_tokens=True)
     except Exception as e:
         warnings.warn(f"build_char_to_token_map: full decode failed: {e}")
         return None
@@ -63,7 +64,7 @@ def build_char_to_token_map(
     for tok_idx, tid in enumerate(token_ids):
         try:
             # Decode this single token
-            tok_text = tokenizer.decode([tid], skip_special_tokens=False)
+            tok_text = tokenizer.decode([tid], skip_special_tokens=True)
             tok_len = len(tok_text)
 
             # Find where this token's text appears in full_text starting from char_pos

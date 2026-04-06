@@ -150,6 +150,7 @@ def save_checkpoint(
     accumulation_count: int = 0,
     dataloader_state: dict | None = None,
     training_context: dict | None = None,
+    hint_registry_state: dict | None = None,
     # New: accept TrainerState directly (preferred)
     trainer_state: TrainerState | None = None,
 ):
@@ -210,6 +211,7 @@ def save_checkpoint(
         scheduler_state_dict=scheduler_state_dict,
         vprm_critic_state=vprm_critic_state,
         vprm_optimizer_state=vprm_optimizer_state,
+        hint_registry_state=hint_registry_state,
         training_context=training_context,
         schema_version=CHECKPOINT_SCHEMA_VERSION,
     )

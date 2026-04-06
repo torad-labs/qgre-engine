@@ -172,6 +172,34 @@ class VPRMConfig:
 
 
 @dataclass
+class EGRSConfig:
+    """Entropy-Gated Reinforcement System — 2x2 matrix for token-level gradient control.
+
+    Classifies tokens into 4 quadrants based on (correct/wrong) x (confident/uncertain):
+    - Q1 (uncertain+correct): Reinforce (learning)
+    - Q2 (confident+correct): Do nothing (already learned)
+    - Q3 (confident+wrong): Entropy boost (shake confidence)
+    - Q4 (uncertain+wrong): Flag for hint injection (provide direction)
+
+    See docs/entropy-gated-reinforcement.md for full design.
+    """
+    enabled: bool = False  # Master switch for EGRS
+    reward_threshold: float = 0.5  # Span reward above this = "correct"
+    entropy_threshold: float = 0.5  # Normalized entropy below this = "confident"
+    gate_temperature: float = 0.1  # Sigmoid temperature for soft gating (lower = sharper)
+    exploration_weight: float = 0.1  # Lambda for entropy bonus in Q3 (confident+wrong)
+    hint_enabled: bool = True  # Enable hint injection for Q4 (uncertain+wrong)
+    hint_token_count: int = 3  # Max tokens to inject as hint
+    mastery_threshold: float = 0.8  # Mastery score at which hints stop
+    # Hint extractor: "hamiltonian", "generic", or "none"
+    # - hamiltonian: Uses T_expr, V_expr, H_expr from metadata
+    # - generic: Uses hint_extractor_mapping to map span_id → metadata field
+    # - none: Generic hints like "Focus on STEP_N"
+    hint_extractor: str = "none"
+    hint_extractor_mapping: dict = field(default_factory=dict)  # For generic extractor
+
+
+@dataclass
 class AlgorithmConfig:
     mode: str = "spo"  # "spo" or "grpo"
     spo: SPOConfig = field(default_factory=SPOConfig)
@@ -219,6 +247,16 @@ class AlgorithmConfig:
     # Compresses advantage signal to fit small model logit resolution.
     # 1.0 = no scaling, 0.1 = 10x compression (recommended for 1-3B models).
     advantage_scale: float = 1.0
+    # Entropy-Regulated Importance Constraint (ERIC): dampen gradients on committed anchor tokens
+    # Based on ERPO insight: low-entropy tokens are "committed" and shouldn't be pushed hard.
+    # Combined with position-based causal weighting for proper anchor identification.
+    # CRITICAL: Only dampens POSITIVE advantages (protecting correct anchors).
+    # Negative advantages (confident mistakes) get FULL gradient for correction.
+    attention_constrained_advantage: bool = False  # Enable entropy-regulated importance constraint
+    attention_constraint_strength: float = 1.0  # Dampening multiplier (1.0 = standard, 2.0 = aggressive)
+    attention_constraint_mode: str = "entropy_position"  # "entropy", "position", or "entropy_position" (recommended)
+    attention_position_decay: float | None = None  # Position weight decay. None = auto from seq_len. Manual: 0.5=sqrt, 1.0=linear
+    attention_sample_layer: int = -1  # DEPRECATED: entropy-based constraint doesn't need attention layers
 
 
 @dataclass
@@ -267,6 +305,7 @@ class QGREConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     vprm: VPRMConfig = field(default_factory=VPRMConfig)
     tutorial: TutorialConfig = field(default_factory=TutorialConfig)
+    egrs: EGRSConfig = field(default_factory=EGRSConfig)
 
     def validate(self) -> None:
         """Validate config for common misconfigurations. Called after from_yaml()."""
@@ -409,4 +448,6 @@ class QGREConfig:
                     f"Must be one of: {sorted(_VALID_POST_MASTERY_BEHAVIORS)}"
                 )
             cfg.tutorial = TutorialConfig(skill_tree=skill_tree, **tut_fields)
+        if "egrs" in d:
+            cfg.egrs = EGRSConfig(**_pick(EGRSConfig, d["egrs"], "egrs"))
         return cfg

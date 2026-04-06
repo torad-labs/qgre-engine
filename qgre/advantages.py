@@ -8,6 +8,11 @@ from typing import Callable
 import numpy as np
 import torch
 
+from qgre.attention_bonds import (
+    apply_importance_constraint,
+    compute_confidence_gate,
+    compute_normalized_entropy,
+)
 from qgre.segments import Segmenter, segmenter_region_count, uniform_segmenter
 from qgre.spans import REPETITION_MARKER
 from qgre.types import PromptContext, RewardResult, TrainingContext
@@ -17,6 +22,160 @@ _logger = logging.getLogger(__name__)
 # Penalty multiplier for repeated spans (applied to abs(q_adv))
 # 1.5 means repeating gives -1.5 * |q_adv| regardless of sign
 REPETITION_PENALTY_MULTIPLIER = 1.5
+
+
+# =============================================================================
+# EGRS: Entropy-Gated Reinforcement System
+# =============================================================================
+
+
+def compute_span_correctness(
+    reward_result: RewardResult,
+    step_qualities: dict[int, list[str]],
+    threshold: float = 0.5,
+) -> dict[int, bool]:
+    """Map step_num -> is_correct based on quality scores.
+
+    A span is "correct" if ALL its quality scores meet or exceed the threshold.
+    This matches the QGRE philosophy: we want mastery, not partial credit.
+
+    Args:
+        reward_result: Reward function output with per-quality scores.
+        step_qualities: Mapping of step_num -> list of quality names.
+        threshold: Score threshold for "correct" classification.
+
+    Returns:
+        Dict mapping step_num -> bool (True if correct).
+    """
+    result = {}
+    for step_num, qualities in step_qualities.items():
+        if not qualities:
+            # No qualities defined = assume correct (no signal)
+            # Warn once per step to surface configuration issues
+            if not hasattr(compute_span_correctness, '_empty_warned'):
+                compute_span_correctness._empty_warned = set()
+            if step_num not in compute_span_correctness._empty_warned:
+                compute_span_correctness._empty_warned.add(step_num)
+                warnings.warn(
+                    f"EGRS: step {step_num} has empty qualities list in step_qualities. "
+                    "Step will always be treated as 'correct' (Q2 or Q1). Check config."
+                )
+            result[step_num] = True
+            continue
+        scores = [reward_result.scores.get(q, 0.0) for q in qualities]
+        # All scores must meet threshold
+        result[step_num] = all(s >= threshold for s in scores)
+    return result
+
+
+def apply_egrs_matrix(
+    token_advantages: torch.Tensor,
+    regions: list[str],
+    token_entropy: torch.Tensor,
+    step_correctness: dict[int, bool],
+    entropy_threshold: float = 0.5,
+    gate_temperature: float = 0.1,
+    exploration_weight: float = 0.1,
+    importance: torch.Tensor | None = None,
+    eric_strength: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor, set[tuple[int, int]]]:
+    """Apply EGRS 2x2 matrix to token advantages.
+
+    Classifies each token into one of 4 quadrants and applies appropriate treatment:
+    - Q1 (uncertain+correct): Scale advantage by confidence_gate, then apply ERIC dampening
+    - Q2 (confident+correct): Zero advantage (already learned)
+    - Q3 (confident+wrong): Zero advantage, set entropy adjustment
+    - Q4 (uncertain+wrong): Zero advantage, flag for hint
+
+    Args:
+        token_advantages: Per-token advantages [seq_len].
+        regions: Per-token region labels from segmenter.
+        token_entropy: Normalized entropy [seq_len] in [0, 1].
+        step_correctness: step_num -> is_correct mapping.
+        entropy_threshold: Threshold for confident/uncertain classification.
+        gate_temperature: Sigmoid temperature for soft gating.
+        exploration_weight: Lambda for entropy bonus (Q3).
+        importance: Optional per-token importance for ERIC dampening [seq_len].
+                   If provided, Q1 advantages are dampened by (1 + eric_strength * importance).
+        eric_strength: ERIC dampening multiplier (1.0 = standard).
+
+    Returns:
+        Tuple of:
+        - Modified token advantages [seq_len]
+        - Entropy adjustments [seq_len] (non-zero for Q3 tokens)
+        - Hint flags: set of (step_num, token_idx) for Q4 tokens
+    """
+    seq_len = len(regions)
+    device = token_advantages.device
+    dtype = token_advantages.dtype
+
+    # Compute confidence gate: ~0 when confident, ~1 when uncertain
+    confidence_gate = compute_confidence_gate(
+        token_entropy, threshold=entropy_threshold, temperature=gate_temperature
+    )
+
+    # Initialize outputs
+    modified_advs = token_advantages.clone()
+    entropy_adjustments = torch.zeros(seq_len, device=device, dtype=dtype)
+    hint_flags: set[tuple[int, int]] = set()
+
+    for t, region in enumerate(regions):
+        # Parse step number from region label
+        if region.startswith("STEP_"):
+            try:
+                step_num = int(region.split("_")[1])
+            except (IndexError, ValueError):
+                # Track malformed regions - surface issue without spamming
+                if not hasattr(apply_egrs_matrix, '_malformed_warned'):
+                    apply_egrs_matrix._malformed_warned = set()
+                if region not in apply_egrs_matrix._malformed_warned:
+                    apply_egrs_matrix._malformed_warned.add(region)
+                    warnings.warn(
+                        f"EGRS: Malformed region label '{region}' at token {t}. "
+                        "Token will receive no EGRS treatment. Check segmenter output."
+                    )
+                continue
+        elif region == "THINK":
+            step_num = 0
+        else:
+            continue  # FORMAT or other regions - no EGRS treatment
+
+        # Look up correctness - warn if step not found (silent default is dangerous)
+        if step_num not in step_correctness:
+            warnings.warn(
+                f"EGRS: step {step_num} not in step_correctness dict. "
+                f"Defaulting to correct=True. Check step_qualities config."
+            )
+        correct = step_correctness.get(step_num, True)
+        # Confidence from gate: low gate = confident, high gate = uncertain
+        gate_val = confidence_gate[t].item()
+        confident = gate_val < 0.5
+
+        if correct:
+            if confident:
+                # Q2: Confident + Correct → Already learned, zero advantage
+                modified_advs[t] = 0.0
+            else:
+                # Q1: Uncertain + Correct → Reinforce
+                # Gate: ~1 when uncertain (should reinforce), ~0 when confident (don't reinforce)
+                # Scale advantage by gate value
+                scaled_adv = token_advantages[t] * gate_val
+                # Apply ERIC dampening if importance provided (prevents cascade destabilization)
+                if importance is not None:
+                    dampening = 1.0 + eric_strength * importance[t].item()
+                    scaled_adv = scaled_adv / dampening
+                modified_advs[t] = scaled_adv
+        else:
+            # Wrong answer - no reinforcement
+            modified_advs[t] = 0.0
+            if confident:
+                # Q3: Confident + Wrong → Shake confidence via entropy boost
+                entropy_adjustments[t] = exploration_weight
+            else:
+                # Q4: Uncertain + Wrong → Flag for hint injection
+                hint_flags.add((step_num, t))
+
+    return modified_advs, entropy_adjustments, hint_flags
 
 
 def _validate_region_step_coverage(
@@ -68,6 +227,8 @@ def broadcast_step_advantages_to_tokens(
     region_extra_steps: dict[int, list[int]],
     sample_idx: int | None = None,
     ctx: TrainingContext | None = None,
+    bond_strength: torch.Tensor | None = None,
+    constraint_strength: float = 1.0,
 ) -> torch.Tensor:
     """Broadcast per-step advantages to per-token by region label.
 
@@ -80,6 +241,8 @@ def broadcast_step_advantages_to_tokens(
         region_extra_steps: region_step → [virtual steps mapped to it]
         sample_idx: when step_advs values are batch tensors, index into them
         ctx: TrainingContext for device and dtype
+        bond_strength: per-token attention bond strength (0-1), constrains advantages
+        constraint_strength: multiplier for bond strength effect (default 1.0)
     """
     # Pre-build label → advantage value map from unique regions (O(n_labels) string ops)
     # then do O(seq_len) dict lookups instead of per-token string parsing
@@ -129,10 +292,10 @@ def broadcast_step_advantages_to_tokens(
 
     # C05-SHAPE: Validate ctx.device matches input tensor device before ops
     if ctx is not None:
-        for val in step_advs.values():
+        for step_num, val in step_advs.items():
             if isinstance(val, torch.Tensor) and val.device != ctx.device:
                 raise ValueError(
-                    f"C05-SHAPE: Input tensor device {val.device} does not match ctx.device {ctx.device}"
+                    f"C05-SHAPE: step_advs[{step_num}] on {val.device} but ctx.device={ctx.device}"
                 )
 
     # C04-NUMERICAL: Use ctx.dtype for advantage tensor creation
@@ -141,11 +304,30 @@ def broadcast_step_advantages_to_tokens(
     for t, region in enumerate(regions):
         if region in label_to_adv:
             token_advs[t] = label_to_adv[region]
+
+    # Apply importance constraint if bond_strength (importance) provided
+    if bond_strength is not None:
+        # Validate device consistency
+        if bond_strength.device != device:
+            raise ValueError(
+                f"C05-SHAPE: bond_strength device {bond_strength.device} does not match token_advs device {device}"
+            )
+        # Validate shape consistency
+        if bond_strength.shape != token_advs.shape:
+            raise ValueError(
+                f"C05-SHAPE: bond_strength shape {bond_strength.shape} does not match token_advs shape {token_advs.shape}"
+            )
+        # Apply advantage-gated importance constraint:
+        # - Positive advantage + high importance → dampen (protect correct anchors)
+        # - Negative advantage + high importance → NO dampen (correct confident mistakes)
+        token_advs = apply_importance_constraint(token_advs, bond_strength, constraint_strength)
+
     return token_advs
 
 
 def build_batch_reward_tensors(
     reward_results: list[RewardResult],
+    device: str | torch.device | None = None,
 ) -> dict[str, torch.Tensor]:
     """Convert list[RewardResult] → dict[str, Tensor] per quality component.
 
@@ -161,7 +343,7 @@ def build_batch_reward_tensors(
     tensors: dict[str, torch.Tensor] = {}
     for key in sorted(all_keys):
         values = [rr.scores.get(key, 0.0) for rr in reward_results]
-        tensors[key] = torch.tensor(values, dtype=torch.float32)
+        tensors[key] = torch.tensor(values, dtype=torch.float32, device=device)
 
     return tensors
 
@@ -386,8 +568,10 @@ class QGREStepAdvantageEstimator:
             all_regions.append(regions)
 
         # Phase 2: Per-step advantages (SPO or GRPO baseline)
+        # C05-SHAPE: Create on ctx.device to avoid device mismatch in broadcast
+        device = ctx.device if ctx is not None else "cpu"
         step_advs: dict[int, torch.Tensor] = {
-            s: torch.zeros(batch_size) for s in self._step_nums
+            s: torch.zeros(batch_size, device=device) for s in self._step_nums
         }
 
         if self.mode == "spo":
@@ -939,8 +1123,16 @@ def compute_advantages_vprm(
     aspiration_target: float = 0.0,
     clip_advantage: float | None = None,
     ctx: "TrainingContext | None" = None,
+    token_masks: dict[str, torch.Tensor] | None = None,  # Span-based masks (if available)
+    bond_strength: torch.Tensor | None = None,  # Per-token attention bond strength (0-1)
+    constraint_strength: float = 1.0,  # Multiplier for bond strength effect
 ) -> tuple[torch.Tensor, torch.Tensor, bool]:
     """Compute per-token advantages using VPRM critic for a single sample.
+
+    Args:
+        bond_strength: Per-token attention bond strength [seq_len], range [0, 1].
+            High-bond tokens get constrained advantages to prevent cascade.
+        constraint_strength: Multiplier for bond strength effect (default 1.0).
 
     Returns:
         (token_advantages, critic_loss, used_critic):
@@ -962,31 +1154,40 @@ def compute_advantages_vprm(
         hidden_states = hidden_states.to(ctx.device)
 
     # Check if enough regions for critic — else SPO fallback
-    n_regions = segmenter_region_count(regions)
-    if n_regions < min_regions:
-        # RL3-010: Return flag + log metric for SPO fallback
-        if not hasattr(compute_advantages_vprm, "_spo_fallback_count"):
-            compute_advantages_vprm._spo_fallback_count = 0
-        compute_advantages_vprm._spo_fallback_count += 1
-        if compute_advantages_vprm._spo_fallback_count <= 3:
-            import logging
-            logging.getLogger(__name__).info(
-                f"RL3-010: SPO fallback (regions={n_regions} < min_regions={min_regions}). "
-                f"Total fallbacks: {compute_advantages_vprm._spo_fallback_count}"
+    # Skip this check when using spans (token_masks) since spans don't use STEP_N regions
+    if not token_masks:
+        n_regions = segmenter_region_count(regions)
+        if n_regions < min_regions:
+            # RL3-010: Return flag + log metric for SPO fallback
+            if not hasattr(compute_advantages_vprm, "_spo_fallback_count"):
+                compute_advantages_vprm._spo_fallback_count = 0
+            compute_advantages_vprm._spo_fallback_count += 1
+            if compute_advantages_vprm._spo_fallback_count <= 3:
+                import logging
+                logging.getLogger(__name__).info(
+                    f"RL3-010: SPO fallback (regions={n_regions} < min_regions={min_regions}). "
+                    f"Total fallbacks: {compute_advantages_vprm._spo_fallback_count}"
+                )
+            return (
+                torch.zeros(seq_len, device=device),
+                torch.tensor(0.0, device=device),
+                False,
             )
-        return (
-            torch.zeros(seq_len, device=device),
-            torch.tensor(0.0, device=device),
-            False,
-        )
 
     # Get actual rewards per quality
     actual_rewards = {k: reward_result.scores.get(k, 0.0) for k in active_qualities}
 
     # Compute advantages via critic (hidden states must be DETACHED)
-    advs_dict, critic_losses = critic.compute_advantages(
-        hidden_states.detach(), regions, actual_rewards, ctx=ctx,
-    )
+    # Use span-based method if token_masks available (not None), otherwise fall back to region-based
+    # Note: empty dict {} is valid (means no spans for this sample) - use `is not None` check
+    if token_masks is not None and hasattr(critic, 'compute_advantages_from_spans'):
+        advs_dict, critic_losses = critic.compute_advantages_from_spans(
+            hidden_states.detach(), token_masks, actual_rewards, ctx=ctx,
+        )
+    else:
+        advs_dict, critic_losses = critic.compute_advantages(
+            hidden_states.detach(), regions, actual_rewards, ctx=ctx,
+        )
 
     # Build reverse map: region_step → [virtual steps that map to it]
     region_extra_steps: dict[int, list[int]] = defaultdict(list)
@@ -1047,6 +1248,7 @@ def compute_advantages_vprm(
     # Broadcast to tokens
     token_advantages = broadcast_step_advantages_to_tokens(
         step_advs, regions, region_extra_steps, ctx=ctx,
+        bond_strength=bond_strength, constraint_strength=constraint_strength,
     ).to(device)
 
     # Clip VPRM advantages after broadcast

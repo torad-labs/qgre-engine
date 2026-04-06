@@ -338,6 +338,141 @@ class VPRMCritic(nn.Module):
 
         return batch_advantages, total_loss
 
+    def compute_advantages_from_spans(
+        self,
+        hidden_states: torch.Tensor,
+        token_masks: dict[str, torch.Tensor],
+        actual_rewards: dict[str, float],
+        ctx: TrainingContext,
+    ) -> tuple[dict[str, float], dict[str, torch.Tensor]]:
+        """Compute per-quality advantages using span-based token masks.
+
+        This is the span-aware alternative to compute_advantages(). Instead of
+        pooling by STEP_X regions, it pools by each quality's token mask directly.
+        This is more precise — the mask IS the quality's region.
+
+        Args:
+            hidden_states: [seq_len, hidden_dim] — DETACHED from training graph
+            token_masks: quality_name → [seq_len] boolean/float mask from scored_spans
+            actual_rewards: quality_name → actual reward score
+            ctx: TrainingContext — provides device and dtype for tensor operations
+
+        Returns:
+            (advantages, critic_losses):
+            - advantages: quality_name → clipped advantage (float)
+            - critic_losses: quality_name → MSE loss tensor (for backward)
+        """
+        advantages: dict[str, float] = {}
+        critic_losses: dict[str, torch.Tensor] = {}
+
+        for q_name in self.quality_names:
+            actual = actual_rewards.get(q_name, 0.0)
+
+            # Get this quality's token mask
+            if q_name not in token_masks:
+                # Quality not in spans — skip (no gradient)
+                advantages[q_name] = None
+                continue
+
+            mask = token_masks[q_name]
+            # Convert to float mask for pooling (handles both bool and float masks)
+            # For span masks: 1.0 = first occurrence, REPETITION_MARKER (-1.0) = repeat
+            # Pool over ALL non-zero positions (both first and repeat)
+            float_mask = (mask != 0).float()
+
+            # Align mask to hidden_states length (mask may be completion-only, hidden_states may include prompt)
+            hs_len = hidden_states.shape[0]
+            mask_len = float_mask.shape[0]
+            if mask_len < hs_len:
+                # Mask is shorter — pad with zeros at start (prompt region)
+                padding = torch.zeros(hs_len - mask_len, device=float_mask.device, dtype=float_mask.dtype)
+                float_mask = torch.cat([padding, float_mask], dim=0)
+            elif mask_len > hs_len:
+                # Mask is longer — trim from end
+                float_mask = float_mask[:hs_len]
+
+            count = float_mask.sum()
+
+            if count == 0:
+                # Empty mask — skip
+                advantages[q_name] = None
+                continue
+
+            # Mean-pool hidden states over this quality's span
+            pooled = (hidden_states * float_mask.unsqueeze(-1)).sum(dim=0) / count
+
+            if torch.isnan(pooled).any():
+                if not hasattr(self, "_nan_span_count"):
+                    self._nan_span_count = 0
+                self._nan_span_count += 1
+                import warnings
+                warnings.warn(f"NaN in span pooling for '{q_name}'. Total: {self._nan_span_count}")
+                advantages[q_name] = 0.0
+                continue
+
+            # Cast to ctx.dtype and add batch dimension
+            pooled = pooled.to(dtype=ctx.dtype).unsqueeze(0)
+
+            # Target prediction for stable advantage
+            target_pred = self.target_heads[q_name](pooled).squeeze(0).squeeze(0)
+            if torch.isnan(target_pred):
+                import warnings
+                warnings.warn(f"NaN target prediction for quality '{q_name}' (span mode)")
+                advantages[q_name] = 0.0
+                continue
+
+            adv = actual - target_pred.detach().item()
+            adv = max(-self.clip_advantage, min(self.clip_advantage, adv))
+            advantages[q_name] = adv
+
+            # Online prediction for MSE loss
+            online_pred = self.heads[q_name](pooled).squeeze(0).squeeze(0)
+            if online_pred.requires_grad:
+                reward_target = torch.tensor(actual, device=ctx.device, dtype=online_pred.dtype)
+                critic_losses[q_name] = (online_pred - reward_target) ** 2
+
+        return advantages, critic_losses
+
+    def compute_batch_advantages_from_spans(
+        self,
+        batch_hidden_states: list[torch.Tensor],
+        batch_token_masks: list[dict[str, torch.Tensor]],
+        batch_rewards: list[dict[str, float]],
+        ctx: TrainingContext,
+    ) -> tuple[list[dict[str, float]], torch.Tensor]:
+        """Batch version of compute_advantages_from_spans.
+
+        Args:
+            batch_hidden_states: list of [seq_len, hidden_dim] tensors (DETACHED)
+            batch_token_masks: list of quality_name → token_mask dicts
+            batch_rewards: list of quality_name → actual reward dicts
+            ctx: TrainingContext — provides device and dtype for tensor operations
+
+        Returns:
+            (batch_advantages, total_critic_loss)
+        """
+        batch_advantages: list[dict[str, float]] = []
+        all_losses: list[torch.Tensor] = []
+
+        for i, (hs, masks, rewards) in enumerate(
+            zip(batch_hidden_states, batch_token_masks, batch_rewards)
+        ):
+            if not masks:
+                # No masks for this sample — skip critic
+                batch_advantages.append({q: None for q in self.quality_names})
+                continue
+
+            advs, losses = self.compute_advantages_from_spans(hs, masks, rewards, ctx)
+            batch_advantages.append(advs)
+            all_losses.extend([l for l in losses.values() if l is not None])
+
+        if all_losses:
+            total_loss = torch.stack(all_losses).mean()
+        else:
+            total_loss = torch.tensor(0.0, device=ctx.device)
+
+        return batch_advantages, total_loss
+
     def state_dict_with_meta(self) -> dict:
         """Save critic state with metadata for checkpoint/resume."""
         return {

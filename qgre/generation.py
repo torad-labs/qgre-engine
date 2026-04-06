@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Protocol
 
 import torch
 
@@ -19,6 +19,89 @@ class GenerationOutput:
     token_ids: list[list[int]]   # [batch_size] × variable length
     texts: list[str]             # decoded completions
     logprobs: list[list[float]] | None = None  # [batch_size] × [seq_len] per-token log probs from generation
+    hints_used: list[bool] | None = None  # [batch_size] — True if hint was injected for this sample
+
+
+class HintInjector(Protocol):
+    """Protocol for domain-specific hint injection.
+
+    Implementations extract hint text from ground truth/metadata and format it
+    for injection into the prompt. The hint guides the model toward the correct
+    answer for a specific span without giving away the complete solution.
+    """
+
+    def extract_hint(
+        self,
+        span_id: str,
+        metadata: dict[str, Any],
+    ) -> str | None:
+        """Extract hint text for a span from metadata.
+
+        Args:
+            span_id: Span identifier (e.g., "STEP_1", "STEP_2").
+            metadata: Prompt metadata containing ground truth.
+
+        Returns:
+            Hint text to inject, or None if no hint available.
+        """
+        ...
+
+
+def make_hamiltonian_hint_injector() -> HintInjector:
+    """Create hint injector for Hamiltonian mechanics domain.
+
+    Extracts hints from ground truth expressions in metadata.
+    Hint format: "Hint for {label}: {start_of_expression}"
+    """
+
+    class HamiltonianHintInjector:
+        # Map step IDs to Hamiltonian labels
+        STEP_TO_LABEL = {
+            "STEP_1": "COORDINATES",
+            "STEP_2": "MOMENTUM",
+            "STEP_3": "KINETIC",
+            "STEP_4": "POTENTIAL",
+            "STEP_5": "HAMILTONIAN",
+        }
+
+        def extract_hint(
+            self,
+            span_id: str,
+            metadata: dict[str, Any],
+        ) -> str | None:
+            label = self.STEP_TO_LABEL.get(span_id)
+            if not label:
+                return None
+
+            # Try to get ground truth from metadata
+            gt = metadata.get("ground_truth", {})
+            if isinstance(gt, str):
+                import json
+                try:
+                    gt = json.loads(gt)
+                except json.JSONDecodeError:
+                    return None
+
+            # Look for the expression in ground truth
+            expr = gt.get(label.lower()) or gt.get(label)
+            if not expr:
+                return None
+
+            # Extract first few characters as hint (up to equals or first term)
+            hint_text = str(expr)
+            # Truncate to reasonable hint length (don't give away full answer)
+            if len(hint_text) > 20:
+                # Find a good truncation point
+                for i, c in enumerate(hint_text[5:], start=5):
+                    if c in "+-*/^" and i > 5:
+                        hint_text = hint_text[:i]
+                        break
+                else:
+                    hint_text = hint_text[:15] + "..."
+
+            return f"Hint for {label}: start with {hint_text}"
+
+    return HamiltonianHintInjector()
 
 
 class UnslothBackend:
@@ -283,6 +366,7 @@ class UnslothBackend:
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor,
+        prompt_hints: dict[int, dict[str, str]] | None = None,
         **kwargs,
     ) -> GenerationOutput:
         """Generate completions using vLLM fast_generate.
@@ -290,9 +374,12 @@ class UnslothBackend:
         Args:
             input_ids: [batch, prompt_len] — left-padded prompt tokens
             attention_mask: [batch, prompt_len]
+            prompt_hints: Optional hints per prompt index.
+                Format: {batch_idx: {span_id: hint_text, ...}, ...}
+                Hints are appended to the prompt as guidance text.
 
         Returns:
-            GenerationOutput with token IDs and decoded texts
+            GenerationOutput with token IDs, decoded texts, and hints_used flags
         """
         from vllm import SamplingParams
 
@@ -335,6 +422,7 @@ class UnslothBackend:
 
         # Decode prompts for fast_generate (it takes text, not tensors)
         prompts = []
+        hints_used = []
         for i in range(input_ids.shape[0]):
             mask = attention_mask[i].bool()
             tokens = input_ids[i][mask].tolist()
@@ -343,7 +431,21 @@ class UnslothBackend:
             # This ensures model generates direct answers, not <think> blocks
             if "</think>" not in text:
                 text = text.rstrip() + "<think>\n</think>\n\n"
+
+            # Inject hints if available for this prompt (EGRS Phase 5)
+            hint_injected = False
+            if prompt_hints and i in prompt_hints:
+                sample_hints = prompt_hints[i]
+                if sample_hints:
+                    # Format hints as guidance text appended to prompt
+                    hint_lines = [f"[{hint}]" for hint in sample_hints.values() if hint]
+                    if hint_lines:
+                        hint_text = "\n".join(hint_lines)
+                        text = text.rstrip() + f"\n\n{hint_text}\n\n"
+                        hint_injected = True
+
             prompts.append(text)
+            hints_used.append(hint_injected)
 
         lora_req = self.weight_loader.lora_request if self.weight_loader else None
         outputs = self.model.fast_generate(
@@ -427,6 +529,7 @@ class UnslothBackend:
             token_ids=token_ids,
             texts=texts,
             logprobs=all_logprobs if has_logprobs else None,
+            hints_used=hints_used if prompt_hints else None,
         )
 
     # Weight sync methods moved to Weight Sync Bus:

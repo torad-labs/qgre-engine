@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import math
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -8,6 +9,13 @@ import torch
 import torch.nn as nn
 
 from qgre.advantages import QGREStepAdvantageEstimator, build_phase_qualities
+from qgre.advantages import apply_egrs_matrix, compute_span_correctness
+from qgre.attention_bonds import (
+    compute_bond_strength,
+    compute_entropy_importance,
+    compute_normalized_entropy,
+    select_attention_layer,
+)
 from qgre.checkpoint import (
     discover_latest_checkpoint,
     load_checkpoint,
@@ -171,6 +179,33 @@ class QGRETrainer:
         self._vprm_initialized = False
         self._vprm_config = config.vprm
         self._vprm_sq = sq
+
+        # EGRS hint registry — tracks (prompt, span) pairs needing hints
+        self.hint_registry = None
+        self.hint_extractor = None
+        if config.egrs.enabled and config.egrs.hint_enabled:
+            from qgre.hints import HintRegistry, make_hamiltonian_hint_extractor, make_generic_hint_extractor
+            self.hint_registry = HintRegistry(
+                mastery_threshold=config.egrs.mastery_threshold,
+            )
+            # Create hint extractor based on config
+            if config.egrs.hint_extractor == "hamiltonian":
+                self.hint_extractor = make_hamiltonian_hint_extractor()
+                logging.getLogger(__name__).info(
+                    "EGRS: Hint registry initialized with Hamiltonian extractor. "
+                    "Q4 hints will use T_expr, V_expr, H_expr from metadata."
+                )
+            elif config.egrs.hint_extractor == "generic" and config.egrs.hint_extractor_mapping:
+                self.hint_extractor = make_generic_hint_extractor(config.egrs.hint_extractor_mapping)
+                logging.getLogger(__name__).info(
+                    f"EGRS: Hint registry initialized with generic extractor. "
+                    f"Mapping: {config.egrs.hint_extractor_mapping}"
+                )
+            else:
+                logging.getLogger(__name__).info(
+                    "EGRS: Hint registry initialized without extractor. "
+                    "Q4 hints will be generic ('Focus on STEP_N')."
+                )
 
         # Loss function (NeMo RL extracted)
         self.loss_fn = ClippedPGLossFn({
@@ -373,6 +408,7 @@ class QGRETrainer:
         completions: list[list[int]],
         reward_results: list[RewardResult],
         generation_logprobs: list[list[float]] | None = None,
+        completion_texts: list[str] | None = None,  # Original texts for span validation
     ) -> dict[str, float]:
         """Execute one training step given pre-generated completions and rewards.
 
@@ -455,18 +491,62 @@ class QGRETrainer:
         # Compute per-token advantages — span-based (if scored_spans populated) or region-based (legacy)
         use_spans = any(rr.scored_spans for rr in reward_results)
         batch_token_masks: list[dict[str, torch.Tensor]] = []  # Available for per-quality loss
+
+        # Debug: log when scored_spans are missing entirely
+        if not use_spans:
+            logging.getLogger(__name__).warning(
+                f"Step {self.global_step}: No scored_spans in batch. "
+                f"scored_spans counts: {[len(rr.scored_spans) if rr.scored_spans else 0 for rr in reward_results]}"
+            )
         if use_spans:
             from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
             # Build per-sample token masks from scored_spans
             batch_token_masks: list[dict[str, torch.Tensor]] = []
             for i, rr in enumerate(reward_results):
                 if rr.scored_spans:
+                    # SPAN VALIDATION: Compare decoded text with reward_fn text
+                    if completion_texts is not None and i < len(completion_texts):
+                        our_decode = self.tokenizer.decode(completions[i], skip_special_tokens=True)
+                        reward_fn_text = completion_texts[i]
+                        if our_decode != reward_fn_text:
+                            _log = logging.getLogger(__name__)
+                            _log.error(
+                                f"SPAN VALIDATION FAILED sample {i}: decoded text != reward_fn text. "
+                                f"Decoded len={len(our_decode)}, reward_fn len={len(reward_fn_text)}. "
+                                f"Character positions will be WRONG. Falling back to segmenter."
+                            )
+                            # Find first difference for debugging
+                            for j, (a, b) in enumerate(zip(our_decode, reward_fn_text)):
+                                if a != b:
+                                    _log.error(f"  First diff at char {j}: decoded='{a}' vs reward_fn='{b}'")
+                                    break
+                            batch_token_masks.append({})  # Skip spans for this sample
+                            continue
+
                     # Build char→token map directly from original token_ids (no re-encoding)
                     char_map = build_char_to_token_map(completions[i], self.tokenizer)
                     if char_map is not None:
                         masks = scored_spans_to_token_masks(rr.scored_spans, char_map, len(completions[i]), self.ctx)
+
+                        # SPAN CONTENT LOGGING: Write to separate file for verification
+                        # Check output/hamiltonian/spans.log to verify spans are correct
+                        if self.global_step % self.config.logging.log_freq == 0 and i == 0:
+                            text = completion_texts[i] if completion_texts and i < len(completion_texts) else None
+                            if text:
+                                span_log_path = Path(self.config.logging.checkpoint_dir).parent / "spans.log"
+                                with open(span_log_path, "a") as f:
+                                    f.write(f"\n=== Step {self.global_step} Sample {i} ===\n")
+                                    for q_name, spans in rr.scored_spans.items():
+                                        for span_idx, (cs, ce) in enumerate(spans):
+                                            span_text = text[cs:ce] if cs < len(text) else "<OUT_OF_BOUNDS>"
+                                            tok_indices = sorted(set(
+                                                char_map[c] for c in range(max(0, cs), min(ce, len(char_map)))
+                                                if char_map[c] >= 0
+                                            ))
+                                            tok_range = f"{tok_indices[0]}-{tok_indices[-1]}" if tok_indices else "NONE"
+                                            display_text = span_text[:80].replace("\n", "\\n")
+                                            f.write(f"  {q_name}[{span_idx}]: chars({cs},{ce}) → toks({tok_range}) '{display_text}'\n")
                     else:
-                        import logging
                         logging.getLogger(__name__).error(
                             f"char_to_token_map returned None for sample {i} — cannot map scored_spans to tokens. "
                             "Falling back to uniform advantage (no span signal). Check tokenizer decode consistency."
@@ -477,19 +557,21 @@ class QGRETrainer:
                 batch_token_masks.append(masks)
 
             # A4: Validate all samples have same mask status (all empty or all populated)
+            # If mixed, clear ALL masks to fall back to segmenter uniformly (no mixed mode)
             mask_statuses = [bool(m) for m in batch_token_masks]
             if mask_statuses and not (all(mask_statuses) or not any(mask_statuses)):
-                import warnings
-                warnings.warn(
-                    f"A4: Heterogeneous batch detected — {sum(mask_statuses)} samples have masks, "
-                    f"{len(mask_statuses) - sum(mask_statuses)} don't. This may cause inconsistent advantage computation."
+                n_with = sum(mask_statuses)
+                n_without = len(mask_statuses) - n_with
+                logging.getLogger(__name__).warning(
+                    f"A4: Heterogeneous batch — {n_with} samples have span masks, {n_without} don't. "
+                    f"Clearing all masks to use uniform segmenter mode (no mixed mode)."
                 )
+                batch_token_masks = [{} for _ in batch_token_masks]  # Clear all masks
 
             # Check if span mapping succeeded for any sample
             # Debug: log span mapping status
             non_empty_masks = sum(1 for m in batch_token_masks if m)
             if non_empty_masks == 0:
-                import logging
                 logging.getLogger(__name__).warning(
                     f"All span mappings failed: {len(batch_token_masks)} samples, "
                     f"scored_spans present: {[bool(rr.scored_spans) for rr in reward_results]}"
@@ -506,8 +588,8 @@ class QGRETrainer:
                     batch_contexts=batch_contexts,
                     ctx=self.ctx,
                 )
-                # Still run segmenter for VPRM critic (needs STEP_N regions for hidden-state pooling)
-                # and KL region weights
+                # Still run segmenter for KL region weights (THINK/FORMAT multipliers).
+                # VPRM critic now uses spans directly via compute_advantages_from_spans.
                 batch_regions = [self.advantage_estimator.segmenter(c) for c in completions]
             else:
                 use_spans = False  # All mappings failed, fall back to segmenter
@@ -723,7 +805,39 @@ class QGRETrainer:
             # Fused saves ~2GB VRAM via chunking. Non-fused materializes full logit tensor.
             if self._use_fused_logprobs:
                 from qgre.fused_logprobs import get_hidden_states_and_lm_head, chunked_logprobs_from_hidden
-                hidden_states, lm_head = get_hidden_states_and_lm_head(self.model, mb_ids, attention_mask=mb_attn_mask)
+                # Optionally extract attentions for bond strength computation
+                # NOTE: Unsloth's fast forward asserts output_attentions=False (inplace attention kernels
+                # don't produce attention matrices). Heuristic detection is unreliable (Unsloth patches
+                # methods without changing class names), so we try the call and catch the AssertionError.
+                # IMPORTANT: Cache the decision so we don't retry every iteration.
+                if not hasattr(self, '_attention_output_attentions'):
+                    self._attention_output_attentions = self.config.algorithm.attention_constrained_advantage
+                output_attentions = self._attention_output_attentions
+                if output_attentions:
+                    try:
+                        hidden_states, lm_head, attentions = get_hidden_states_and_lm_head(
+                            self.model, mb_ids, output_attentions=True, attention_mask=mb_attn_mask
+                        )
+                    except (AssertionError, NotImplementedError) as _attn_err:
+                        # Unsloth's fast forward asserts output_attentions=False.
+                        # Fall back to hidden state + entropy proxy for importance.
+                        logging.getLogger(__name__).warning(
+                            f"Attention extraction failed ({type(_attn_err).__name__}), "
+                            f"using hidden state + entropy proxy for importance constraint"
+                        )
+                        self._attention_output_attentions = False
+                        self._attention_disabled_reason = "unsloth_incompatible"
+                        self._use_importance_proxy = True  # Use proxy instead
+                        # Retry without attention extraction
+                        hidden_states, lm_head = get_hidden_states_and_lm_head(
+                            self.model, mb_ids, attention_mask=mb_attn_mask
+                        )
+                        attentions = None
+                else:
+                    hidden_states, lm_head = get_hidden_states_and_lm_head(
+                        self.model, mb_ids, attention_mask=mb_attn_mask
+                    )
+                    attentions = None
                 if hidden_states is not None and lm_head is not None:
                     # Fused path: chunked lm_head + checkpoint avoids full [seq, vocab] logit tensor.
                     mb_lp = chunked_logprobs_from_hidden(
@@ -752,6 +866,56 @@ class QGRETrainer:
                                 )
                             del std_lp
                         self._fused_validated = True
+                    # Compute importance for advantage constraint
+                    # Priority: attention bond strength > hidden state proxy > disabled
+                    if attentions is not None:
+                        # VRAM fix: sample ONE layer only, not all layers
+                        layer_idx = self.config.algorithm.attention_sample_layer
+                        attention_single = select_attention_layer(attentions, layer_idx)
+                        if self.global_step == 0 and not getattr(self, '_attn_logged', False):
+                            shape = attention_single.shape
+                            vram_mb = shape[0] * shape[1] * shape[2] * shape[3] * 4 / 1024 / 1024
+                            logging.getLogger(__name__).info(
+                                f"Attention constraint enabled (attention mode): layer={layer_idx}, "
+                                f"shape={list(shape)}, estimated_vram={vram_mb:.1f}MB"
+                            )
+                            self._attn_logged = True
+                        bond_strength = compute_bond_strength(
+                            attention_single,
+                            seq_len=mb_ids.shape[1],
+                            mode=self.config.algorithm.attention_constraint_mode,
+                        )
+                        mb_token_entropy = None  # EGRS not supported with attention mode
+                        del attentions
+                    elif getattr(self, '_use_importance_proxy', False) and self.config.algorithm.attention_constrained_advantage:
+                        # Attention unavailable but constraint enabled — use ERIC (entropy-regulated importance)
+                        # Compute completion logits for entropy (no_grad, just for importance signal)
+                        if self.global_step == 0 and not getattr(self, '_proxy_logged', False):
+                            logging.getLogger(__name__).info(
+                                f"Attention constraint enabled (ERIC mode): entropy_position with "
+                                f"decay={self.config.algorithm.attention_position_decay}"
+                            )
+                            self._proxy_logged = True
+                        # Get completion portion of hidden states for entropy computation
+                        # This is VRAM-safe: we only materialize logits for completion tokens
+                        with torch.no_grad():
+                            # Compute logits for completion tokens only (shifted by 1 for next-token)
+                            completion_logits = lm_head(hidden_states[:, :-1, :]).float()
+                        bond_strength = compute_entropy_importance(
+                            completion_logits,
+                            seq_len=completion_logits.shape[1],
+                            mode=self.config.algorithm.attention_constraint_mode,
+                            position_decay=self.config.algorithm.attention_position_decay,
+                        )
+                        # EGRS: compute normalized token entropy for 2x2 matrix
+                        if self.config.egrs.enabled:
+                            mb_token_entropy = compute_normalized_entropy(completion_logits)
+                        else:
+                            mb_token_entropy = None
+                        del completion_logits
+                    else:
+                        bond_strength = None
+                        mb_token_entropy = None
                     # Keep hidden_states for VPRM critic if enabled; else free memory
                     mb_hidden_states = hidden_states.detach() if self.config.vprm.enabled else None
                     del hidden_states
@@ -768,7 +932,35 @@ class QGRETrainer:
                 # Costs ~2GB more VRAM than fused (materializes full [seq, vocab] tensor).
                 # This is the degraded-but-correct escape hatch.
                 from qgre.fused_logprobs import get_hidden_states_and_lm_head
-                hs, lm_head_nf = get_hidden_states_and_lm_head(self.model, mb_ids, attention_mask=mb_attn_mask)
+                # Optionally extract attentions for bond strength computation
+                # NOTE: Unsloth's fast forward asserts output_attentions=False. Uses same cached
+                # decision as fused path (try call, catch AssertionError, disable and retry).
+                if not hasattr(self, '_attention_output_attentions'):
+                    self._attention_output_attentions = self.config.algorithm.attention_constrained_advantage
+                output_attentions = self._attention_output_attentions
+                if output_attentions:
+                    try:
+                        hs, lm_head_nf, attentions = get_hidden_states_and_lm_head(
+                            self.model, mb_ids, output_attentions=True, attention_mask=mb_attn_mask
+                        )
+                    except (AssertionError, NotImplementedError) as _attn_err:
+                        # Same as fused path: fall back to proxy
+                        logging.getLogger(__name__).warning(
+                            f"Attention extraction failed ({type(_attn_err).__name__}), "
+                            f"using hidden state + entropy proxy for importance constraint"
+                        )
+                        self._attention_output_attentions = False
+                        self._attention_disabled_reason = "unsloth_incompatible"
+                        self._use_importance_proxy = True
+                        hs, lm_head_nf = get_hidden_states_and_lm_head(
+                            self.model, mb_ids, attention_mask=mb_attn_mask
+                        )
+                        attentions = None
+                else:
+                    hs, lm_head_nf = get_hidden_states_and_lm_head(
+                        self.model, mb_ids, attention_mask=mb_attn_mask
+                    )
+                    attentions = None
                 if hs is None or lm_head_nf is None:
                     raise RuntimeError(
                         f"Step {self.global_step}: model did not return hidden states. "
@@ -776,6 +968,42 @@ class QGRETrainer:
                         f"Delete unsloth_compiled_cache/ and restart."
                     )
                 mb_logits = lm_head_nf(hs[:, :-1, :]).float()
+                # Compute importance for advantage constraint
+                if attentions is not None:
+                    layer_idx = self.config.algorithm.attention_sample_layer
+                    attention_single = select_attention_layer(attentions, layer_idx)
+                    if self.global_step == 0 and not getattr(self, '_attn_logged', False):
+                        shape = attention_single.shape
+                        vram_mb = shape[0] * shape[1] * shape[2] * shape[3] * 4 / 1024 / 1024
+                        logging.getLogger(__name__).info(
+                            f"Attention constraint enabled (attention mode): layer={layer_idx}, "
+                            f"shape={list(shape)}, estimated_vram={vram_mb:.1f}MB"
+                        )
+                        self._attn_logged = True
+                    bond_strength = compute_bond_strength(
+                        attention_single,
+                        seq_len=mb_ids.shape[1],
+                        mode=self.config.algorithm.attention_constraint_mode,
+                    )
+                    del attentions
+                elif getattr(self, '_use_importance_proxy', False) and self.config.algorithm.attention_constrained_advantage:
+                    # Attention unavailable but constraint enabled — use ERIC (entropy-regulated importance)
+                    # mb_logits already computed above, reuse for entropy
+                    if self.global_step == 0 and not getattr(self, '_proxy_logged', False):
+                        logging.getLogger(__name__).info(
+                            f"Attention constraint enabled (ERIC mode): entropy_position with "
+                            f"decay={self.config.algorithm.attention_position_decay}"
+                        )
+                        self._proxy_logged = True
+                    # mb_logits is [batch, seq-1, vocab] from line 923
+                    bond_strength = compute_entropy_importance(
+                        mb_logits,
+                        seq_len=mb_logits.shape[1],
+                        mode=self.config.algorithm.attention_constraint_mode,
+                        position_decay=self.config.algorithm.attention_position_decay,
+                    )
+                else:
+                    bond_strength = None
                 mb_hidden_states = hs.detach() if self.config.vprm.enabled else None
                 del hs
                 mb_lp = logprobs_from_logits(mb_logits, mb_ids[:, 1:])
@@ -825,7 +1053,6 @@ class QGRETrainer:
                     orig_i = _spo_filter_idx[filtered_i] if _spo_filter_idx is not None else filtered_i
                     # TL-R2-03: Validate orig_i before access
                     if orig_i >= len(batch_regions):
-                        import logging
                         logging.getLogger(__name__).warning(
                             f"TL-R2-03: VPRM orig_i={orig_i} >= len(batch_regions)={len(batch_regions)} "
                             f"— skipping sample (SPO filter index mapping corrupted micro-batch)"
@@ -856,6 +1083,25 @@ class QGRETrainer:
                         comp_len = sample_hs.shape[0]
                     sample_hs_trimmed = sample_hs[:comp_len]
 
+                    # Get span token masks for this sample if available
+                    # Note: batch_token_masks is reindexed by SPO filter (line 714), so use filtered_i not orig_i
+                    sample_token_masks = batch_token_masks[filtered_i] if batch_token_masks and filtered_i < len(batch_token_masks) else None
+
+                    # Extract bond strength for this sample if available
+                    sample_bond_strength = None
+                    if bond_strength is not None:
+                        # bond_strength shape: [micro_batch_size, seq_len]
+                        # Extract for this sample and trim to completion length
+                        sample_bond_strength = bond_strength[mb_i, :comp_len].to(device)
+                        # Log bond strength stats periodically
+                        if self.global_step % 10 == 0 and mb_i == 0 and filtered_i == 0:
+                            bs = sample_bond_strength
+                            logging.getLogger(__name__).warning(
+                                f"Step {self.global_step} bond_strength: "
+                                f"min={bs.min().item():.4f}, max={bs.max().item():.4f}, "
+                                f"mean={bs.mean().item():.4f}, nonzero={(bs > 0).sum().item()}/{len(bs)}"
+                            )
+
                     vprm_advs, vprm_loss, used_critic = compute_advantages_vprm(
                         critic=self.vprm_critic,
                         hidden_states=sample_hs_trimmed,
@@ -870,6 +1116,9 @@ class QGRETrainer:
                         aspiration_beta=self.advantage_estimator._aspiration_beta * batch_contexts[orig_i].aspiration_warmup if orig_i < len(batch_contexts) else 0.0,
                         aspiration_target=batch_contexts[orig_i].aspiration_target if orig_i < len(batch_contexts) else 0.8,
                         ctx=self.ctx,
+                        token_masks=sample_token_masks,  # Pass span masks for span-aware critic
+                        bond_strength=sample_bond_strength,  # Pass attention bond strength
+                        constraint_strength=self.config.algorithm.attention_constraint_strength,
                     )
 
                     if used_critic:
@@ -884,6 +1133,81 @@ class QGRETrainer:
                         mb_critic_count += 1
 
                 del mb_hidden_states
+
+            # EGRS 2x2 matrix: modify advantages based on (correct/wrong) x (confident/uncertain)
+            # This replaces the simpler ERIC dampening when EGRS is enabled
+            mb_entropy_adjustments = None
+            if self.config.egrs.enabled and mb_token_entropy is not None:
+                egrs_cfg = self.config.egrs
+                mb_entropy_adjustments = torch.zeros_like(mb_advs)
+                for mb_i in range(mb_advs.shape[0]):
+                    filtered_i = mb_start + mb_i
+                    if _spo_filter_idx is not None:
+                        orig_i = _spo_filter_idx[filtered_i]
+                    else:
+                        orig_i = filtered_i
+                    if orig_i >= len(batch_regions):
+                        logging.getLogger(__name__).warning(
+                            f"EGRS: orig_i={orig_i} >= len(batch_regions)={len(batch_regions)} — "
+                            "skipping sample (SPO filter index mapping corrupted)"
+                        )
+                        continue
+                    sample_regions = batch_regions[orig_i]
+                    sample_rr = reward_results[orig_i] if orig_i < len(reward_results) else None
+                    if sample_rr is None:
+                        logging.getLogger(__name__).warning(
+                            f"EGRS: reward_results[{orig_i}] is None — sample skipped. "
+                            "Check if reward_fn returned None instead of RewardResult."
+                        )
+                        continue
+                    # Compute span correctness from reward result
+                    span_correct = compute_span_correctness(
+                        sample_rr, self.step_qualities, egrs_cfg.reward_threshold
+                    )
+                    # Get token entropy for this sample (trim to match)
+                    comp_len = min(len(sample_regions), mb_token_entropy.shape[1])
+                    sample_entropy = mb_token_entropy[mb_i, :comp_len]
+                    sample_advs = mb_advs[mb_i, :comp_len]
+                    # Get importance for ERIC dampening (if available)
+                    sample_importance = None
+                    if bond_strength is not None and mb_i < bond_strength.shape[0]:
+                        sample_importance = bond_strength[mb_i, :comp_len]
+                    # Apply EGRS matrix with ERIC dampening for Q1
+                    modified_advs, entropy_adj, hint_flags = apply_egrs_matrix(
+                        sample_advs,
+                        sample_regions[:comp_len],
+                        sample_entropy,
+                        span_correct,
+                        entropy_threshold=egrs_cfg.entropy_threshold,
+                        gate_temperature=egrs_cfg.gate_temperature,
+                        exploration_weight=egrs_cfg.exploration_weight,
+                        importance=sample_importance,
+                        eric_strength=self.config.algorithm.attention_constraint_strength,
+                    )
+                    # Update advantages in place
+                    mb_advs[mb_i, :comp_len] = modified_advs
+                    mb_entropy_adjustments[mb_i, :comp_len] = entropy_adj
+                    # Flag hints for registry (if enabled)
+                    # Extract hint tokens using hint_extractor if available
+                    if self.hint_registry is not None and hint_flags:
+                        prompt_id = batch.prompt_ids[orig_i] if orig_i < len(batch.prompt_ids) else -1
+                        sample_meta = batch.metadata[orig_i] if orig_i < len(batch.metadata) else {}
+                        for step_num, t in hint_flags:
+                            span_id = f"STEP_{step_num}" if step_num > 0 else "THINK"
+                            # Extract hint tokens using extractor if available
+                            hint_tokens = []
+                            if self.hint_extractor is not None:
+                                hint_text = self.hint_extractor(span_id, sample_meta)
+                                if hint_text:
+                                    # Tokenize hint text (limit to hint_token_count)
+                                    hint_tokens = self.tokenizer.encode(
+                                        hint_text, add_special_tokens=False
+                                    )[:self.config.egrs.hint_token_count * 10]  # Allow more tokens for math
+                            self.hint_registry.flag_for_hint(
+                                prompt_id, span_id, hint_tokens,
+                                current_mastery=self.game_state.get_skill_mastery(f"prompt_{prompt_id}") if hasattr(self.game_state, 'get_skill_mastery') else 0.0,
+                                current_step=self.global_step,
+                            )
 
             # Align advantages + KL weights with logprob positions:
             # mb_lp[t] = log P(token t+1 | tokens 0..t), so it needs advantage[t+1]
@@ -998,6 +1322,32 @@ class QGRETrainer:
                 if mb_critic_loss.requires_grad:
                     mb_loss = mb_loss + critic_weight * mb_critic_loss
                     mb_metrics["critic_loss"] = mb_critic_loss.item()
+
+            # EGRS entropy loss: maximize entropy for Q3 (confident+wrong) tokens
+            # Formula: loss += -sum(adjustment * entropy) where adjustment > 0 for Q3
+            # Minimizing negative entropy = maximizing entropy (shakes confidence)
+            if self.config.egrs.enabled and mb_entropy_adjustments is not None and mb_token_entropy is not None:
+                # Align with shifted positions (entropy_adjustments[t] applies to token t)
+                adj_shifted = mb_entropy_adjustments[:, 1:]
+                ent_shifted = mb_token_entropy[:, 1:]
+                adj_min_len = min(adj_shifted.shape[1], ent_shifted.shape[1], min_len)
+                # Mask to completion tokens only
+                egrs_mask = mb_mask[:, :adj_min_len].float()
+                egrs_adj = adj_shifted[:, :adj_min_len]
+                egrs_ent = ent_shifted[:, :adj_min_len]
+                # Sum over tokens with positive adjustment (Q3 only)
+                egrs_loss = -(egrs_adj * egrs_ent * egrs_mask).sum()
+                if egrs_loss.abs() > 0:
+                    mb_loss = mb_loss + egrs_loss
+                    mb_metrics["egrs_entropy_loss"] = egrs_loss.item()
+                # Log quadrant distribution for debugging
+                # Q1: uncertain+correct (scaled advantage), Q2: confident+correct (zero),
+                # Q3: confident+wrong (entropy boost), Q4: uncertain+wrong (hint flag)
+                with torch.no_grad():
+                    q3_count = (egrs_adj > 0).sum().item()
+                    mb_metrics["egrs/q3_tokens"] = q3_count
+                    # Note: Q1/Q2/Q4 counts require per-sample tracking done in apply_egrs_matrix loop
+                    # The hint_registry tracks Q4 flags if enabled
 
             # Check for NaN BEFORE backward
             if torch.isnan(mb_loss).any():
@@ -1299,6 +1649,7 @@ class QGRETrainer:
             vprm_optimizer_state=self.vprm_optimizer.state_dict() if self.vprm_optimizer else None,
             dataloader_state=self._dataloader.state_dict() if self._dataloader else None,
             training_context=self.ctx.to_dict(),
+            hint_registry_state=self.hint_registry.to_dict() if self.hint_registry else None,
             trainer_state=trainer_state,  # Use StateSpec instead of individual fields
         )
 
@@ -1436,6 +1787,13 @@ class QGRETrainer:
             if checkpoint.vprm_optimizer_state:
                 self.vprm_optimizer.load_state_dict(checkpoint.vprm_optimizer_state)
             self._vprm_initialized = True
+        # Restore EGRS hint registry (if saved)
+        if checkpoint.hint_registry_state and self.config.egrs.enabled:
+            from qgre.hints import HintRegistry
+            self.hint_registry = HintRegistry.from_dict(checkpoint.hint_registry_state)
+            logging.getLogger(__name__).info(
+                f"EGRS: Restored hint registry with {len(self.hint_registry)} entries"
+            )
         # CheckpointState: RNG state is in trainer
         if checkpoint.trainer.rng_state is not None:
             import warnings
@@ -1828,11 +2186,79 @@ class QGRETrainer:
 
                 generation_succeeded = False
                 output = None
+
+                # EGRS Phase 5: Extract hints from registry for this batch
+                prompt_hints = None
+                if self.hint_registry is not None and self.config.egrs.hint_enabled:
+                    prompt_hints = {}
+                    # Track generic hint usage for warning
+                    generic_hint_count = 0
+                    real_hint_count = 0
+
+                    for i, pid in enumerate(batch.prompt_ids):
+                        # Get tier for this prompt (from metadata or default)
+                        meta = batch.metadata[i] if i < len(batch.metadata) else {}
+                        tier = meta.get("tier", "default")
+
+                        # Create mastery lookup function for this prompt's tier
+                        # Maps span_id (e.g., "STEP_1") -> mastery from tier_mastery[tier][step_num]
+                        # Track malformed span_ids to warn once per pattern
+                        if not hasattr(self, '_egrs_malformed_span_ids'):
+                            self._egrs_malformed_span_ids = set()
+
+                        def make_mastery_fn(t: str, malformed_set: set):
+                            def mastery_fn(span_id: str) -> float:
+                                if span_id.startswith("STEP_"):
+                                    try:
+                                        step_num = int(span_id.split("_")[1])
+                                        return self.game_state.get_tier_step_mastery(t, step_num)
+                                    except (IndexError, ValueError):
+                                        if span_id not in malformed_set:
+                                            malformed_set.add(span_id)
+                                            logging.getLogger(__name__).warning(
+                                                f"EGRS: Malformed span_id '{span_id}' in mastery_fn. "
+                                                "Cannot parse step number. Using mastery=0.0 (100% hint probability)."
+                                            )
+                                        return 0.0
+                                elif span_id == "THINK":
+                                    return self.game_state.get_tier_step_mastery(t, 0)
+                                return 0.0
+                            return mastery_fn
+
+                        # Query hints with per-span mastery lookup
+                        sample_hints = self.hint_registry.get_hints_for_prompt(
+                            pid, mastery_fn=make_mastery_fn(tier, self._egrs_malformed_span_ids)
+                        )
+                        if sample_hints:
+                            # Convert token hints to text hints
+                            text_hints = {}
+                            for span_id, tokens in sample_hints.items():
+                                if tokens:
+                                    # Decode hint tokens to text
+                                    hint_text = self.tokenizer.decode(tokens, skip_special_tokens=True)
+                                    text_hints[span_id] = f"Hint for {span_id}: {hint_text}"
+                                    real_hint_count += 1
+                                else:
+                                    # No tokens - use generic hint (less useful)
+                                    text_hints[span_id] = f"Focus on getting {span_id} correct"
+                                    generic_hint_count += 1
+                            if text_hints:
+                                prompt_hints[i] = text_hints
+                    # Warn if all hints are generic (indicates extractor not configured or metadata missing)
+                    if generic_hint_count > 0 and real_hint_count == 0 and self.global_step % 100 == 0:
+                        extractor_status = "configured" if self.hint_extractor else "not configured"
+                        logging.getLogger(__name__).warning(
+                            f"EGRS: All {generic_hint_count} hints are generic (empty tokens). "
+                            f"Hint extractor: {extractor_status}. "
+                            "Check egrs.hint_extractor config and metadata columns."
+                        )
+
                 try:
                     _dev = next((p.device for p in self.model.parameters() if p.device.type != "cpu"), next(self.model.parameters()).device)
                     output = backend.generate(
                         batch.input_ids.to(_dev),
                         batch.attention_mask.to(_dev),
+                        prompt_hints=prompt_hints,
                     )
                     generation_succeeded = True
                 finally:
@@ -1855,12 +2281,61 @@ class QGRETrainer:
                 assert len(reward_results) == len(output.token_ids), \
                     f"reward_results length ({len(reward_results)}) != completions length ({len(output.token_ids)})"
 
+                # EGRS Phase 5: Track hint success/failure for registry clearing
+                # With n_completions > 1, same prompt_id appears multiple times.
+                # Aggregate results per (prompt_id, span_id) before updating registry:
+                # - ANY failure → record_failure (model hasn't learned)
+                # - ALL succeeded WITHOUT hint → can graduate
+                # - ALL succeeded but some WITH hint → don't graduate yet
+                if self.hint_registry is not None and self.config.egrs.hint_enabled:
+                    # Aggregate: (prompt_id, span_id) -> {successes_without_hint, successes_with_hint, failures}
+                    span_outcomes: dict[tuple[int, str], dict[str, int]] = {}
+                    for i, (pid, rr) in enumerate(zip(batch.prompt_ids, reward_results)):
+                        hint_was_used = (
+                            output.hints_used is not None
+                            and i < len(output.hints_used)
+                            and output.hints_used[i]
+                        )
+                        span_correct = compute_span_correctness(
+                            rr, self.step_qualities, self.config.egrs.reward_threshold
+                        )
+                        for step_num, is_correct in span_correct.items():
+                            span_id = f"STEP_{step_num}" if step_num > 0 else "THINK"
+                            key = (pid, span_id)
+                            if key not in span_outcomes:
+                                span_outcomes[key] = {"success_no_hint": 0, "success_with_hint": 0, "failure": 0}
+                            if is_correct:
+                                if hint_was_used:
+                                    span_outcomes[key]["success_with_hint"] += 1
+                                else:
+                                    span_outcomes[key]["success_no_hint"] += 1
+                            else:
+                                span_outcomes[key]["failure"] += 1
+
+                    # Now update registry once per (prompt_id, span_id)
+                    for (pid, span_id), counts in span_outcomes.items():
+                        if counts["failure"] > 0:
+                            # Any failure means model hasn't learned - reset streak
+                            if (pid, span_id) in self.hint_registry:
+                                self.hint_registry.record_failure(pid, span_id)
+                        elif counts["success_no_hint"] > 0 and counts["success_with_hint"] == 0:
+                            # All successes were WITHOUT hint - can graduate
+                            graduated = self.hint_registry.record_success(pid, span_id, hint_was_used=False)
+                            if graduated and self.global_step % 50 == 0:
+                                logging.getLogger(__name__).info(
+                                    f"EGRS: Prompt {pid} {span_id} graduated (no longer needs hints)"
+                                )
+                        else:
+                            # All succeeded but some needed hint - don't graduate yet
+                            self.hint_registry.record_success(pid, span_id, hint_was_used=True)
+
                 # 3. Train step (training mode)
                 if hasattr(backend, "set_training_mode"):
                     backend.set_training_mode()
                 metrics = self.step(
                     batch, output.token_ids, reward_results,
                     generation_logprobs=output.logprobs,
+                    completion_texts=output.texts,  # Pass for span validation
                 )
 
                 # 3b. Update prioritized sampling weights (SPO paper Section 3.2)
