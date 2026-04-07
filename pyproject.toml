@@ -438,7 +438,7 @@ reportImplicitOverride = "none"  # Style preference - @override decorator option
 # Bandit - Security linter
 # =============================================================================
 [tool.bandit]
-exclude_dirs = ["tests", "examples"]
+exclude_dirs = ["tests", "examples", "scripts"]  # scripts/ has dev tools, not prod code
 skips = [
     "B101",  # assert used (we use it intentionally for invariants)
     "B311",  # random not for crypto (we use torch random for ML)

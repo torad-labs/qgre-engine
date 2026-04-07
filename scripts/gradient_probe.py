@@ -106,7 +106,7 @@ def analyze_results(tracked_params, config_advantage_scale, lr):
         print(f"\n  {name}:")
         print(f"    weight norm: {weight_norm:.4f}")
         print(f"    delta norm:  {delta_norm:.8f}")
-        print(f"    relative:    {relative:.8f} ({relative*100:.6f}%)")
+        print(f"    relative:    {relative:.8f} ({relative * 100:.6f}%)")
 
         if "lm_head" in name:
             # Per-row delta for physics tokens
@@ -161,9 +161,9 @@ def analyze_results(tracked_params, config_advantage_scale, lr):
             print(f"    Per-row per-step delta: {per_row_per_step:.10f}")
             print(f"    Logit nudge per step: {logit_nudge_per_step:.8f}")
             print(f"    Logit gap (physics tokens): {logit_gap:.2f}")
-            print(f"    Nudge as % of gap per step: {logit_nudge_per_step/logit_gap*100:.6f}%")
+            print(f"    Nudge as % of gap per step: {logit_nudge_per_step / logit_gap * 100:.6f}%")
             print(
-                f"    Steps to close 10% of gap: {0.1*logit_gap/max(logit_nudge_per_step, 1e-15):.0f}"
+                f"    Steps to close 10% of gap: {0.1 * logit_gap / max(logit_nudge_per_step, 1e-15):.0f}"
             )
 
             # Optimal scale for different nudge targets

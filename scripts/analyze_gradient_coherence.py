@@ -153,9 +153,9 @@ def main():
     # Detect transitions
     transitions = detect_transitions(measurements)
 
-    print(f"\n{'-'*80}")
+    print(f"\n{'-' * 80}")
     print(f"DETECTED TRANSITIONS: {len(transitions)}")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
 
     for t in transitions:
         print(f"\nStep {t['step']} | Phase {t['prev_phase']} → {t['curr_phase']}")
@@ -167,9 +167,9 @@ def main():
     # Summarize by phase
     phase_summary = summarize_by_phase(measurements)
 
-    print(f"\n{'-'*80}")
+    print(f"\n{'-' * 80}")
     print("SUMMARY BY PHASE")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
 
     for phase in sorted(phase_summary.keys()):
         stats = phase_summary[phase]
@@ -187,9 +187,9 @@ def main():
         )
 
     # Detect laminar→turbulent transition
-    print(f"\n{'-'*80}")
+    print(f"\n{'-' * 80}")
     print("LAMINAR → TURBULENT DIAGNOSIS")
-    print(f"{'-'*80}")
+    print(f"{'-' * 80}")
 
     phases_sorted = sorted(phase_summary.keys())
     if len(phases_sorted) >= 2:
@@ -217,7 +217,7 @@ def main():
                     print("   → GRADIENT INSTABILITY: some layers exploding, others vanishing")
                     print('   → "Energy dissipating" — unstable optimization dynamics')
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
 
     return 0
 

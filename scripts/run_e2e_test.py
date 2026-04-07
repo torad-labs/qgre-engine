@@ -123,7 +123,7 @@ def write_step_table_html(
     ):
         bg = "#f9f9f9" if i % 2 == 0 else "#ffffff"
         html_file.write(f'<tr style="background:{bg}; vertical-align:top;">')
-        html_file.write(f"<td>{i+1}</td>")
+        html_file.write(f"<td>{i + 1}</td>")
         html_file.write(f'<td style="white-space:pre-wrap;">{html_mod.escape(prompt)}</td>')
         html_file.write(
             f'<td style="white-space:pre-wrap; font-size:12px;">{html_mod.escape(completion)}</td>'
@@ -305,7 +305,10 @@ def main():
             f'<span class="metric">Reward: {metrics.get("reward/mean", 0.0):.3f}</span>'
         )
         html_file.write(f'<span class="metric">Phase: {game_state.phase}</span>')
-        html_file.writelines(f'<span class="metric">Mastery S{sn}: {game_state.get_step_mastery(sn):.3f}</span>' for sn in sorted(step_qualities.keys()))
+        html_file.writelines(
+            f'<span class="metric">Mastery S{sn}: {game_state.get_step_mastery(sn):.3f}</span>'
+            for sn in sorted(step_qualities.keys())
+        )
         html_file.write(f'<span class="metric">VRAM: {vram_now:.2f}/{vram_peak:.2f} GB</span>')
         html_file.write("</div>\n")
 
@@ -321,13 +324,13 @@ def main():
     html_file.write("</body></html>\n")
     html_file.close()
 
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("  TEST COMPLETE")
     print(f"  Final phase: {game_state.phase}")
     print(f"  Steps trained: {trainer.global_step}")
     print(f"  VRAM peak: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
     print(f"  HTML results: {output_path.resolve()}")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
 
 if __name__ == "__main__":

@@ -79,9 +79,9 @@ def main():
     N_STEPS = 50
     MAX_TOKENS = 4096
 
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"  Long Training Run — {N_STEPS} steps × 8 prompts × {MAX_TOKENS} max_tokens")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     config = QGREConfig.from_yaml("examples/hypergraph/config.yaml")
     config.training.total_steps = N_STEPS
@@ -172,15 +172,15 @@ def main():
             phase = trainer.game_state.phase
             avg_tokens = sum(len(t) for t in gen_output.token_ids) / len(gen_output.token_ids)
             print(
-                f"  Step {step+1:3d}/{N_STEPS} | loss={loss:+.6f} | reward={reward_mean:.3f} | "
+                f"  Step {step + 1:3d}/{N_STEPS} | loss={loss:+.6f} | reward={reward_mean:.3f} | "
                 f"mastery_s1={mastery:.3f} | phase={phase} | "
                 f"avg_tokens={avg_tokens:.0f} | VRAM={vram_now:.2f}/{vram_peak:.2f} GB"
             )
 
     # Summary
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print(f"  TRAINING COMPLETE — {N_STEPS} steps")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
     print(f"  Final phase: {trainer.game_state.phase}")
     print(f"  Final mastery (step 1): {trainer.game_state.get_step_mastery(1):.3f}")
     print(f"  Loss range: [{min(losses):.6f}, {max(losses):.6f}]")

@@ -122,7 +122,7 @@ def measure_logit_statistics(model_id: str = "Qwen/Qwen3-1.7B"):
     for i in range(len(physics_names)):
         for j in range(i + 1, len(physics_names)):
             print(
-                f"    {physics_names[i]}|{physics_names[j]}: {cosine_sim[i,j]:.4f} (dist={1-cosine_sim[i,j].item():.4f})"
+                f"    {physics_names[i]}|{physics_names[j]}: {cosine_sim[i, j]:.4f} (dist={1 - cosine_sim[i, j].item():.4f})"
             )
 
     # Compute expected logit difference between two physics tokens
@@ -203,16 +203,16 @@ def compute_optimal_advantage_scale(
         lr * lora_scaling * expected_raw_advantage * mean_span_tokens
     )
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("OPTIMAL ADVANTAGE SCALE COMPUTATION")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print("\nInputs:")
     print(f"  Learning rate: {lr}")
     print(f"  LoRA rank: {lora_rank}, alpha: {lora_alpha}, scaling: {lora_scaling}")
     print(f"  Expected raw advantage: {expected_raw_advantage}")
     print(f"  Mean span tokens per quality: {mean_span_tokens}")
     print(
-        f"  Target nudge fraction: {target_nudge_fraction} ({target_nudge_fraction*100}% of logit gap per step)"
+        f"  Target nudge fraction: {target_nudge_fraction} ({target_nudge_fraction * 100}% of logit gap per step)"
     )
     print("\nLogit space:")
     print(f"  Expected logit diff (physics tokens): {expected_logit_diff:.2f}")

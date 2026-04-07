@@ -249,10 +249,8 @@ class StructuredOutputParser:
             # Must start with d or \frac{d to be a Hamilton equation
             if "=" in cleaned:
                 # Check for dq/dt or dp/dt pattern at start of expression
-                if (
-                    (lower.startswith("d")
-                    and "/dt" in lower)
-                    or ("\\frac{d" in cleaned.lower() or "frac{d" in lower)
+                if (lower.startswith("d") and "/dt" in lower) or (
+                    "\\frac{d" in cleaned.lower() or "frac{d" in lower
                 ):
                     expr = self._clean_expression(cleaned)
                     if expr not in equations:

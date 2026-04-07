@@ -319,14 +319,14 @@ def main():
         fails += 2
 
     # ========== SUMMARY ==========
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     total = passes + fails
     print(f"  CHECKLIST RESULT: {passes}/{total} passed, {fails} failed")
     if fails == 0:
         print("  ALL CHECKS PASSED")
     else:
         print("  FAILURES DETECTED — review above")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     # Cleanup
     import shutil

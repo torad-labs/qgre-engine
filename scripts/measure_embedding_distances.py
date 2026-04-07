@@ -75,9 +75,9 @@ def load_embeddings_only(model_id: str) -> tuple[torch.Tensor, "PreTrainedTokeni
     from huggingface_hub import hf_hub_download
     from transformers import AutoConfig, AutoTokenizer
 
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"Loading embeddings from {model_id}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     # Load tokenizer (small download)
     tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)

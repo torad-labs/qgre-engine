@@ -903,7 +903,7 @@ def _adversarial():
                         f"What physical system does this describe?"
                     ),
                     "system_prompt": TIER_SYSTEM_PROMPTS["adversarial"],
-                    "ground_truth": f"H = {a}*p**2 + {b}*x**2; dq/dt = {2*a}*p; dp/dt = -{2*b}*x",
+                    "ground_truth": f"H = {a}*p**2 + {b}*x**2; dq/dt = {2 * a}*p; dp/dt = -{2 * b}*x",
                     "H_expr": str(H),
                     "T_expr": str(T),
                     "V_expr": str(V),
