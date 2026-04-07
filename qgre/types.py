@@ -139,7 +139,7 @@ class DataLoaderState:
     epoch: int = 0
     step_in_epoch: int = 0
     total_steps: int = 0
-    priority_weights: list[float] | None = None
+    priority_weights: list[float] | dict[str, float] | None = None
     difficulty_gate: tuple[set[str], str] | None = None
 
 
@@ -499,6 +499,12 @@ class CheckpointState:
                 raise TypeError(
                     f"Expected dict for 'trainer', got {type(trainer_d).__name__}. "
                     "Checkpoint may be corrupted.",
+                )
+            # Validate critical fields exist
+            if "global_step" not in trainer_d:
+                raise ValueError(
+                    "Missing required field 'global_step' in trainer state. "
+                    "Checkpoint may be corrupted or from incompatible version.",
                 )
             trainer = TrainerState(**trainer_d)
 

@@ -299,7 +299,7 @@ DATALOADER_STATE_SCHEMA: dict[str, FieldSpec] = {
     "epoch": FieldSpec(int, Required.NO, default=0, validate=non_negative),
     "step_in_epoch": FieldSpec(int, Required.NO, default=0, validate=non_negative),
     "total_steps": FieldSpec(int, Required.NO, default=0, validate=non_negative),
-    "priority_weights": FieldSpec((list, type(None)), Required.NO, default=None),
+    "priority_weights": FieldSpec((list, dict, type(None)), Required.NO, default=None),
     "difficulty_gate": FieldSpec((tuple, type(None)), Required.NO, default=None),
 }
 

@@ -72,11 +72,28 @@ def gamestate_from_dict(d: dict) -> GameState:
     gs.quality_window_size = validated["quality_window_size"]
 
     # tier_phases with int coercion (schema validates dict, we coerce values)
-    tier_phases_raw = validated["tier_phases"] or {"default": validated.get("phase", 1)}
-    gs.tier_phases = {k: int(v) for k, v in tier_phases_raw.items()}
+    # Handle migration: if tier_phases is empty/None but "phase" exists (old format), use phase
+    tier_phases_raw = validated["tier_phases"]
+    if not tier_phases_raw:  # None or empty dict
+        tier_phases_raw = {"default": validated.get("phase", 1)}
+    try:
+        gs.tier_phases = {k: int(v) for k, v in tier_phases_raw.items()}
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"Invalid tier_phases values (expected int-coercible, got non-numeric): {tier_phases_raw}. Error: {e}"
+        ) from e
     gs.active_tiers = validated["active_tiers"]
-    tier_steps_raw = validated["tier_steps_at_phase_start"] or {}
-    gs.tier_steps_at_phase_start = {k: int(v) for k, v in tier_steps_raw.items()}
+    tier_steps_raw = (
+        validated["tier_steps_at_phase_start"]
+        if validated["tier_steps_at_phase_start"] is not None
+        else {}
+    )
+    try:
+        gs.tier_steps_at_phase_start = {k: int(v) for k, v in tier_steps_raw.items()}
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"Invalid tier_steps_at_phase_start values (expected int-coercible, got non-numeric): {tier_steps_raw}. Error: {e}"
+        ) from e
 
     # Initialize missing tier_steps_at_phase_start entries for active_tiers
     for tier in gs.active_tiers:
@@ -260,11 +277,29 @@ def save_checkpoint(
             elif isinstance(difficulty_gate_raw, tuple):
                 # Already in correct format
                 difficulty_gate = difficulty_gate_raw
+        # Filter NaN/Inf from priority_weights before saving
+        priority_weights_raw = dataloader_state.get("priority_weights")
+        priority_weights: list[float] | dict[str, float] | None = None
+        if priority_weights_raw is not None:
+            import math
+
+            if isinstance(priority_weights_raw, list):
+                priority_weights = [
+                    float(w)
+                    for w in priority_weights_raw
+                    if isinstance(w, (int, float)) and math.isfinite(w)
+                ]
+            elif isinstance(priority_weights_raw, dict):
+                priority_weights = {
+                    str(k): float(v)
+                    for k, v in priority_weights_raw.items()
+                    if isinstance(v, (int, float)) and math.isfinite(v)
+                }
         dataloader = DataLoaderState(
             epoch=dataloader_state.get("epoch", 0),
             step_in_epoch=dataloader_state.get("step_in_epoch", 0),
             total_steps=dataloader_state.get("total_steps", 0),
-            priority_weights=dataloader_state.get("priority_weights"),
+            priority_weights=priority_weights,
             difficulty_gate=difficulty_gate,
         )
     else:

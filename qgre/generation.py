@@ -525,6 +525,11 @@ class UnslothBackend:
             hints_used.append(hints_used_dict or {})
 
         lora_req = self.weight_loader.lora_request if self.weight_loader else None
+        if lora_req is None:
+            raise RuntimeError(
+                "LoRA request is None — cannot generate with base model. "
+                "Ensure weight_loader.load_lora() was called before generation.",
+            )
         outputs = self.model.fast_generate(  # type: ignore[union-attr]
             prompts,
             sampling_params=sampling_params,
