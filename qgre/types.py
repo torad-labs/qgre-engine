@@ -33,7 +33,7 @@ class TrainingContext:
     checkpoint_schema_version: int = CHECKPOINT_SCHEMA_VERSION
 
     @classmethod
-    def from_config(cls, config, device: str = "cuda") -> TrainingContext:
+    def from_config(cls, _config, device: str = "cuda") -> TrainingContext:
         """Factory method to construct TrainingContext from QGREConfig.
 
         Args:
@@ -127,6 +127,18 @@ class TrainerState:
     rng_state: object | None = None  # torch.get_rng_state() output
     cuda_rng_state: object | None = None  # torch.cuda.get_rng_state() output
 
+    @classmethod
+    def from_dict(cls, d: dict) -> TrainerState:
+        """Create TrainerState from dict with schema validation.
+
+        This is the ONLY path for reconstructing TrainerState from checkpoint.
+        Validates all fields, applies defaults, and raises on missing required fields.
+        """
+        from qgre.schema import TRAINER_STATE_SCHEMA, validate_schema
+
+        validated = validate_schema(d, TRAINER_STATE_SCHEMA, "trainer")
+        return cls(**validated)
+
 
 @dataclass
 class DataLoaderState:
@@ -142,6 +154,52 @@ class DataLoaderState:
     priority_weights: list[float] | dict[str, float] | None = None
     difficulty_gate: tuple[set[str], str] | None = None
 
+    @classmethod
+    def from_dict(cls, d: dict) -> DataLoaderState:
+        """Create DataLoaderState from dict with schema validation.
+
+        Handles difficulty_gate format conversion and NaN filtering.
+        """
+        import math
+
+        from qgre.schema import DATALOADER_STATE_SCHEMA, validate_schema
+
+        validated = validate_schema(d, DATALOADER_STATE_SCHEMA, "dataloader")
+
+        # Convert difficulty_gate from dict to tuple format if needed
+        dg_raw = validated.get("difficulty_gate")
+        difficulty_gate = None
+        if dg_raw is not None:
+            if isinstance(dg_raw, dict):
+                allowed = dg_raw.get("allowed_difficulties", [])
+                col = dg_raw.get("difficulty_column", "")
+                difficulty_gate = (set(allowed), col)
+            elif isinstance(dg_raw, tuple):
+                difficulty_gate = dg_raw
+
+        # Filter NaN/Inf from priority_weights
+        pw_raw = validated.get("priority_weights")
+        priority_weights: list[float] | dict[str, float] | None = None
+        if pw_raw is not None:
+            if isinstance(pw_raw, list):
+                priority_weights = [
+                    float(w) for w in pw_raw if isinstance(w, (int, float)) and math.isfinite(w)
+                ]
+            elif isinstance(pw_raw, dict):
+                priority_weights = {
+                    str(k): float(v)
+                    for k, v in pw_raw.items()
+                    if isinstance(v, (int, float)) and math.isfinite(v)
+                }
+
+        return cls(
+            epoch=validated["epoch"],
+            step_in_epoch=validated["step_in_epoch"],
+            total_steps=validated["total_steps"],
+            priority_weights=priority_weights,
+            difficulty_gate=difficulty_gate,
+        )
+
 
 @dataclass
 class AdvantageEstimatorState:
@@ -154,6 +212,16 @@ class AdvantageEstimatorState:
     # Full state dict from QGREStepAdvantageEstimator.state_dict()
     # Contains: V, V_last_seen, quality_seen, step_seen, reward_var, reward_mean, etc.
     state_dict: dict | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> AdvantageEstimatorState:
+        """Create AdvantageEstimatorState from dict with schema validation."""
+        from qgre.schema import ADVANTAGE_ESTIMATOR_STATE_SCHEMA, validate_schema
+
+        if d is None:
+            return cls(state_dict=None)
+        validated = validate_schema(d, ADVANTAGE_ESTIMATOR_STATE_SCHEMA, "advantage_estimator")
+        return cls(**validated)
 
 
 class WeightLoaderLifecycle(Enum):
@@ -240,6 +308,19 @@ class WeightLoaderState:
     def from_lifecycle(cls, lifecycle: WeightLoaderLifecycle) -> WeightLoaderState:
         """Create state from enum value."""
         return cls(lifecycle=lifecycle.value)
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> WeightLoaderState:
+        """Create WeightLoaderState from dict with schema validation.
+
+        Handles both new (lifecycle) and legacy (boolean flags) checkpoint formats.
+        """
+        from qgre.schema import WEIGHT_LOADER_STATE_SCHEMA, validate_schema
+
+        if d is None:
+            return cls()
+        validated = validate_schema(d, WEIGHT_LOADER_STATE_SCHEMA, "weight_loader")
+        return cls(**validated)
 
 
 @dataclass
@@ -435,38 +516,31 @@ class CheckpointState:
                     UserWarning,
                     stacklevel=2,
                 )
-            # Migrate: build StateSpec dicts from flat fields
-            trainer = TrainerState(
-                global_step=d["global_step"],  # Required, validated above
-                accumulated_loss=d.get("accumulated_loss", 0.0),
-                accumulation_count=d.get("accumulation_count", 0),
-                accumulated_samples=d.get("accumulated_samples", 0),
-                resumed_mid_accumulation=False,  # Computed at resume time
-                fused_validated=False,  # Re-validate after migration
-                needs_weight_sync=False,  # Set at resume time
-                rng_state=d.get("rng_state"),
-                cuda_rng_state=d.get("cuda_rng_state"),
-            )
+            # Migrate: build StateSpec dicts from flat fields, then use schema-validated from_dict.
+            # This ensures all paths go through schema validation.
+            trainer_d = {
+                "global_step": d["global_step"],  # Required, validated above
+                "accumulated_loss": d.get("accumulated_loss", 0.0),
+                "accumulation_count": d.get("accumulation_count", 0),
+                "accumulated_samples": d.get("accumulated_samples", 0),
+                "resumed_mid_accumulation": False,  # Computed at resume time
+                "fused_validated": False,  # Re-validate after migration
+                "needs_weight_sync": False,  # Set at resume time
+                "rng_state": d.get("rng_state"),
+                "cuda_rng_state": d.get("cuda_rng_state"),
+            }
+            trainer = TrainerState.from_dict(trainer_d)
+
             # Old format uses advantage_estimator_state (dict), wrap in StateSpec
-            advantage_estimator = AdvantageEstimatorState(
-                state_dict=d.get("advantage_estimator_state"),
-            )
+            ae_d = {"state_dict": d.get("advantage_estimator_state")}
+            advantage_estimator = AdvantageEstimatorState.from_dict(ae_d)
+
             # Old format uses dataloader_state (dict), wrap in StateSpec
-            dl_state = d.get("dataloader_state")
-            dataloader = DataLoaderState(
-                epoch=dl_state.get("epoch", 0) if dl_state else 0,
-                step_in_epoch=dl_state.get("step_in_epoch", 0) if dl_state else 0,
-                total_steps=dl_state.get("total_steps", 0) if dl_state else 0,
-                priority_weights=dl_state.get("priority_weights") if dl_state else None,
-                difficulty_gate=dl_state.get("difficulty_gate") if dl_state else None,
-            )
-            # VPRM states go into WeightLoaderState
-            weight_loader = WeightLoaderState(
-                load_lora_called=False,  # Default
-                initialized=False,  # Default
-                cleaned_up=False,  # Default
-                lora_request_id=None,  # W1: Default
-            )
+            dl_state = d.get("dataloader_state") or {}
+            dataloader = DataLoaderState.from_dict(dl_state)
+
+            # VPRM states go into WeightLoaderState — use defaults via from_dict
+            weight_loader = WeightLoaderState.from_dict({})
             # GameState uses gamestate_from_dict in checkpoint.py — here we just pass through
             game_state_raw = d.get("game_state")
             if game_state_raw is None:
@@ -493,33 +567,30 @@ class CheckpointState:
                     "Checkpoint may be corrupted or truncated.",
                 )
 
-            # Reconstruct nested dataclasses from their dict representations
+            # Reconstruct nested dataclasses using schema-validated from_dict methods.
+            # This is the ONLY path for StateSpec reconstruction — no direct **kwargs.
             trainer_d = d["trainer"]  # Required, validated above
             if not isinstance(trainer_d, dict):
                 raise TypeError(
                     f"Expected dict for 'trainer', got {type(trainer_d).__name__}. "
                     "Checkpoint may be corrupted.",
                 )
-            # Validate critical fields exist
-            if "global_step" not in trainer_d:
-                raise ValueError(
-                    "Missing required field 'global_step' in trainer state. "
-                    "Checkpoint may be corrupted or from incompatible version.",
-                )
-            trainer = TrainerState(**trainer_d)
+            trainer = TrainerState.from_dict(trainer_d)
 
             dataloader_d = d.get("dataloader", {})
             dataloader = (
-                DataLoaderState(**dataloader_d) if isinstance(dataloader_d, dict) else dataloader_d
+                DataLoaderState.from_dict(dataloader_d)
+                if isinstance(dataloader_d, dict)
+                else dataloader_d
             )
 
             ae_d = d.get("advantage_estimator", {})
             advantage_estimator = (
-                AdvantageEstimatorState(**ae_d) if isinstance(ae_d, dict) else ae_d
+                AdvantageEstimatorState.from_dict(ae_d) if isinstance(ae_d, dict) else ae_d
             )
 
             wl_d = d.get("weight_loader", {})
-            weight_loader = WeightLoaderState(**wl_d) if isinstance(wl_d, dict) else wl_d
+            weight_loader = WeightLoaderState.from_dict(wl_d) if isinstance(wl_d, dict) else wl_d
 
             game_state_raw = d.get("game_state")
             if game_state_raw is None:

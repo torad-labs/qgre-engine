@@ -287,11 +287,18 @@ GAME_STATE_SCHEMA: dict[str, FieldSpec] = {
     "phase": FieldSpec(int, Required.NO, default=1),  # Old format fallback
 }
 
-# TrainerState schema
+# TrainerState schema (complete — all fields from dataclass)
 TRAINER_STATE_SCHEMA: dict[str, FieldSpec] = {
     "global_step": FieldSpec(int, Required.YES, validate=non_negative),
     "accumulated_loss": FieldSpec(float, Required.NO, default=0.0),
+    "accumulation_count": FieldSpec(int, Required.NO, default=0, validate=non_negative),
     "accumulated_samples": FieldSpec(int, Required.NO, default=0, validate=non_negative),
+    "resumed_mid_accumulation": FieldSpec(bool, Required.NO, default=False),
+    "fused_validated": FieldSpec(bool, Required.NO, default=False),
+    "needs_weight_sync": FieldSpec(bool, Required.NO, default=False),
+    # RNG state is object type (torch tensor), validated separately
+    "rng_state": FieldSpec((object, type(None)), Required.NO, default=None, coerce=False),
+    "cuda_rng_state": FieldSpec((object, type(None)), Required.NO, default=None, coerce=False),
 }
 
 # DataLoaderState schema (matches DataLoaderState dataclass fields)
