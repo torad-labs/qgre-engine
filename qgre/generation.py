@@ -270,20 +270,20 @@ class UnslothBackend:
 
         # Validate PAD token
         resolved_id = tokenizer.convert_tokens_to_ids(pad_token)
-        assert (
-            resolved_id == pad_token_id
-        ), f"{pad_token!r} resolves to {resolved_id}, not {pad_token_id} — wrong model or tokenizer"
+        assert resolved_id == pad_token_id, (
+            f"{pad_token!r} resolves to {resolved_id}, not {pad_token_id} — wrong model or tokenizer"
+        )
         vocab_size = getattr(model.config, "vocab_size", None)
         if vocab_size is not None:
-            assert (
-                pad_token_id < vocab_size
-            ), f"PAD token ID {pad_token_id} >= vocab_size {vocab_size} — token doesn't exist"
-        assert (
-            tokenizer.pad_token_id != tokenizer.eos_token_id
-        ), f"PAD ({tokenizer.pad_token_id}) == EOS ({tokenizer.eos_token_id}) — model will never learn to stop"
-        assert (
-            tokenizer.pad_token_id not in self.generation_config.stop_token_ids
-        ), f"PAD ({tokenizer.pad_token_id}) is a stop token — loss will mask stop signals"
+            assert pad_token_id < vocab_size, (
+                f"PAD token ID {pad_token_id} >= vocab_size {vocab_size} — token doesn't exist"
+            )
+        assert tokenizer.pad_token_id != tokenizer.eos_token_id, (
+            f"PAD ({tokenizer.pad_token_id}) == EOS ({tokenizer.eos_token_id}) — model will never learn to stop"
+        )
+        assert tokenizer.pad_token_id not in self.generation_config.stop_token_ids, (
+            f"PAD ({tokenizer.pad_token_id}) is a stop token — loss will mask stop signals"
+        )
 
         print(
             f"Tokenizer: PAD={tokenizer.pad_token!r} (ID:{tokenizer.pad_token_id}), "

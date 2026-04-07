@@ -78,7 +78,7 @@ def import_reward_fn(spec: str) -> Callable:
     if fn is None:
         available = [a for a in dir(module) if not a.startswith("_")]
         raise ValueError(
-            f"Function '{fn_name}' not found in '{module_path}'.\n" f"Available: {available}",
+            f"Function '{fn_name}' not found in '{module_path}'.\nAvailable: {available}",
         )
     return fn
 

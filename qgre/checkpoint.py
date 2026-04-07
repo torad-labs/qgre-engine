@@ -113,8 +113,7 @@ def _restore_tier_mastery(tm: dict, quality_window_size: int) -> dict:
     for tier, step_windows in tm.items():
         if not isinstance(step_windows, dict):
             raise TypeError(
-                f"SCHEMA: tier_mastery['{tier}'] expected dict, "
-                f"got {type(step_windows).__name__}",
+                f"SCHEMA: tier_mastery['{tier}'] expected dict, got {type(step_windows).__name__}",
             )
         result[tier] = {}
         for step_num, window_data in step_windows.items():
@@ -165,8 +164,7 @@ def _restore_step_mastery(step_mastery: dict, quality_window_size: int) -> dict:
     for step_num, window_data in step_mastery.items():
         if not isinstance(window_data, dict):
             raise TypeError(
-                f"SCHEMA: step_mastery[{step_num}] expected dict, "
-                f"got {type(window_data).__name__}",
+                f"SCHEMA: step_mastery[{step_num}] expected dict, got {type(window_data).__name__}",
             )
         maxlen = window_data.get("maxlen", quality_window_size)
         values = window_data.get("values", [])
@@ -316,7 +314,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
     try:
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint file not found: {path}")
-        raw_checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+        raw_checkpoint = torch.load(path, map_location="cpu", weights_only=False)  # nosec B614
 
         # C06-SCHEMA: Validate schema_version exists
         checkpoint_schema = raw_checkpoint.get("schema_version")
@@ -412,7 +410,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                     f"Original checkpoint {path} was corrupted. Training progress may be lost.",
                     stacklevel=2,
                 )
-                raw_checkpoint = torch.load(prev_path, map_location="cpu", weights_only=False)
+                raw_checkpoint = torch.load(prev_path, map_location="cpu", weights_only=False)  # nosec B614
 
                 # C06-SCHEMA: Handle missing schema_version (old format)
                 checkpoint_schema = raw_checkpoint.get("schema_version")

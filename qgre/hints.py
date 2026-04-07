@@ -325,7 +325,7 @@ class HintRegistry:
             validated = validate_schema(data, HINT_REGISTRY_SCHEMA, "hint_registry")
         except (TypeError, ValueError) as e:
             warnings.warn(
-                f"SCHEMA: HintRegistry validation failed: {e}. " "Returning empty registry.",
+                f"SCHEMA: HintRegistry validation failed: {e}. Returning empty registry.",
                 stacklevel=2,
             )
             return cls()

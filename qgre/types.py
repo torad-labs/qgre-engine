@@ -280,7 +280,7 @@ class CheckpointState:
             value = getattr(self, field_name, None)
             if value is not None and not isinstance(value, dict):
                 raise TypeError(
-                    f"Field '{field_name}' must be dict or None, " f"got {type(value).__name__}",
+                    f"Field '{field_name}' must be dict or None, got {type(value).__name__}",
                 )
 
         # STATE REGISTRY VALIDATION: Ensure OPTIONAL_FIELDS is complete
@@ -1018,7 +1018,7 @@ class GameState:
         roots = [k for k, n in self.skill_tree.items() if not n.prerequisites]
         if not roots:
             raise ValueError(
-                "No root skills (skills with empty prerequisites). " "Training cannot start.",
+                "No root skills (skills with empty prerequisites). Training cannot start.",
             )
 
         # 4. regression_threshold < mastery_threshold
@@ -1525,7 +1525,7 @@ class GameState:
             self.phase_history.append((self.step_count, tier, old_phase, current_phase + 1))
             self.tier_steps_at_phase_start[tier] = self.step_count
             _logger.warning(
-                f"[PHASE ADVANCE] tier={tier}, {old_phase}→{current_phase+1}, step={self.step_count}, mastery={mastery:.3f}"
+                f"[PHASE ADVANCE] tier={tier}, {old_phase}→{current_phase + 1}, step={self.step_count}, mastery={mastery:.3f}"
             )
             return True
         return False

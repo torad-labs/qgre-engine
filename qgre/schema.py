@@ -89,8 +89,7 @@ def validate_field(
         value = _coerce_type(value, expected, path)
     elif not type_match:
         raise TypeError(
-            f"SCHEMA: Field '{path}' expected {_type_name(expected)}, "
-            f"got {type(value).__name__}",
+            f"SCHEMA: Field '{path}' expected {_type_name(expected)}, got {type(value).__name__}",
         )
 
     # Filter NaN/Inf from numeric lists
@@ -152,7 +151,7 @@ def validate_schema(
     """
     if not isinstance(data, dict):
         raise TypeError(
-            f"SCHEMA: Expected dict at '{base_path or 'root'}', " f"got {type(data).__name__}",
+            f"SCHEMA: Expected dict at '{base_path or 'root'}', got {type(data).__name__}",
         )
 
     result = {}

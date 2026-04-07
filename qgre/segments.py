@@ -177,7 +177,7 @@ def _hif_json_segmenter_impl(token_ids: list[int], tokenizer: Any) -> list[str]:
         if failure_rate > 0.05:  # Warn if >5% failures
             warnings.warn(
                 f"Segmenter per-token decode: {decode_failures}/{len(token_ids)} failures "
-                f"({failure_rate*100:.1f}%). Region mapping may be inaccurate. "
+                f"({failure_rate * 100:.1f}%). Region mapping may be inaccurate. "
                 "Check tokenizer compatibility.",
                 stacklevel=2,
             )

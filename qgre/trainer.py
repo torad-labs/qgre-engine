@@ -275,7 +275,7 @@ class QGRETrainer:
                 "use_on_policy_kl_approximation": True,
                 "use_importance_sampling_correction": False,
                 "truncated_importance_sampling_ratio": None,
-                "token_level_loss": True,
+                "token_level_loss": True,  # nosec B105 - not a password
                 "force_on_policy_ratio": False,
                 "remove_length_normalization": alg.loss_type == "dr_grpo",
                 "lambda_return": alg.lambda_return,  # type: ignore[typeddict-item]
@@ -2327,11 +2327,11 @@ class QGRETrainer:
             and hasattr(self.generation_backend, "weight_loader")
         ):
             wl_state = checkpoint.weight_loader
-            self.generation_backend.weight_loader._direct_ready = wl_state.initialized  # type: ignore[union-attr]
-            self.generation_backend.weight_loader._load_lora_called = wl_state.load_lora_called  # type: ignore[union-attr]
+            self.generation_backend.weight_loader._direct_ready = wl_state.initialized
+            self.generation_backend.weight_loader._load_lora_called = wl_state.load_lora_called
             # Don't restore cleaned_up=True (would prevent future use)
             if not wl_state.cleaned_up:
-                self.generation_backend.weight_loader._cleaned_up = False  # type: ignore[union-attr]
+                self.generation_backend.weight_loader._cleaned_up = False
 
         # Zero gradients AFTER resume to avoid clearing loaded optimizer state
         if self.optimizer is not None:
@@ -3061,8 +3061,7 @@ class QGRETrainer:
                             ][:5]
                             if learn_items:
                                 learn_vals = " │ ".join(
-                                    f"{q[:8]:>8s} {v:.3f}"
-                                    for q, v in learn_items  # type: ignore[misc]
+                                    f"{str(q)[:8]:>8s} {v:.3f}" for q, v in learn_items
                                 )
                                 rows.append(("Learning", learn_vals))
 

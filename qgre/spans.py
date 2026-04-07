@@ -127,7 +127,7 @@ def build_char_to_token_map(
     if full_len > 0 and char_pos < full_len * 0.8:
         warnings.warn(
             f"build_char_to_token_map: per-token decode covered {char_pos}/{full_len} chars "
-            f"({100*char_pos/full_len:.1f}%). Mapping unreliable — returning None. "
+            f"({100 * char_pos / full_len:.1f}%). Mapping unreliable — returning None. "
             "Threshold is 80% coverage.",
             stacklevel=2,
         )
@@ -137,7 +137,7 @@ def build_char_to_token_map(
     gap_count = sum(1 for c in char_to_token if c < 0)
     if gap_count > 0 and gap_count / full_len > 0.1:
         warnings.warn(
-            f"DP3-006: char_to_token gap-fill: {gap_count}/{full_len} chars ({100*gap_count/full_len:.1f}%) "
+            f"DP3-006: char_to_token gap-fill: {gap_count}/{full_len} chars ({100 * gap_count / full_len:.1f}%) "
             "have no direct token mapping. Filling with nearest valid. "
             "High gap percentage may indicate tokenizer decode mismatch.",
             stacklevel=2,
