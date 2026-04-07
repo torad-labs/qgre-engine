@@ -378,7 +378,8 @@ exclude = [
 typeCheckingMode = "standard"  # Start with standard, upgrade to strict incrementally
 
 # Report levels for critical ML bugs
-reportMissingImports = "error"
+# Warning (not error) for imports - unsloth/vllm/bitsandbytes are optional GPU dependencies
+reportMissingImports = "warning"
 reportMissingTypeStubs = "none"  # External libs - not actionable
 reportUnusedImport = "error"
 reportUnusedVariable = "error"
