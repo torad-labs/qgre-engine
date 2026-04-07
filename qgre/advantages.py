@@ -120,6 +120,12 @@ def apply_egrs_matrix(
         threshold=entropy_threshold,
         temperature=gate_temperature,
     )
+    # AC5: Validate entropy gate shape matches token_advantages
+    if confidence_gate.shape != token_advantages.shape:
+        raise RuntimeError(
+            f"AC5: confidence_gate shape {confidence_gate.shape} != token_advantages shape {token_advantages.shape}. "
+            f"Check compute_confidence_gate output.",
+        )
 
     # Initialize outputs
     modified_advs = token_advantages.clone()
@@ -159,14 +165,14 @@ def apply_egrs_matrix(
         else:
             continue  # FORMAT or other regions - no EGRS treatment
 
-        # Look up correctness - warn if step not found (silent default is dangerous)
+        # AC12: Raise error on missing step (safer than defaulting to correct=True)
         if step_num not in step_correctness:
-            warnings.warn(
-                f"EGRS: step {step_num} not in step_correctness dict. "
-                f"Defaulting to correct=True. Check step_qualities config.",
-                stacklevel=2,
+            raise KeyError(
+                f"AC12: step {step_num} not in step_correctness dict. "
+                f"Available steps: {list(step_correctness.keys())}. "
+                "Check step_qualities config or disable EGRS.",
             )
-        correct = step_correctness.get(step_num, True)
+        correct = step_correctness[step_num]
         # Confidence from gate: low gate = confident, high gate = uncertain
         gate_val = confidence_gate[t].item()
         confident = gate_val < 0.5
@@ -636,6 +642,13 @@ class QGREStepAdvantageEstimator:
                     step_rews[step_num] = sum(vals) / max(len(vals), 1)
                 # else: skip — inactive qualities produce NO advantage signal,
                 # not 0.0 vs old baseline which generates catastrophic negatives
+            # AC2: Warn if sample produces zero step advantages
+            if not step_rews:
+                warnings.warn(
+                    f"AC2: Sample {i} has zero active step advantages (active_qualities intersection is empty). "
+                    f"Check step_qualities config and active_qualities alignment.",
+                    stacklevel=2,
+                )
             all_step_rewards.append(step_rews)
             all_regions.append(regions)
 
@@ -1209,6 +1222,11 @@ class QGREStepAdvantageEstimator:
                 torch.maximum(token_advs, -first_occurrence_advs),
                 token_advs,
             )
+
+            # AC6: Add aggregate cap after all quality contributions are summed
+            # If multiple qualities mark same token as repeated, cap aggregate penalty
+            max_aggregate_penalty = self._clip_advantage
+            token_advs = torch.clamp(token_advs, min=-max_aggregate_penalty)
 
             # Scale advantages to fit model's logit resolution
             if self._advantage_scale != 1.0:

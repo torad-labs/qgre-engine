@@ -354,9 +354,13 @@ def apply_importance_constraint(
     # Compute dampening factor
     dampening = 1.0 + strength * importance
 
-    # Gate by advantage sign: apply dampening to both positive and negative
-    # but symmetrically (same dampening factor for both directions)
-    return raw_advantage / dampening
+    # AC8: Gate by advantage sign - only dampen positive advantages
+    # Negative advantage = correction signal, should NOT be dampened
+    return torch.where(
+        raw_advantage > 0,
+        raw_advantage / dampening,
+        raw_advantage,
+    )
 
 
 # =============================================================================

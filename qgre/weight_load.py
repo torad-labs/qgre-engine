@@ -75,8 +75,29 @@ class WeightLoader:
             # WS-R3-03: Track whether load_lora was called to prevent double-load on recovery
             if self._lora_request is None:
                 if not getattr(self, "_load_lora_called", False):
+                    adapter_path = self._get_adapter_config_path()
+                    # WS2: Validate adapter_config.json rank matches model's rank
+                    import json
+                    from pathlib import Path
+
+                    adapter_config_file = Path(adapter_path) / "adapter_config.json"
+                    if adapter_config_file.exists():
+                        with open(adapter_config_file) as f:
+                            adapter_cfg = json.load(f)
+                        disk_rank = adapter_cfg.get("r")
+                        model_rank = getattr(model.peft_config.get("default"), "r", None)  # type: ignore[attr-defined]
+                        if (
+                            disk_rank is not None
+                            and model_rank is not None
+                            and disk_rank != model_rank
+                        ):
+                            raise RuntimeError(
+                                f"WS2: adapter_config.json rank mismatch. "
+                                f"Disk: {disk_rank}, training model: {model_rank}. "
+                                f"Delete {adapter_path} or update config to match.",
+                            )
                     self._lora_request = model.load_lora(  # type: ignore[attr-defined]
-                        self._get_adapter_config_path(),
+                        adapter_path,
                         load_tensors=True,
                     )
                     self._load_lora_called = True
@@ -220,6 +241,10 @@ class WeightLoader:
                 stacklevel=2,
             )
             raise
+        finally:
+            # WS8: Move synchronize into finally block to ensure it runs even on exception
+            if synced and torch.cuda.is_available():
+                torch.cuda.synchronize()
 
         # WS-R1-4: Track expected vs synced and raise if mismatch
         if expected and set(expected) != set(synced):
@@ -227,9 +252,6 @@ class WeightLoader:
                 f"modules_to_save partial sync failure: expected {expected}, synced {synced}. "
                 f"Missing: {set(expected) - set(synced)}",
             )
-        # Only sync if we actually copied modules_to_save (restores pre-harden behavior)
-        if synced and torch.cuda.is_available():
-            torch.cuda.synchronize()
 
     def get_vllm_model(self):
         """Navigate vLLM internals to get the base model for direct weight access.

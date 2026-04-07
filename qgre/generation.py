@@ -460,6 +460,12 @@ class UnslothBackend:
         prompts = []
         hints_used = []
         for i in range(input_ids.shape[0]):
+            # GN5: Validate attention_mask shape matches input_ids
+            if attention_mask.shape != input_ids.shape:
+                raise RuntimeError(
+                    f"GN5: attention_mask shape {attention_mask.shape} != input_ids shape {input_ids.shape}. "
+                    "Check dataloader output.",
+                )
             mask = attention_mask[i].bool()
             tokens = input_ids[i][mask].tolist()
             text = self.tokenizer.decode(tokens, skip_special_tokens=False)  # type: ignore[union-attr]
@@ -494,15 +500,16 @@ class UnslothBackend:
                     if hint_lines:
                         hint_text = "\n".join(hint_lines)
                         combined_text = text.rstrip() + f"\n\n{hint_text}\n\n"
-                        # Check if combined length would exceed max_tokens
+                        # GN3: Check if combined length would exceed max_seq_length (prompt + generation budget)
                         combined_tokens = self.tokenizer.encode(  # type: ignore[union-attr]
                             combined_text, add_special_tokens=False
                         )
-                        if len(combined_tokens) > self.generation_config.max_tokens:
+                        max_seq_length = self.max_prompt_length + self.generation_config.max_tokens
+                        if len(combined_tokens) > max_seq_length:
                             import logging
 
                             logging.getLogger(__name__).warning(
-                                f"Hint injection would exceed max_tokens ({len(combined_tokens)} > {self.generation_config.max_tokens}). "
+                                f"GN3: Hint injection would exceed max_seq_length ({len(combined_tokens)} > {max_seq_length}). "
                                 "Skipping hint injection for this sample.",
                             )
                             # H-2: Mark all hints as NOT used since injection was skipped

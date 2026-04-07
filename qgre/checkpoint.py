@@ -148,6 +148,14 @@ def _restore_tier_mastery(tm: dict, quality_window_size: int) -> dict:
                 raise ValueError(
                     f"SCHEMA: Cannot convert step_num '{step_num}' to int for tier '{tier}': {e}",
                 ) from e
+            # CK1: Warn about truncation when window_size decreased
+            if len(filtered) > maxlen:
+                dropped_count = len(filtered) - maxlen
+                warnings.warn(
+                    f"CK1: quality_window_size decreased for tier '{tier}' step {step_key}. "
+                    f"Truncating {dropped_count} oldest scores (checkpoint had {len(filtered)}, config allows {maxlen}).",
+                    stacklevel=2,
+                )
             result[tier][step_key] = deque(filtered, maxlen=maxlen)
     return result
 
@@ -168,14 +176,29 @@ def _restore_step_mastery(step_mastery: dict, quality_window_size: int) -> dict:
             )
         maxlen = window_data.get("maxlen", quality_window_size)
         values = window_data.get("values", [])
-        filtered = [v for v in values if math.isfinite(v)]
-        if len(filtered) < len(values):
+        # CK2: Coerce values to float before isfinite check
+        try:
+            coerced_values = [float(v) for v in values]
+        except (ValueError, TypeError) as e:
+            raise TypeError(
+                f"CK2: Cannot convert step_mastery[{step_num}] values to float: {e}. "
+                f"Got values: {values[:5]}...",
+            ) from e
+        filtered = [v for v in coerced_values if math.isfinite(v)]
+        if len(filtered) < len(coerced_values):
             warnings.warn(
-                f"SCHEMA: Filtered {len(values) - len(filtered)} NaN/Inf values "
+                f"SCHEMA: Filtered {len(coerced_values) - len(filtered)} NaN/Inf values "
                 f"from step_mastery[{step_num}]",
                 stacklevel=2,
             )
-        result[int(step_num)] = deque(filtered, maxlen=maxlen)
+        # CK3: Use quality_window_size consistently, not checkpoint's maxlen
+        if maxlen != quality_window_size:
+            warnings.warn(
+                f"CK3: step_mastery[{step_num}] checkpoint maxlen ({maxlen}) != config quality_window_size ({quality_window_size}). "
+                f"Using config value ({quality_window_size}).",
+                stacklevel=2,
+            )
+        result[int(step_num)] = deque(filtered, maxlen=quality_window_size)
     return result
 
 

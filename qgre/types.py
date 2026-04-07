@@ -1524,13 +1524,18 @@ class GameState:
 
             _logger = logging.getLogger("qgre.types")
             old_phase = current_phase
-            self.tier_phases[tier] = current_phase + 1
-            self.phase_history.append((self.step_count, tier, old_phase, current_phase + 1))
+            new_phase = current_phase + 1
+            self.tier_phases[tier] = new_phase
+            self.phase_history.append((self.step_count, tier, old_phase, new_phase))
+            # TP2: Reset timestamp on phase change (advance or regression)
             self.tier_steps_at_phase_start[tier] = self.step_count
             _logger.warning(
-                f"[PHASE ADVANCE] tier={tier}, {old_phase}→{current_phase + 1}, step={self.step_count}, mastery={mastery:.3f}"
+                f"[PHASE ADVANCE] tier={tier}, {old_phase}→{new_phase}, step={self.step_count}, mastery={mastery:.3f}"
             )
             return True
+        # TP2: Reset timestamp on phase regression if phase decreased
+        if tier in self.tier_phases and self.tier_phases[tier] < current_phase:
+            self.tier_steps_at_phase_start[tier] = self.step_count
         return False
 
     def check_tier_unlock(

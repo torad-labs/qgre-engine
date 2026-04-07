@@ -906,6 +906,9 @@ class QGRETrainer:
                 step = step.filter(idx)
                 # Track that filtering was applied (for VPRM/EGRS index mapping)
                 self._spo_filter_idx = step.filter_idx
+                # TP1/TP5: Reindex batch_contexts and active_qualities to match filtered step
+                batch_contexts = [batch_contexts[i] for i in idx.tolist()]
+                active_qualities = [active_qualities[i] for i in idx.tolist()]
 
         # Rebuild batch tensors from samples (after SPO filter if applied)
         max_comp_len = step.comp_tensor.shape[1]

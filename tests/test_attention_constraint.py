@@ -61,17 +61,17 @@ def test_advantage_dampening():
         f"Token 3 positive advantage should be dampened below 0.6, got {dampened_pos[3]}"
     )
 
-    # Test 2: NEGATIVE advantages should ALSO be dampened (symmetric treatment)
-    # Fix: asymmetric dampening caused gradient bias — now both signs are dampened equally
+    # Test 2: NEGATIVE advantages should NOT be dampened (asymmetric, sign-gated)
+    # AC8 fix: negative advantage + high importance → NO DAMPEN (preserve correction signals)
     negative_advs = -torch.ones(seq_len)
     dampened_neg = apply_importance_constraint(negative_advs, importance, strength=1.0)
 
-    # Token 3 should have SAME dampening ratio as positive (symmetric)
-    pos_ratio = dampened_pos[3] / 1.0  # dampened / original
-    neg_ratio = dampened_neg[3] / -1.0  # dampened / original (both negative, so ratio positive)
-    assert abs(pos_ratio - neg_ratio) < 0.01, (
-        f"Dampening should be symmetric: pos={pos_ratio}, neg={neg_ratio}"
+    # Token 3 negative advantage should be UNCHANGED (no dampening for corrections)
+    assert dampened_neg[3] == -1.0, (
+        f"Negative advantages should NOT be dampened, got {dampened_neg[3]} instead of -1.0"
     )
+    # Positive should still be dampened
+    assert dampened_pos[3] < 1.0, f"Positive advantages SHOULD be dampened, got {dampened_pos[3]}"
 
     print(f"Positive advantages (dampened): {[f'{x:.3f}' for x in dampened_pos.tolist()]}")
     print(f"Negative advantages (dampened): {[f'{x:.3f}' for x in dampened_neg.tolist()]}")
