@@ -264,46 +264,10 @@ def save_checkpoint(
             cuda_rng_state=cuda_rng_state,
         )
 
-    # Build DataLoaderState from dict or default
-    if dataloader_state is not None:
-        # C2: Convert difficulty_gate dict to tuple[set[str], str] format
-        difficulty_gate_raw = dataloader_state.get("difficulty_gate")
-        difficulty_gate = None
-        if difficulty_gate_raw is not None:
-            if isinstance(difficulty_gate_raw, dict):
-                allowed = difficulty_gate_raw.get("allowed_difficulties", [])
-                col = difficulty_gate_raw.get("difficulty_column", "")
-                difficulty_gate = (set(allowed), col)
-            elif isinstance(difficulty_gate_raw, tuple):
-                # Already in correct format
-                difficulty_gate = difficulty_gate_raw
-        # Filter NaN/Inf from priority_weights before saving
-        priority_weights_raw = dataloader_state.get("priority_weights")
-        priority_weights: list[float] | dict[str, float] | None = None
-        if priority_weights_raw is not None:
-            import math
-
-            if isinstance(priority_weights_raw, list):
-                priority_weights = [
-                    float(w)
-                    for w in priority_weights_raw
-                    if isinstance(w, (int, float)) and math.isfinite(w)
-                ]
-            elif isinstance(priority_weights_raw, dict):
-                priority_weights = {
-                    str(k): float(v)
-                    for k, v in priority_weights_raw.items()
-                    if isinstance(v, (int, float)) and math.isfinite(v)
-                }
-        dataloader = DataLoaderState(
-            epoch=dataloader_state.get("epoch", 0),
-            step_in_epoch=dataloader_state.get("step_in_epoch", 0),
-            total_steps=dataloader_state.get("total_steps", 0),
-            priority_weights=priority_weights,
-            difficulty_gate=difficulty_gate,
-        )
-    else:
-        dataloader = DataLoaderState()
+    # Build DataLoaderState from dict or default (uses schema validation + NaN filtering)
+    dataloader = (
+        DataLoaderState.from_dict(dataloader_state) if dataloader_state else DataLoaderState()
+    )
 
     # Build AdvantageEstimatorState — wraps the full state_dict
     advantage_estimator = AdvantageEstimatorState(state_dict=advantage_estimator_state)

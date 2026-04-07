@@ -306,9 +306,31 @@ DATALOADER_STATE_SCHEMA: dict[str, FieldSpec] = {
     "epoch": FieldSpec(int, Required.NO, default=0, validate=non_negative),
     "step_in_epoch": FieldSpec(int, Required.NO, default=0, validate=non_negative),
     "total_steps": FieldSpec(int, Required.NO, default=0, validate=non_negative),
-    "priority_weights": FieldSpec((list, dict, type(None)), Required.NO, default=None),
-    "difficulty_gate": FieldSpec((tuple, type(None)), Required.NO, default=None),
+    "priority_weights": FieldSpec(
+        (list, dict, type(None)), Required.NO, default=None, filter_nan=True
+    ),
+    "difficulty_gate": FieldSpec((tuple, dict, type(None)), Required.NO, default=None),
 }
+
+
+def convert_difficulty_gate(raw: dict | tuple | None) -> tuple[set[str], str] | None:
+    """Convert difficulty_gate from dict format (checkpoint) to tuple[set[str], str].
+
+    Handles legacy checkpoint format where difficulty_gate was stored as:
+        {"allowed_difficulties": [...], "difficulty_column": "..."}
+    Converts to runtime format:
+        (set of allowed difficulties, column name)
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        allowed = raw.get("allowed_difficulties", [])
+        col = raw.get("difficulty_column", "")
+        return (set(allowed), col)
+    if isinstance(raw, tuple):
+        return raw
+    return None
+
 
 # AdvantageEstimatorState schema
 ADVANTAGE_ESTIMATOR_STATE_SCHEMA: dict[str, FieldSpec] = {

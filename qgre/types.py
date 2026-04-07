@@ -158,46 +158,23 @@ class DataLoaderState:
     def from_dict(cls, d: dict) -> DataLoaderState:
         """Create DataLoaderState from dict with schema validation.
 
-        Handles difficulty_gate format conversion and NaN filtering.
+        Schema handles NaN filtering via filter_nan=True on priority_weights.
+        Uses convert_difficulty_gate utility for dict→tuple migration.
         """
-        import math
-
-        from qgre.schema import DATALOADER_STATE_SCHEMA, validate_schema
+        from qgre.schema import (
+            DATALOADER_STATE_SCHEMA,
+            convert_difficulty_gate,
+            validate_schema,
+        )
 
         validated = validate_schema(d, DATALOADER_STATE_SCHEMA, "dataloader")
-
-        # Convert difficulty_gate from dict to tuple format if needed
-        dg_raw = validated.get("difficulty_gate")
-        difficulty_gate = None
-        if dg_raw is not None:
-            if isinstance(dg_raw, dict):
-                allowed = dg_raw.get("allowed_difficulties", [])
-                col = dg_raw.get("difficulty_column", "")
-                difficulty_gate = (set(allowed), col)
-            elif isinstance(dg_raw, tuple):
-                difficulty_gate = dg_raw
-
-        # Filter NaN/Inf from priority_weights
-        pw_raw = validated.get("priority_weights")
-        priority_weights: list[float] | dict[str, float] | None = None
-        if pw_raw is not None:
-            if isinstance(pw_raw, list):
-                priority_weights = [
-                    float(w) for w in pw_raw if isinstance(w, (int, float)) and math.isfinite(w)
-                ]
-            elif isinstance(pw_raw, dict):
-                priority_weights = {
-                    str(k): float(v)
-                    for k, v in pw_raw.items()
-                    if isinstance(v, (int, float)) and math.isfinite(v)
-                }
 
         return cls(
             epoch=validated["epoch"],
             step_in_epoch=validated["step_in_epoch"],
             total_steps=validated["total_steps"],
-            priority_weights=priority_weights,
-            difficulty_gate=difficulty_gate,
+            priority_weights=validated.get("priority_weights"),
+            difficulty_gate=convert_difficulty_gate(validated.get("difficulty_gate")),
         )
 
 
