@@ -1117,6 +1117,14 @@ class QGREStepAdvantageEstimator:
             first_occurrence_advs = torch.zeros(seq_len, device=device, dtype=dtype)
             masks = batch_token_masks[i]
 
+            # A5: Warn if masks dict is empty
+            if not masks:
+                warnings.warn(
+                    f"A5: Empty mask dict for sample {i} — no quality masks found. "
+                    "Advantages will be zero. Check reward function.",
+                    stacklevel=2,
+                )
+
             # RL3-008: Track skipped qualities and raise if all skipped due to SHAPE MISMATCH
             skipped_count = 0
             shape_mismatch_count = 0
@@ -1188,6 +1196,8 @@ class QGREStepAdvantageEstimator:
                     f"(missing from all quality masks). These tokens get zero advantage silently.",
                     stacklevel=2,
                 )
+            # A2: Zero out token_advs where overlap_count == 0 before clamping
+            token_advs = torch.where(zero_overlap_mask, 0.0, token_advs)
             overlap_count = torch.clamp(overlap_count, min=1.0)
             token_advs = token_advs / overlap_count
 

@@ -167,6 +167,8 @@ class WeightLoaderState:
     load_lora_called: bool = False
     initialized: bool = False
     cleaned_up: bool = False
+    # W1: Store lora_request_id to detect re-registration on resume
+    lora_request_id: int | None = None
 
 
 @dataclass
@@ -392,6 +394,7 @@ class CheckpointState:
                 load_lora_called=False,  # Default
                 initialized=False,  # Default
                 cleaned_up=False,  # Default
+                lora_request_id=None,  # W1: Default
             )
             # GameState uses gamestate_from_dict in checkpoint.py — here we just pass through
             game_state_raw = d.get("game_state")

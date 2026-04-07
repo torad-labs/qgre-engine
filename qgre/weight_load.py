@@ -89,7 +89,7 @@ class WeightLoader:
             except Exception as e:
                 import traceback
 
-                # WS3-002: Reset _direct_ready on exception
+                # WS3-002 + W10: Reset all state on exception to allow clean retry
                 self._direct_ready = False
                 self._lora_request = None
                 self._load_lora_called = False
@@ -412,6 +412,7 @@ class WeightLoader:
     def reset_state(self):
         """WS3-009: Reset state on engine recreate."""
         self._direct_ready = False
+        # G5: Reset _lora_request to avoid stale request after reset
         self._lora_request = None
         # WS-R3-03: Reset load_lora tracking on state reset
         self._load_lora_called = False

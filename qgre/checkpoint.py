@@ -226,12 +226,23 @@ def save_checkpoint(
 
     # Build DataLoaderState from dict or default
     if dataloader_state is not None:
+        # C2: Convert difficulty_gate dict to tuple[set[str], str] format
+        difficulty_gate_raw = dataloader_state.get("difficulty_gate")
+        difficulty_gate = None
+        if difficulty_gate_raw is not None:
+            if isinstance(difficulty_gate_raw, dict):
+                allowed = difficulty_gate_raw.get("allowed_difficulties", [])
+                col = difficulty_gate_raw.get("difficulty_column", "")
+                difficulty_gate = (set(allowed), col)
+            elif isinstance(difficulty_gate_raw, tuple):
+                # Already in correct format
+                difficulty_gate = difficulty_gate_raw
         dataloader = DataLoaderState(
             epoch=dataloader_state.get("epoch", 0),
             step_in_epoch=dataloader_state.get("step_in_epoch", 0),
             total_steps=dataloader_state.get("total_steps", 0),
             priority_weights=dataloader_state.get("priority_weights"),
-            difficulty_gate=dataloader_state.get("difficulty_gate"),
+            difficulty_gate=difficulty_gate,
         )
     else:
         dataloader = DataLoaderState()
@@ -270,10 +281,9 @@ def save_checkpoint(
     # Serialize CheckpointState
     checkpoint = asdict(checkpoint_state)
 
-    # Special handling for GameState: convert deques to serializable format
-    # CT-3: Always use gamestate_to_dict() - asdict() doesn't handle deques correctly
-    if game_state is not None:
-        checkpoint["game_state"] = gamestate_to_dict(game_state)
+    # C1: Always convert game_state using gamestate_to_dict (asdict doesn't handle deques)
+    # Use checkpoint_state.game_state (the assigned value) not the parameter
+    checkpoint["game_state"] = gamestate_to_dict(checkpoint_state.game_state)
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)

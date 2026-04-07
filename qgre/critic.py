@@ -308,6 +308,15 @@ class VPRMCritic(nn.Module):
 
             # Online prediction for MSE loss (online learns fast)
             online_pred = self.heads[q_name](pooled).squeeze(0).squeeze(0)
+            # A3: Check for NaN in online_pred before computing loss
+            if torch.isnan(online_pred):
+                import warnings
+
+                warnings.warn(
+                    f"A3: online_pred is NaN for quality '{q_name}' — skipping critic loss computation",
+                    stacklevel=2,
+                )
+                continue
             # ADV-R2-6: Warn when no gradient will flow
             if not online_pred.requires_grad:
                 if not hasattr(self, "_no_grad_warned"):

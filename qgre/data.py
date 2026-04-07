@@ -512,9 +512,16 @@ class QGREDataLoader:
                     sample_str = ", ".join(f"{pid}={w}" for pid, w in sample)
                     warnings.warn(
                         f"SFH-002: {len(invalid_entries)} invalid priority weights. "
-                        f"Examples: [{sample_str}]. Skipping all priority_weights.",
+                        f"Examples: [{sample_str}]. Filtering invalid entries and using valid weights.",
                         stacklevel=2,
                     )
+                    # C3: Filter out invalid weights instead of skipping all
+                    valid_weights = {
+                        pid: float(w)
+                        for pid, w in weights.items()
+                        if isinstance(w, (int, float)) and w >= 0 and math.isfinite(w)
+                    }
+                    self._priorities = valid_weights if valid_weights else None
                 else:
                     self._priorities = weights
 

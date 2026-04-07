@@ -42,6 +42,12 @@ class WeightBus:
     def __init__(self, strategy: SyncStrategy = SyncStrategy.DIRECT_COPY):
         self.strategy = strategy
         self._initialized = False  # True after first successful sync
+        self._engine_id: int | None = None  # W5: Track engine identity to detect recreation
+
+    def reset_on_engine_recreate(self):
+        """W5: Reset _initialized when vLLM engine is recreated."""
+        self._initialized = False
+        self._engine_id = None
 
     def sync(
         self,

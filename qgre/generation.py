@@ -548,9 +548,10 @@ class UnslothBackend:
                     warnings.warn(
                         f"vLLM logprobs length ({len(completion_out.logprobs)}) != "
                         f"completion length ({len(completion_ids)}) for prompt {idx}. "
-                        f"Setting this sample's logprobs to None (batch will continue).",
+                        f"Setting this sample's logprobs to None (other samples may still have valid logprobs).",
                         stacklevel=2,
                     )
+                    # G6: Don't skip appending — append None so indexing stays correct
                     all_logprobs.append(None)
                     continue
                 # GB3-006: Filter None values before length check
@@ -594,7 +595,8 @@ class UnslothBackend:
                         sample_lps.append(float("-inf"))
             all_logprobs.append(sample_lps)
 
-        # Guard against None entries (from logprobs length mismatch at line 375)
+        # G6: Support partial logprobs — return valid logprobs for samples that passed, None for failed
+        # has_logprobs = True if ALL samples have logprobs (strict mode for LLDS), False otherwise
         has_logprobs = (
             all(lps is not None and len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
         )
@@ -604,7 +606,7 @@ class UnslothBackend:
             # DP-R2-07: Log at WARNING level instead of DEBUG
             logging.getLogger(__name__).warning(
                 f"DP-R2-07: Partial logprobs: {sum(1 for lps in all_logprobs if lps is not None and len(lps) > 0)}"
-                f"/{len(all_logprobs)} samples have logprobs. LLDS disabled for this batch.",
+                f"/{len(all_logprobs)} samples have logprobs. LLDS will be disabled for this batch.",
             )
         # MIO-006: Warn if hint_registry exists but hint_enabled is False
         if not prompt_hints and hasattr(self, "hint_registry") and self.hint_registry is not None:  # type: ignore[attr-defined]

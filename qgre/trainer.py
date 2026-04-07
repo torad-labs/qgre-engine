@@ -892,6 +892,10 @@ class QGRETrainer:
                         reward_components=sample.reward_result.scores,
                         phase=self.game_state.phase,
                     )
+                # T2: Update accumulation counters before early return
+                self._accumulated_loss += 0.0
+                self._accumulation_count += 1
+                self._accumulated_samples += len(step)
                 self.global_step += 1
                 self.ctx.step = self.global_step
                 return metrics
@@ -1491,7 +1495,7 @@ class QGRETrainer:
                 mask=mb_mask[:, :min_len].float(),
                 reference_logprobs=mb_old_lp[:, :min_len],
                 kl_region_weights=mb_kl_weights,
-                return_per_token_loss=need_per_token,  # type: ignore[arg-type]
+                return_per_token_loss=need_per_token,
             )
             if need_per_token:
                 mb_loss, mb_metrics, mb_per_token_loss = loss_result  # type: ignore[misc]
@@ -2329,6 +2333,11 @@ class QGRETrainer:
             wl_state = checkpoint.weight_loader
             self.generation_backend.weight_loader._direct_ready = wl_state.initialized
             self.generation_backend.weight_loader._load_lora_called = wl_state.load_lora_called
+            # W1: Restore lora_request_id if present (backward compat: may be None in old checkpoints)
+            if hasattr(wl_state, "lora_request_id") and wl_state.lora_request_id is not None:
+                # Note: _lora_request is the actual LoRARequest object, not restored from checkpoint
+                # This field is for tracking re-registration; actual object rebuilt on first sync
+                pass  # Currently no restoration needed — document that re-registration is intentional
             # Don't restore cleaned_up=True (would prevent future use)
             if not wl_state.cleaned_up:
                 self.generation_backend.weight_loader._cleaned_up = False
