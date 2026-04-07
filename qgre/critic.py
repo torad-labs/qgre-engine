@@ -140,7 +140,7 @@ class VPRMCritic(nn.Module):
         regions: list[str],
         ctx: TrainingContext,
         use_target: bool = False,
-    ) -> dict[str, torch.Tensor]:
+    ) -> dict[str, torch.Tensor | None]:
         """Predict baselines for each quality from region-pooled hidden states.
 
         Args:
@@ -150,7 +150,7 @@ class VPRMCritic(nn.Module):
             use_target: if True, use slow-moving target heads for stable predictions
 
         Returns:
-            dict mapping quality_name → predicted baseline (scalar tensor)
+            dict mapping quality_name → predicted baseline (scalar tensor), or None if region missing
         """
         # Mean-pool hidden states per region (STEP_1, STEP_2, ...)
         # Extract unique step IDs in Python (avoids GPU sync from .unique().tolist())
@@ -178,7 +178,7 @@ class VPRMCritic(nn.Module):
         # Predict baseline for each quality using its region's pooled states
         # Uses _quality_to_region which applies step_region_map for virtual steps
         heads = self.target_heads if use_target else self.heads
-        predictions: dict[str, torch.Tensor] = {}
+        predictions: dict[str, torch.Tensor | None] = {}
         for q_name in self.quality_names:
             region_step = self._quality_to_region[q_name]
             region_key = f"STEP_{region_step}"
@@ -203,7 +203,7 @@ class VPRMCritic(nn.Module):
                     f"RL3-003: Region {region_key} not found for quality '{q_name}'. "
                     f"Skipping advantage for this quality. Total skipped: {self._region_not_found_count}",
                 )
-                predictions[q_name] = None  # type: ignore[assignment]
+                predictions[q_name] = None
 
         return predictions
 
@@ -213,7 +213,7 @@ class VPRMCritic(nn.Module):
         regions: list[str],
         actual_rewards: dict[str, float],
         ctx: TrainingContext,
-    ) -> tuple[dict[str, float], dict[str, torch.Tensor]]:
+    ) -> tuple[dict[str, float | None], dict[str, torch.Tensor]]:
         """Compute per-quality advantages and critic losses.
 
         Args:
@@ -224,7 +224,7 @@ class VPRMCritic(nn.Module):
 
         Returns:
             (advantages, critic_losses):
-            - advantages: quality_name → clipped advantage (float)
+            - advantages: quality_name → clipped advantage (float), or None if region missing
             - critic_losses: quality_name → MSE loss tensor (for backward)
         """
         # Pool regions ONCE, then run both head sets against the same pools
@@ -255,7 +255,7 @@ class VPRMCritic(nn.Module):
                     pooled = torch.zeros_like(pooled)
                 region_pools[f"STEP_{step_id}"] = pooled
 
-        advantages: dict[str, float] = {}
+        advantages: dict[str, float | None] = {}
         critic_losses: dict[str, torch.Tensor] = {}
 
         for q_name in self.quality_names:
@@ -284,7 +284,7 @@ class VPRMCritic(nn.Module):
                         f"(occurred {self._region_warned_count[q_name]} times)",
                     )
                     self._region_warned.add(q_name)
-                advantages[q_name] = None  # type: ignore[assignment]
+                advantages[q_name] = None
                 continue
 
             # C04-NUMERICAL: Cast pooled hidden states to ctx.dtype before MLP
@@ -334,7 +334,7 @@ class VPRMCritic(nn.Module):
         batch_rewards: list[dict[str, float]],
         ctx: TrainingContext,
         spo_fallback_mask: list[bool] | None = None,
-    ) -> tuple[list[dict[str, float]], torch.Tensor]:
+    ) -> tuple[list[dict[str, float | None]], torch.Tensor]:
         """Batch version: compute advantages and total critic loss.
 
         Args:
@@ -347,7 +347,7 @@ class VPRMCritic(nn.Module):
         Returns:
             (batch_advantages, total_critic_loss)
         """
-        batch_advantages: list[dict[str, float]] = []
+        batch_advantages: list[dict[str, float | None]] = []
         all_losses: list[torch.Tensor] = []
 
         for i, (hs, regions, rewards) in enumerate(
@@ -376,7 +376,7 @@ class VPRMCritic(nn.Module):
         token_masks: dict[str, torch.Tensor],
         actual_rewards: dict[str, float],
         ctx: TrainingContext,
-    ) -> tuple[dict[str, float], dict[str, torch.Tensor]]:
+    ) -> tuple[dict[str, float | None], dict[str, torch.Tensor]]:
         """Compute per-quality advantages using span-based token masks.
 
         This is the span-aware alternative to compute_advantages(). Instead of
@@ -394,7 +394,7 @@ class VPRMCritic(nn.Module):
             - advantages: quality_name → clipped advantage (float)
             - critic_losses: quality_name → MSE loss tensor (for backward)
         """
-        advantages: dict[str, float] = {}
+        advantages: dict[str, float | None] = {}
         critic_losses: dict[str, torch.Tensor] = {}
 
         for q_name in self.quality_names:
@@ -403,7 +403,7 @@ class VPRMCritic(nn.Module):
             # Get this quality's token mask
             if q_name not in token_masks:
                 # Quality not in spans — skip (no gradient)
-                advantages[q_name] = None  # type: ignore[assignment]
+                advantages[q_name] = None
                 continue
 
             mask = token_masks[q_name]
@@ -429,7 +429,7 @@ class VPRMCritic(nn.Module):
 
             if count == 0:
                 # Empty mask — skip
-                advantages[q_name] = None  # type: ignore[assignment]
+                advantages[q_name] = None
                 continue
 
             # Mean-pool hidden states over this quality's span
@@ -489,7 +489,7 @@ class VPRMCritic(nn.Module):
         batch_token_masks: list[dict[str, torch.Tensor]],
         batch_rewards: list[dict[str, float]],
         ctx: TrainingContext,
-    ) -> tuple[list[dict[str, float]], torch.Tensor]:
+    ) -> tuple[list[dict[str, float | None]], torch.Tensor]:
         """Batch version of compute_advantages_from_spans.
 
         Args:
@@ -501,7 +501,7 @@ class VPRMCritic(nn.Module):
         Returns:
             (batch_advantages, total_critic_loss)
         """
-        batch_advantages: list[dict[str, float]] = []
+        batch_advantages: list[dict[str, float | None]] = []
         all_losses: list[torch.Tensor] = []
 
         for _i, (hs, masks, rewards) in enumerate(
@@ -509,7 +509,7 @@ class VPRMCritic(nn.Module):
         ):
             if not masks:
                 # No masks for this sample — skip critic
-                batch_advantages.append(dict.fromkeys(self.quality_names))  # type: ignore[arg-type]
+                batch_advantages.append(dict.fromkeys(self.quality_names))
                 continue
 
             advs, losses = self.compute_advantages_from_spans(hs, masks, rewards, ctx)

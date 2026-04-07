@@ -1059,7 +1059,7 @@ class QGREStepAdvantageEstimator:
                     old_var = self._reward_var[pid][quality_name]
                     new_var = old_var + self._var_lr * ((r - new_mean) ** 2 - old_var)
                     if new_var < 0:
-                        warnings.warn(  # type: ignore[possibly-undefined]
+                        warnings.warn(
                             f"Negative variance {new_var:.6f} for prompt {pid} quality {quality_name}. "
                             f"old_var={old_var:.6f}, r={r:.4f}, r_mean={r_mean:.4f}. Clamping to 0.",
                             stacklevel=2,
@@ -1139,7 +1139,7 @@ class QGREStepAdvantageEstimator:
                 q_mask = masks[quality_name]
                 # Graceful handling instead of assert — don't crash on data-dependent mismatch
                 if q_mask.shape[0] != seq_len:
-                    warnings.warn(  # type: ignore[possibly-undefined]
+                    warnings.warn(
                         f"Mask shape mismatch for quality '{quality_name}': "
                         f"mask has {q_mask.shape[0]} tokens but sequence has {seq_len}. "
                         f"Skipping — check reward_fn scored_spans and tokenizer consistency.",
@@ -1183,8 +1183,6 @@ class QGREStepAdvantageEstimator:
             zero_overlap_mask = overlap_count == 0.0
             if zero_overlap_mask.any():
                 zero_count = zero_overlap_mask.sum().item()
-                import warnings
-
                 warnings.warn(
                     f"R3-RSP-006: {zero_count} tokens in sample {i} have zero overlap "
                     f"(missing from all quality masks). These tokens get zero advantage silently.",
@@ -1231,8 +1229,6 @@ class QGREStepAdvantageEstimator:
                 # Check for NaN and warn/skip
                 val_float = float(val)
                 if math.isnan(val_float):
-                    import warnings
-
                     warnings.warn(
                         f"NaN detected in advantage baseline V[{pid}][{key}]. Skipping entry.",
                         stacklevel=2,
@@ -1310,7 +1306,7 @@ def compute_advantages_vprm(
 
     # C05-SHAPE: Validate hidden_states device matches ctx.device when ctx provided
     if ctx is not None and hidden_states.device != ctx.device:
-        warnings.warn(  # type: ignore[possibly-undefined]
+        warnings.warn(
             f"C05-SHAPE: hidden_states on {hidden_states.device} but ctx.device={ctx.device}. "
             "Moving to ctx.device. Check upstream tensor placement.",
             stacklevel=2,
@@ -1443,8 +1439,6 @@ def compute_advantages_vprm(
     if critic_losses:
         losses = [loss for loss in critic_losses.values() if not torch.isnan(loss)]
         if len(losses) < len(critic_losses):
-            import warnings
-
             warnings.warn(
                 f"Filtered {len(critic_losses) - len(losses)} NaN critic losses before aggregation",
                 stacklevel=2,
