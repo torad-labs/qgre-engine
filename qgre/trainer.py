@@ -278,7 +278,7 @@ class QGRETrainer:
                 "token_level_loss": True,  # nosec B105 - not a password
                 "force_on_policy_ratio": False,
                 "remove_length_normalization": alg.loss_type == "dr_grpo",
-                "lambda_return": alg.lambda_return,  # type: ignore[typeddict-item]
+                "lambda_return": alg.lambda_return,
             }
         )
 
@@ -3056,12 +3056,15 @@ class QGRETrainer:
                         ):
                             vars_dict = self.advantage_estimator._reward_var[last_pid]
                             # Learnability = p(1-p), approximated from variance
+                            # Filter to string keys (quality names), not int keys (step numbers)
                             learn_items = [
-                                (q, min(v, 0.25)) for q, v in vars_dict.items() if v > 0
+                                (q, min(v, 0.25))
+                                for q, v in vars_dict.items()
+                                if v > 0 and isinstance(q, str)
                             ][:5]
                             if learn_items:
                                 learn_vals = " │ ".join(
-                                    f"{str(q)[:8]:>8s} {v:.3f}" for q, v in learn_items
+                                    f"{q[:8]:>8s} {v:.3f}" for q, v in learn_items
                                 )
                                 rows.append(("Learning", learn_vals))
 

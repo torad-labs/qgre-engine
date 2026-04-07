@@ -314,6 +314,8 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
     try:
         if not path.exists():
             raise FileNotFoundError(f"Checkpoint file not found: {path}")
+        # weights_only=False required for optimizer/RNG state.
+        # Safe: checkpoints are local-only, never downloaded from untrusted sources.
         raw_checkpoint = torch.load(path, map_location="cpu", weights_only=False)  # nosec B614
 
         # C06-SCHEMA: Validate schema_version exists
@@ -410,6 +412,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                     f"Original checkpoint {path} was corrupted. Training progress may be lost.",
                     stacklevel=2,
                 )
+                # See comment above about weights_only=False
                 raw_checkpoint = torch.load(prev_path, map_location="cpu", weights_only=False)  # nosec B614
 
                 # C06-SCHEMA: Handle missing schema_version (old format)

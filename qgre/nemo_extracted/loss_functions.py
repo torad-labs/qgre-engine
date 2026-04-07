@@ -74,6 +74,7 @@ class ClippedPGLossConfig(TypedDict):
     token_level_loss: bool
     force_on_policy_ratio: NotRequired[bool]
     remove_length_normalization: NotRequired[bool]  # Dr.GRPO: skip horizon division
+    lambda_return: NotRequired[float]  # GRPO-λ: eligibility trace decay factor
 
 
 class ClippedPGLossFn:
