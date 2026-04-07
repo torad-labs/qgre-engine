@@ -54,26 +54,8 @@ class TestWeightLoaderLifecycle:
         loader._transition_to_ready()
         assert loader.lifecycle == WeightLoaderLifecycle.READY
 
-    def test_transition_to_dropout(self):
-        """Can transition from READY to DROPOUT_ACTIVE."""
-        model = MockModel()
-        loader = WeightLoader(model)
-
-        loader._transition_to_loading()
-        loader._transition_to_ready()
-        loader._transition_to_dropout()
-        assert loader.lifecycle == WeightLoaderLifecycle.DROPOUT_ACTIVE
-
-    def test_transition_back_from_dropout_to_ready(self):
-        """Can transition from DROPOUT_ACTIVE back to READY."""
-        model = MockModel()
-        loader = WeightLoader(model)
-
-        loader._transition_to_loading()
-        loader._transition_to_ready()
-        loader._transition_to_dropout()
-        loader._transition_to_ready()  # Restore
-        assert loader.lifecycle == WeightLoaderLifecycle.READY
+    # ELI-001: Removed test_transition_to_dropout and test_transition_back_from_dropout_to_ready
+    # DROPOUT_ACTIVE state was removed - dropout is tracked externally by lora_dropout module
 
     def test_invalid_transition_raises(self):
         """Invalid transitions raise RuntimeError."""
@@ -83,10 +65,6 @@ class TestWeightLoaderLifecycle:
         # Can't go from UNINITIALIZED directly to READY
         with pytest.raises(RuntimeError, match="Invalid state transition"):
             loader._transition_to_ready()
-
-        # Can't go from UNINITIALIZED directly to DROPOUT
-        with pytest.raises(RuntimeError, match="Invalid state transition"):
-            loader._transition_to_dropout()
 
     def test_reset_state_transitions_to_uninitialized(self):
         """reset_state() transitions back to UNINITIALIZED."""
@@ -138,14 +116,8 @@ class TestLegacyCompatibility:
         loader._transition_to_ready()
         assert loader._direct_ready is True
 
-    def test_direct_ready_true_when_dropout_active(self):
-        """_direct_ready is True when DROPOUT_ACTIVE."""
-        model = MockModel()
-        loader = WeightLoader(model)
-        loader._transition_to_loading()
-        loader._transition_to_ready()
-        loader._transition_to_dropout()
-        assert loader._direct_ready is True
+    # ELI-001: Removed test_direct_ready_true_when_dropout_active
+    # DROPOUT_ACTIVE state was removed from the state machine
 
     def test_load_lora_called_reflects_lifecycle(self):
         """_load_lora_called is True when past UNINITIALIZED."""

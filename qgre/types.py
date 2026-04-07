@@ -159,14 +159,16 @@ class AdvantageEstimatorState:
 class WeightLoaderLifecycle(Enum):
     """State machine for WeightLoader lifecycle.
 
-    Consolidates 4 boolean flags into a single enum to prevent impossible states.
+    Tracks weight loading states. Does NOT track dropout state — that's managed
+    separately by lora_dropout.apply_lora_dropout._dropout_active because dropout
+    is a temporary modification during generation, not a lifecycle state.
+
     Valid transitions:
         UNINITIALIZED -> LOADING       (first sync_lora_direct call)
         LOADING -> READY               (prepare_vllm_lora_loading succeeds)
         LOADING -> ERROR               (prepare fails)
-        READY -> DROPOUT_ACTIVE        (apply_lora_dropout)
-        DROPOUT_ACTIVE -> READY        (restore)
         READY -> UNINITIALIZED         (reset_state for engine recreate)
+        ERROR -> LOADING               (retry after failure)
         ERROR -> UNINITIALIZED         (explicit recovery)
         any -> ERROR                   (exception during operation)
     """
@@ -174,7 +176,6 @@ class WeightLoaderLifecycle(Enum):
     UNINITIALIZED = "uninitialized"
     LOADING = "loading"
     READY = "ready"
-    DROPOUT_ACTIVE = "dropout_active"
     ERROR = "error"
 
 
@@ -200,6 +201,11 @@ class WeightLoaderState:
 
     def __post_init__(self):
         """Sync legacy fields from lifecycle if lifecycle is explicitly set."""
+        # ELI-001: Migrate old "dropout_active" checkpoints to "ready"
+        # (dropout was removed from state machine - it's tracked externally)
+        if self.lifecycle == "dropout_active":
+            self.lifecycle = "ready"
+
         # If lifecycle was explicitly set to non-default, update legacy fields
         if self.lifecycle != "uninitialized":
             # SFH-004: Validate lifecycle value with actionable error message
@@ -212,14 +218,13 @@ class WeightLoaderState:
                     f"Valid values: {valid_values}. "
                     "This may indicate checkpoint corruption or schema mismatch.",
                 ) from e
-            self.initialized = lc in (
-                WeightLoaderLifecycle.READY,
-                WeightLoaderLifecycle.DROPOUT_ACTIVE,
-            )
+            # ELI-001: initialized = True only when READY (ERROR means failed)
+            self.initialized = lc == WeightLoaderLifecycle.READY
+            # load_lora_called = True when we've attempted loading (includes ERROR)
             self.load_lora_called = lc in (
                 WeightLoaderLifecycle.LOADING,
                 WeightLoaderLifecycle.READY,
-                WeightLoaderLifecycle.DROPOUT_ACTIVE,
+                WeightLoaderLifecycle.ERROR,
             )
         # If legacy fields set but lifecycle is default, infer lifecycle
         elif self.initialized:

@@ -86,15 +86,11 @@ class WeightLoader:
         """Transition to READY state (prepare_vllm_lora_loading succeeded)."""
         self._transition_to(
             WeightLoaderLifecycle.READY,
-            (WeightLoaderLifecycle.LOADING, WeightLoaderLifecycle.DROPOUT_ACTIVE),
+            (WeightLoaderLifecycle.LOADING,),
         )
 
-    def _transition_to_dropout(self) -> None:
-        """Transition to DROPOUT_ACTIVE state (apply_lora_dropout called)."""
-        self._transition_to(
-            WeightLoaderLifecycle.DROPOUT_ACTIVE,
-            (WeightLoaderLifecycle.READY,),
-        )
+    # ELI-001: Removed _transition_to_dropout - dropout state is tracked externally
+    # by lora_dropout.apply_lora_dropout._dropout_active, not by this state machine.
 
     def _transition_to_error(self) -> None:
         """Transition to ERROR state (exception during operation)."""
@@ -110,7 +106,6 @@ class WeightLoader:
                 WeightLoaderLifecycle.UNINITIALIZED,
                 WeightLoaderLifecycle.LOADING,
                 WeightLoaderLifecycle.READY,
-                WeightLoaderLifecycle.DROPOUT_ACTIVE,
                 WeightLoaderLifecycle.ERROR,
             ),
         )
@@ -120,11 +115,8 @@ class WeightLoader:
 
     @property
     def _direct_ready(self) -> bool:
-        """Legacy: True when in READY or DROPOUT_ACTIVE state."""
-        return self._lifecycle in (
-            WeightLoaderLifecycle.READY,
-            WeightLoaderLifecycle.DROPOUT_ACTIVE,
-        )
+        """Legacy: True when in READY state (weights loaded and ready for sync)."""
+        return self._lifecycle == WeightLoaderLifecycle.READY
 
     @property
     def _load_lora_called(self) -> bool:
@@ -151,18 +143,21 @@ class WeightLoader:
         """
         from unsloth_zoo.vllm_utils import load_lora_directly, prepare_vllm_lora_loading
 
-        # WS3-001: Track dropout state, skip sync if dropout active
-        if apply_lora_dropout is not None and getattr(apply_lora_dropout, "_dropout_active", False):
-            warnings.warn(
-                "WS3-001: sync_lora_direct called while LoRA dropout is active. "
-                "Skipping sync to avoid race condition. Call restore() first.",
-                stacklevel=2,
-            )
-            return
-
-        # CR-001: Lock protects state check + transition (prevents race where two threads
-        # both see _direct_ready=False and both try to initialize)
+        # ELI-002/003: Lock protects ALL operations including dropout check and fast path
+        # to prevent race conditions between state checks and transitions
         with self._lock:
+            # WS3-001: Track dropout state, skip sync if dropout active
+            # (checked inside lock to prevent race with dropout activation)
+            if apply_lora_dropout is not None and getattr(
+                apply_lora_dropout, "_dropout_active", False
+            ):
+                warnings.warn(
+                    "WS3-001: sync_lora_direct called while LoRA dropout is active. "
+                    "Skipping sync to avoid race condition. Call restore() first.",
+                    stacklevel=2,
+                )
+                return
+
             if first_call or not self._direct_ready:
                 # Bootstrap: register adapter once, set up GPU→GPU copy mappings
                 # State machine: UNINITIALIZED -> LOADING -> READY
@@ -215,19 +210,17 @@ class WeightLoader:
                         f"prepare_vllm_lora_loading failed — direct LoRA sync unavailable. "
                         f"Check vLLM engine initialization.\nOriginal error: {e}\n{traceback.format_exc()}",
                     ) from e
-                return  # Done with bootstrap, exit early
-
-        # Fast path (outside lock - tensor copy is thread-safe)
-        try:
-            load_lora_directly(model)
-        except Exception as e:
-            # SFH-001: Fast path failures must transition to ERROR state
-            with self._lock:
-                self._transition_to_error()
-            raise RuntimeError(
-                f"load_lora_directly fast path failed — weights may be inconsistent. "
-                f"State was {WeightLoaderLifecycle.READY.value}, now ERROR. Error: {e}",
-            ) from e
+            else:
+                # Fast path: direct GPU-to-GPU tensor copy (inside lock for thread safety)
+                try:
+                    load_lora_directly(model)
+                except Exception as e:
+                    # SFH-001: Fast path failures must transition to ERROR state
+                    self._transition_to_error()
+                    raise RuntimeError(
+                        f"load_lora_directly fast path failed — weights may be inconsistent. "
+                        f"State was {WeightLoaderLifecycle.READY.value}, now ERROR. Error: {e}",
+                    ) from e
 
     def sync_modules_to_save(self, weights: dict[str, torch.Tensor], ctx: TrainingContext) -> None:
         """Copy lm_head/embed_tokens into vLLM's base model.
@@ -557,15 +550,20 @@ class WeightLoader:
             atexit.register(self.cleanup_adapter_tempdir)
         return path
 
-    def reset_state(self):
+    def reset_state(self) -> bool:
         """WS3-009: Reset state on engine recreate.
 
         Transitions to UNINITIALIZED state, clearing _lora_request.
+
+        Returns:
+            True, indicating caller MUST also reset WeightBus._initialized.
+            This is an explicit contract: ignoring the return value risks
+            WeightBus thinking it's still initialized when the loader is not.
         """
         with self._lock:
             self._transition_to_uninitialized()
-        # W14: Signal WeightBus to reset _initialized flag
-        # (caller must handle this by setting weight_bus._initialized = False)
+        # ELI-005: Return value enforces caller contract - must reset WeightBus
+        return True  # weight_bus_needs_reset
 
     def cleanup_adapter_tempdir(self):
         """Explicitly clean up adapter tempdir. Call at trainer shutdown."""
