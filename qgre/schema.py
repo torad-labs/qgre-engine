@@ -306,6 +306,8 @@ TRAINER_STATE_SCHEMA: dict[str, FieldSpec] = {
     # RNG state is object type (torch tensor), validated separately
     "rng_state": FieldSpec((object, type(None)), Required.NO, default=None, coerce=False),
     "cuda_rng_state": FieldSpec((object, type(None)), Required.NO, default=None, coerce=False),
+    # MLflow run persistence for cross-resume continuity (R3-T1)
+    "mlflow_run_id": FieldSpec((str, type(None)), Required.NO, default=None),
 }
 
 # DataLoaderState schema (matches DataLoaderState dataclass fields)

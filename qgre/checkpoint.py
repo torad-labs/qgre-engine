@@ -443,7 +443,7 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
         checkpoint_dir = Path(path).parent
         import re
 
-        pattern = re.compile(r"global_step_(\d+)")
+        pattern = re.compile(r"global_step_(\d+)\.pt$")
         match = pattern.search(Path(path).name)
         if match:
             current_step = int(match.group(1))
@@ -463,6 +463,13 @@ def load_checkpoint(path: str | Path) -> CheckpointState:
                 )
                 # See comment above about weights_only=False
                 raw_checkpoint = torch.load(prev_path, map_location="cpu", weights_only=False)  # nosec B614
+
+                # FIX: Validate fallback checkpoint is also a dict (same check as primary)
+                if not isinstance(raw_checkpoint, dict):
+                    raise TypeError(
+                        f"Fallback checkpoint file {prev_path} contains a {type(raw_checkpoint).__name__}, "
+                        "not a dict. File is corrupted or was not saved by qgre.save_checkpoint."
+                    )
 
                 # C06-SCHEMA: Handle missing schema_version (old format)
                 checkpoint_schema = raw_checkpoint.get("schema_version")

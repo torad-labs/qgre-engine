@@ -126,6 +126,8 @@ class TrainerState:
     # RNG state for reproducibility across resume
     rng_state: object | None = None  # torch.get_rng_state() output
     cuda_rng_state: object | None = None  # torch.cuda.get_rng_state() output
+    # MLflow run persistence for cross-resume continuity (R3-T1)
+    mlflow_run_id: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> TrainerState:

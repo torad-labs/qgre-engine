@@ -154,11 +154,12 @@ class QGRETrainer:
         self._sq_validated = False  # Validate step_qualities keys against first reward result
 
         # Weight sync strategy validation — fail fast at init, not during training
-        if config.model.load_in_4bit and config.model.weight_sync_strategy == "merge":
+        if config.model.weight_sync_strategy == "merge":
             raise ValueError(
-                "weight_sync_strategy='merge' is incompatible with load_in_4bit=True. "
-                "MERGE creates new tensors and breaks shared memory with vLLM. "
-                "Use weight_sync_strategy='direct_copy' (default) for 4-bit training.",
+                "weight_sync_strategy='merge' is not currently supported. "
+                "MERGE strategy requires restore_for_training to be called, but the trainer "
+                "never calls it, so training will diverge after the first sync. "
+                "Use weight_sync_strategy='direct_copy' (default).",
             )
 
         # Algorithm setup
@@ -927,8 +928,10 @@ class QGRETrainer:
                     )
                 # FIX 15: Don't increment _accumulation_count on early return without backward
                 # The count tracks actual backward() calls, not skipped steps
+                # FIX R3-T2: Don't increment _accumulated_samples either — no backward means
+                # this step doesn't contribute to the loss average. Incrementing the denominator
+                # would dilute the average incorrectly.
                 self._accumulated_loss += 0.0
-                self._accumulated_samples += len(step)
                 self.global_step += 1
                 self.ctx.step = self.global_step
                 # T3: Scheduler step removed from early-return path - normal path handles it
@@ -2063,6 +2066,7 @@ class QGRETrainer:
             needs_weight_sync=getattr(self, "_needs_weight_sync", False),
             rng_state=torch.get_rng_state(),
             cuda_rng_state=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
+            mlflow_run_id=getattr(self, "_mlflow_run_id", None),
         )
 
         # Persist SyncState through the legacy WeightLoaderState container so
@@ -2429,6 +2433,9 @@ class QGRETrainer:
         # Restore fused_validated from checkpoint — same weights, same validation status
         self._fused_validated = checkpoint.trainer.fused_validated
 
+        # R3-T1: Restore MLflow run_id for cross-resume continuity
+        self._mlflow_run_id = checkpoint.trainer.mlflow_run_id
+
         # W11: Restore WeightLoaderState to generation_backend.weight_loader
         # FIX 7: Always restore restore_failed, even if weight_loader path is skipped
         if checkpoint.weight_loader:
@@ -2452,11 +2459,21 @@ class QGRETrainer:
             loader_state = self.generation_backend.weight_loader._state
             from qgre.sync_state import SyncLifecycle
 
-            if wl_state.initialized:
-                loader_state.lifecycle = SyncLifecycle.READY
-                loader_state.initialized = True
-            elif wl_state.load_lora_called:
-                loader_state.lifecycle = SyncLifecycle.LOADING
+            # R3-C3: Restore lifecycle directly from checkpoint to preserve ERROR states
+            lifecycle_str = (wl_state.lifecycle or "uninitialized").upper()
+            try:
+                loader_state.lifecycle = SyncLifecycle[lifecycle_str]
+            except KeyError:
+                # Unknown lifecycle value — fall back to UNINITIALIZED to force a clean re-sync
+                import warnings
+
+                warnings.warn(
+                    f"Unknown lifecycle '{wl_state.lifecycle}' in checkpoint, falling back to UNINITIALIZED",
+                    stacklevel=2,
+                )
+                loader_state.lifecycle = SyncLifecycle.UNINITIALIZED
+
+            loader_state.initialized = wl_state.initialized
             # Note: restore_failed already restored above (outside this block)
             # W1: Restore lora_request_id if present (backward compat: may be None in old checkpoints)
             if hasattr(wl_state, "lora_request_id") and wl_state.lora_request_id is not None:
@@ -2773,12 +2790,41 @@ class QGRETrainer:
         # zero_grad() moved after resume() to avoid clearing loaded optimizer state
         cfg = self.config.training
 
+        # Try to resume from checkpoint BEFORE MLflow setup (so we can reuse run_id)
+        self.resume(self.config.logging.checkpoint_dir)
+
         # MLflow experiment setup (PILLARS.md line 128)
+        # R3-T1: Moved after resume so we can reuse the MLflow run_id if resuming
         try:
             import mlflow
 
             mlflow.set_experiment(self.config.logging.mlflow_experiment)
-            mlflow.start_run(run_name=f"qgre-step-{self.global_step}")
+            # Check if we're resuming an existing run
+            if hasattr(self, "_mlflow_run_id") and self._mlflow_run_id is not None:
+                try:
+                    mlflow.start_run(run_id=self._mlflow_run_id)
+                    import warnings
+
+                    warnings.warn(
+                        f"Resumed MLflow run {self._mlflow_run_id} from checkpoint. "
+                        f"Continuing from step {self.global_step}.",
+                        stacklevel=2,
+                    )
+                except (RuntimeError, ValueError, OSError) as e:
+                    import warnings
+
+                    warnings.warn(
+                        f"Failed to resume MLflow run {self._mlflow_run_id}: {e}. "
+                        "Starting new run. Your training history is fragmented.",
+                        stacklevel=2,
+                    )
+                    mlflow.start_run(run_name=f"qgre-step-{self.global_step}")
+                    active = mlflow.active_run()
+                    self._mlflow_run_id = active.info.run_id if active else None
+            else:
+                mlflow.start_run(run_name=f"qgre-step-{self.global_step}")
+                active = mlflow.active_run()
+                self._mlflow_run_id = active.info.run_id if active else None
             log_training_params(
                 {
                     "model": {
@@ -2798,9 +2844,6 @@ class QGRETrainer:
             import warnings
 
             warnings.warn(f"MLflow setup failed: {e}. Metrics will not be tracked.", stacklevel=2)
-
-        # Try to resume from checkpoint
-        self.resume(self.config.logging.checkpoint_dir)
 
         # DI1: Restore dataloader state after resume (dataloader not available inside resume())
         if getattr(self, "_pending_dataloader_state", None):
@@ -2875,6 +2918,8 @@ class QGRETrainer:
                     and backend.weight_loader is not None
                     and gen_cfg.lora_dropout_rate == 0
                 ):
+                    # R3-W1: Sync can raise from check_sync_allowed. If it raises,
+                    # _needs_weight_sync stays True so next step retries. Only clear on success.
                     weight_bus.sync(
                         backend.weight_exporter,
                         backend.weight_loader,
