@@ -116,7 +116,8 @@ class VPRMCritic(nn.Module):
                     import warnings
 
                     warnings.warn(
-                        f"NaN/Inf in online head '{q_name}' — skipping Polyak update for this head", stacklevel=2
+                        f"NaN/Inf in online head '{q_name}' — skipping Polyak update for this head",
+                        stacklevel=2,
                     )
                     continue
                 # Move online params to target device before Polyak update
@@ -323,6 +324,7 @@ class VPRMCritic(nn.Module):
             if not online_pred.requires_grad:
                 if q_name not in self._no_grad_warned:
                     import logging
+
                     logging.getLogger(__name__).error(
                         f"Critic head '{q_name}' has requires_grad=False — skipping advantage computation to prevent stale predictions"
                     )

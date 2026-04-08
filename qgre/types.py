@@ -202,11 +202,16 @@ class AdvantageEstimatorState:
 
 
 class WeightLoaderLifecycle(Enum):
-    """State machine for WeightLoader lifecycle.
+    """State machine for WeightLoader lifecycle (legacy serialization enum).
 
-    Tracks weight loading states. Does NOT track dropout state — that's managed
-    separately by lora_dropout.apply_lora_dropout._dropout_active because dropout
-    is a temporary modification during generation, not a lifecycle state.
+    Used by WeightLoaderState (the on-disk checkpoint dataclass) for backwards
+    compatibility with older checkpoints. The live WeightLoader now reads its
+    lifecycle from the injected SyncState (which uses qgre.sync_state.SyncLifecycle);
+    this string-valued enum exists only to keep checkpoint round-trips stable.
+
+    Tracks weight loading states. Does NOT track dropout state — that lives in
+    SyncState alongside lifecycle, cache_stale, and initialized, and is managed
+    via the dropout_context() context manager in lora_dropout.apply_lora_dropout.
 
     Valid transitions:
         UNINITIALIZED -> LOADING       (first sync_lora_direct call)
@@ -536,6 +541,7 @@ class CheckpointState:
                 game_state = game_state_raw
             elif isinstance(game_state_raw, dict):
                 from qgre.checkpoint import gamestate_from_dict
+
                 game_state = gamestate_from_dict(game_state_raw)
             else:
                 raise TypeError(
@@ -590,6 +596,7 @@ class CheckpointState:
             elif isinstance(game_state_raw, dict):
                 # Convert dict to GameState using gamestate_from_dict
                 from qgre.checkpoint import gamestate_from_dict
+
                 game_state = gamestate_from_dict(game_state_raw)
             elif isinstance(game_state_raw, GameState):
                 game_state = game_state_raw
@@ -607,7 +614,7 @@ class CheckpointState:
             dataloader=dataloader,
             advantage_estimator=advantage_estimator,
             weight_loader=weight_loader,
-            game_state=game_state,  # type: ignore[arg-type]
+            game_state=game_state,
             schema_version=d.get("schema_version", CHECKPOINT_SCHEMA_VERSION),
             **optional_kwargs,
         )

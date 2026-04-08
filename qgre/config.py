@@ -156,13 +156,11 @@ class GenerationConfig:
         # FIX #7: top_p/min_p bounds
         if not (0 <= self.top_p <= 1):
             raise ValueError(
-                f"GenerationConfig: top_p ({self.top_p}) not in [0, 1]. "
-                "Must be a probability.",
+                f"GenerationConfig: top_p ({self.top_p}) not in [0, 1]. Must be a probability.",
             )
         if not (0 <= self.min_p <= 1):
             raise ValueError(
-                f"GenerationConfig: min_p ({self.min_p}) not in [0, 1]. "
-                "Must be a probability.",
+                f"GenerationConfig: min_p ({self.min_p}) not in [0, 1]. Must be a probability.",
             )
         # FIX #14: lora_dropout_rate bounds
         if not (0 <= self.lora_dropout_rate <= 1):
@@ -379,7 +377,9 @@ class LoRAProConfig:
     eps: float = 1e-8  # Epsilon for numerical stability
     delta: float = 1e-8  # Regularization for matrix pseudo-inverse
     use_rslora: bool = True  # RSLoRA scaling (alpha/sqrt(r)) vs standard (alpha/r)
-    grad_scale: float = 1.0  # Post-adjustment gradient multiplier (counteracts 1/s² attenuation for RL)
+    grad_scale: float = (
+        1.0  # Post-adjustment gradient multiplier (counteracts 1/s² attenuation for RL)
+    )
     grad_floor: float = 1e-7  # Minimum gradient norm (prevents numerical collapse)
 
 

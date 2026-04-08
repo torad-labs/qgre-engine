@@ -14,11 +14,15 @@ Training time: Same as standard LoRA (closed-form solution, no extra forward pas
 Mergeability: Unchanged — still standard LoRA weights after training.
 """
 
+# pyright: reportConstantRedefinition=false
+# Math notation: A, B, C, X are matrix names from the LoRA-Pro paper
+# (Sylvester equation Ax + xB = C). Reassignment is intentional and clear.
+
 from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -171,10 +175,9 @@ class LoRAProAdjuster:
                 lora_b_params[layer_id] = param
 
         # Match A and B matrices
-        for layer_id in lora_a_params:
-            if layer_id in lora_b_params:
-                A = lora_a_params[layer_id]
-                B = lora_b_params[layer_id]
+        for layer_id, A in lora_a_params.items():
+            B = lora_b_params.get(layer_id)
+            if B is not None:
                 self._lora_pairs.append((A, B, layer_id))
                 self._states[layer_id] = LoRAProState()
 
@@ -249,13 +252,18 @@ class LoRAProAdjuster:
             # Compute equivalent gradient for Adam momentum
             equiv_grad = s * B @ grad_A + s * grad_B @ A
 
-            # Initialize or update momentum
-            if state.exp_avg is None:
-                state.exp_avg = (1 - beta1) * equiv_grad
-                state.exp_avg_sq = (1 - beta2) * (equiv_grad * equiv_grad)
+            # Initialize or update momentum. Bind to locals so pyright can narrow
+            # the Optional fields once the init branch has established them.
+            exp_avg = state.exp_avg
+            exp_avg_sq = state.exp_avg_sq
+            if exp_avg is None or exp_avg_sq is None:
+                exp_avg = (1 - beta1) * equiv_grad
+                exp_avg_sq = (1 - beta2) * (equiv_grad * equiv_grad)
+                state.exp_avg = exp_avg
+                state.exp_avg_sq = exp_avg_sq
             else:
-                state.exp_avg.lerp_(equiv_grad, 1 - beta1)
-                state.exp_avg_sq.mul_(beta2).addcmul_(equiv_grad, equiv_grad, value=1 - beta2)
+                exp_avg.lerp_(equiv_grad, 1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(equiv_grad, equiv_grad, value=1 - beta2)
 
             # Bias correction
             step = global_step + 1
@@ -263,9 +271,9 @@ class LoRAProAdjuster:
             bias_correction2 = 1 - beta2**step
             bias_correction2_sqrt = math.sqrt(bias_correction2)
 
-            # Adam-style normalized gradient
-            denom = (state.exp_avg_sq.sqrt() / bias_correction2_sqrt).add_(eps)
-            g = (state.exp_avg / bias_correction1) / denom
+            # Adam-style normalized gradient (uses non-None locals from above)
+            denom = (exp_avg_sq.sqrt() / bias_correction2_sqrt).add_(eps)
+            g = (exp_avg / bias_correction1) / denom
             g = g.to(B.dtype)
 
             # Back-project to A and B gradients
@@ -281,9 +289,10 @@ class LoRAProAdjuster:
                 C = -(1 / s**2) * B_TB_inv @ grad_A_adj @ A.T
                 try:
                     X = solve_sylvester(B_TB, AA_T, C)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001 — solver can fail many ways (singular, numerical), all should fall back
                     self._sylvester_failures += 1
                     import warnings
+
                     warnings.warn(
                         f"LoRA-Pro: Sylvester solve failed for {layer_id}: {e}. "
                         f"Using simplified adjustment (zero matrix). Total failures: {self._sylvester_failures}",
@@ -360,7 +369,7 @@ class LoRAProAdjuster:
                 if saved_state["exp_avg"] is not None:
                     # Find device from corresponding parameter
                     device_found = False
-                    for A, B, lid in self._lora_pairs:
+                    for A, _B, lid in self._lora_pairs:
                         if lid == layer_id:
                             state.exp_avg = saved_state["exp_avg"].to(A.device)
                             state.exp_avg_sq = saved_state["exp_avg_sq"].to(A.device)
@@ -368,6 +377,7 @@ class LoRAProAdjuster:
                             break
                     if not device_found:
                         import warnings
+
                         warnings.warn(
                             f"LoRA-Pro: Could not find device for layer {layer_id}. "
                             "State may be on wrong device.",
@@ -389,10 +399,7 @@ def compute_gradient_approximation_error(
     Returns:
         Dict with approximation error metrics per layer.
     """
-    if use_rslora:
-        s = lora_alpha / math.sqrt(lora_rank)
-    else:
-        s = lora_alpha / lora_rank
+    s = lora_alpha / math.sqrt(lora_rank) if use_rslora else lora_alpha / lora_rank
 
     errors = {}
 
@@ -402,6 +409,8 @@ def compute_gradient_approximation_error(
 
         layer_id = name.split("lora_A")[0]
         A = param
+        # Re-narrow grad after rebinding param → A so pyright tracks non-None.
+        assert A.grad is not None
 
         # Find corresponding B
         B = None
@@ -416,20 +425,16 @@ def compute_gradient_approximation_error(
         # Equivalent gradient: g̃ = s*B*∇A + s*∇B*A
         equiv_grad = s * B @ A.grad + s * B.grad @ A
 
-        # The "ideal" gradient would have rank = min(out_dim, in_dim)
-        # We can measure how much information is lost by comparing norms
-        full_rank = min(equiv_grad.shape)
-        current_rank = lora_rank
-
-        # Compute singular values to see energy distribution
+        # Compute singular values to see how much energy the current rank captures.
+        # SVD can fail on degenerate / non-finite gradients — log and continue.
         try:
             _, singular_values, _ = torch.linalg.svd(equiv_grad.float())
             total_energy = (singular_values**2).sum()
-            captured_energy = (singular_values[:current_rank] ** 2).sum()
+            captured_energy = (singular_values[:lora_rank] ** 2).sum()
             energy_ratio = (captured_energy / (total_energy + 1e-8)).item()
             errors[f"{layer_id}energy_captured"] = energy_ratio
-        except Exception:
-            pass
+        except Exception as svd_err:  # noqa: BLE001 — SVD has many failure modes; metric is best-effort
+            logger.debug("LoRA-Pro energy metric SVD failed for %s: %s", layer_id, svd_err)
 
         errors[f"{layer_id}equiv_grad_norm"] = equiv_grad.norm().item()
 

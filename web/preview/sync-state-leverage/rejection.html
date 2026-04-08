@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rejection Framework — SyncState Leverage Point</title>
+    <style>
+:root {
+    --bg: #fafaf8;
+    --card: #ffffff;
+    --card-border: #e4e2dc;
+    --text: #1a1a1a;
+    --text-muted: #6b6b6b;
+    --accent: #0e8a7e;
+    --accent-dim: #b4dfda;
+    --amber: #c47a10;
+    --amber-dim: #f5e6c8;
+    --red-soft: #b84040;
+    --red-soft-dim: #e8c4c4;
+    --survived: #eaf5f3;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+}
+
+.container {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+.hero {
+    padding: 80px 0 48px;
+    border-bottom: 1px solid var(--card-border);
+}
+.hero-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    color: var(--red-soft);
+}
+.hero h1 {
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    margin-bottom: 14px;
+}
+.hero .subtitle {
+    font-size: 18px;
+    color: var(--text-muted);
+    max-width: 580px;
+}
+
+section {
+    padding: 56px 0;
+    border-bottom: 1px solid var(--card-border);
+}
+section:last-of-type { border-bottom: none; }
+.section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+section h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    letter-spacing: -0.3px;
+}
+section h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 32px;
+    margin-bottom: 16px;
+}
+section p { color: var(--text); margin-bottom: 16px; }
+
+.anti-pattern {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-left: 4px solid var(--red-soft);
+    border-radius: 0 12px 12px 0;
+    padding: 24px 28px;
+    margin-bottom: 20px;
+}
+.anti-pattern h4 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--red-soft);
+    margin-bottom: 12px;
+}
+.anti-pattern p {
+    margin-bottom: 12px;
+    font-size: 15px;
+}
+.anti-pattern p:last-child { margin-bottom: 0; }
+.anti-pattern .why {
+    font-size: 14px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--card-border);
+    padding-top: 12px;
+    margin-top: 12px;
+}
+
+.assumption-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 14px;
+}
+.assumption-table th {
+    text-align: left;
+    padding: 12px 16px;
+    background: var(--red-soft-dim);
+    font-weight: 600;
+    border-bottom: 2px solid var(--red-soft);
+}
+.assumption-table td {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--card-border);
+    vertical-align: top;
+}
+.assumption-table tr:last-child td { border-bottom: none; }
+.assumption-table .impact {
+    color: var(--red-soft);
+    font-weight: 500;
+}
+
+.boundary-card {
+    background: #fdf5f5;
+    border: 1px solid var(--red-soft-dim);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin: 16px 0;
+}
+.boundary-card strong {
+    color: var(--red-soft);
+}
+
+.nav-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 32px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-decoration: none;
+}
+.nav-back:hover { color: var(--text); }
+
+.page-footer {
+    padding: 40px 0 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+@media (max-width: 640px) {
+    .hero h1 { font-size: 28px; }
+    .hero { padding: 48px 0 36px; }
+    section { padding: 40px 0; }
+    .assumption-table { font-size: 13px; }
+    .assumption-table th, .assumption-table td { padding: 10px 12px; }
+}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="hero">
+            <div class="hero-label">Rejection Framework</div>
+            <h1>What NOT to Do</h1>
+            <p class="subtitle">Anti-patterns, overturned assumptions, and boundaries. These approaches were considered and rejected during crystallization.</p>
+        </header>
+
+        <section>
+            <div class="section-label">Anti-Patterns</div>
+            <h2>Approaches That Would Fail</h2>
+
+            <div class="anti-pattern">
+                <h4>Add More Assertions (v4)</h4>
+                <p>The temptation: keep flags scattered but add consistency assertions everywhere. "Defense in depth."</p>
+                <p class="why"><strong>Why rejected:</strong> 10 rounds of hardening already added assertions. They caught bugs but didn't prevent the bug class. Detection is not prevention. Structural fix > runtime checks. Assertions are O(n) in bug count; structural impossibility is O(1).</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>Bundle in TrainingContext (v2)</h4>
+                <p>The temptation: TrainingContext is already passed everywhere. Just add SyncState as a field.</p>
+                <p class="why"><strong>Why rejected:</strong> TrainingContext is a config dataclass — immutable, passed per-call, belongs to the outer loop. SyncState is runtime state — mutable, needs to live across calls, belongs to the inner loop. Bundling conflates config with state. WeightBus and WeightLoader don't receive TrainingContext at construction; they get it per sync call. Wrong level of abstraction.</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>Singleton / Global State (training pull)</h4>
+                <p>The temptation: create a module-level SYNC_STATE singleton that anyone can import.</p>
+                <p class="why"><strong>Why rejected:</strong> Singletons are implicit dependencies. Tests become impossible to isolate. Multiple trainers (future possibility) would share state incorrectly. DI is explicit and testable. The existing test_sync_state.py works because SyncState is instantiated per test.</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>SyncState Owns the Operations (v6 - partial)</h4>
+                <p>The temptation: move apply_lora_dropout logic INTO SyncState. Make it <code>state.apply_dropout(model, rate)</code>.</p>
+                <p class="why"><strong>Why rejected:</strong> SyncState should be generic state management. apply_lora_dropout has LoRA-specific logic (finding lora_A parameters, Bernoulli masking, weight cloning). Coupling domain logic to state management violates single responsibility. The compromise: SyncState provides the context manager, apply_lora_dropout does the work inside it.</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>Event Sourcing (v8)</h4>
+                <p>The temptation: every state change is an event. Reconstruct state by replaying. Audit trail for debugging.</p>
+                <p class="why"><strong>Why rejected:</strong> Over-engineering. This is a single-machine training loop, not a distributed system. The state space is 5 booleans. The "audit trail" is logging. Event sourcing adds complexity without solving the actual problem (scattered ownership). YAGNI.</p>
+            </div>
+
+            <div class="anti-pattern">
+                <h4>Protocol / Interface Abstraction (v7)</h4>
+                <p>The temptation: define <code>class SyncStateProtocol(Protocol)</code> so we can inject mocks.</p>
+                <p class="why"><strong>Why rejected:</strong> Premature abstraction. SyncState is already testable — test_sync_state.py proves it. The class is concrete, has no I/O, and can be instantiated directly in tests. Adding a Protocol adds indirection without benefit. If we need mocking later, we can add it then.</p>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Overturned</div>
+            <h2>Assumptions That Were Wrong</h2>
+
+            <table class="assumption-table">
+                <tr>
+                    <th>Assumption</th>
+                    <th>What Evidence Showed</th>
+                    <th>Impact</th>
+                </tr>
+                <tr>
+                    <td>TrainingContext is the natural home for runtime state</td>
+                    <td>TrainingContext is config (immutable, passed per-call). SyncState is runtime (mutable, lives across calls). Different lifecycles.</td>
+                    <td class="impact">SyncState is a separate object with DI</td>
+                </tr>
+                <tr>
+                    <td>State objects should only hold state, not operations</td>
+                    <td>The restore() pattern (return a cleanup function) is forgotten. Context managers guarantee cleanup via language construct.</td>
+                    <td class="impact">SyncState provides dropout_context()</td>
+                </tr>
+                <tr>
+                    <td>Module-level locks are fine for synchronization</td>
+                    <td>_dropout_lock in lora_dropout.py is separate from _sync_lock in weight_bus.py. Two locks protecting related state = coordination nightmare.</td>
+                    <td class="impact">Single lock inside SyncState._lock</td>
+                </tr>
+                <tr>
+                    <td>More checks = more safety</td>
+                    <td>10 rounds of hardening added assertions. They caught bugs at runtime but didn't prevent the bug class. Detection != prevention.</td>
+                    <td class="impact">Structural fix (impossible states) over runtime checks</td>
+                </tr>
+            </table>
+        </section>
+
+        <section>
+            <div class="section-label">Boundaries</div>
+            <h2>Hard Limits</h2>
+
+            <div class="boundary-card">
+                <strong>Do NOT add SyncState to TrainingContext.</strong> They have different lifecycles. Config is immutable and passed per-call. State is mutable and persists across calls.
+            </div>
+
+            <div class="boundary-card">
+                <strong>Do NOT make SyncState a singleton.</strong> Use dependency injection. Singletons are implicit dependencies that break testing and future multi-trainer scenarios.
+            </div>
+
+            <div class="boundary-card">
+                <strong>Do NOT move LoRA-specific logic into SyncState.</strong> SyncState is generic state management. apply_lora_dropout knows about lora_A parameters. Keep them separate.
+            </div>
+
+            <div class="boundary-card">
+                <strong>Do NOT keep any module-level state flags.</strong> After this implementation, _dropout_active, _restore_failed, _initialized, _engine_id, _cache_potentially_stale should not exist anywhere except inside SyncState.
+            </div>
+
+            <div class="boundary-card">
+                <strong>Do NOT skip the context manager.</strong> Manual enter/exit calls get forgotten. The context manager is the mechanism that makes cleanup impossible to skip.
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Drift Patterns</div>
+            <h2>What Would Go Wrong Later</h2>
+
+            <h3>If we kept scattered flags:</h3>
+            <p>Every new feature that touches weight sync would need to understand which flag lives where. New developers would add their own flags. The 5 flags would become 8, then 12. Each flag would have its own lock (or none). Race conditions would become unfixable because no one would understand the full state space.</p>
+
+            <h3>If we used TrainingContext:</h3>
+            <p>TrainingContext would grow to hold both config AND state. The boundary between "things that configure a run" and "things that track runtime state" would blur. Eventually someone would try to serialize TrainingContext and wonder why it has transient state. Or try to share it across workers and get race conditions.</p>
+
+            <h3>If we skipped the context manager:</h3>
+            <p>The enter_dropout/exit_dropout pattern would work... until someone adds a new code path and forgets exit_dropout. The "dropout applied twice without restore" warning would become common. Eventually someone would disable the warning instead of fixing the bug.</p>
+
+            <a href="index.html" class="nav-back">
+                <span class="arrow">&larr;</span> Back to hub
+            </a>
+        </section>
+
+        <footer class="page-footer">
+            Generated by feature-crystallize skill &middot; 2026-04-08
+        </footer>
+    </div>
+</body>
+</html>

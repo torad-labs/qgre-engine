@@ -288,6 +288,10 @@ ignore = [
     "F823",    # False positive - warnings is imported at module level
     "ANN001",  # critic param is VPRMCritic (complex typing)
 ]
+"qgre/lora_pro.py" = [
+    "N806",    # Linear-algebra notation (A, B, C, X for matrices — Sylvester equation)
+    "N803",    # Linear-algebra argument names (A, B for LoRA factors)
+]
 "qgre/attention_bonds.py" = [
     "N812",    # import torch.nn.functional as F is PyTorch convention
 ]
@@ -373,6 +377,11 @@ exclude = [
     # that pyright cannot analyze correctly (HAS_TRITON guard pattern)
     "qgre/triton_logprobs.py",
 ]
+
+# Auto-discover the project venv so bare `pyright` (e.g. from pre-commit) sees
+# torch / vllm / peft / etc. with the same type info that `uv run pyright` does.
+venvPath = "."
+venv = ".venv"
 
 # STRICT mode - catches silent ML bugs
 typeCheckingMode = "standard"  # Start with standard, upgrade to strict incrementally

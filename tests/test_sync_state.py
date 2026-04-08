@@ -198,11 +198,13 @@ class TestSyncStateSerialization:
         from qgre.sync_state import SyncLifecycle, SyncState
 
         state = SyncState()
-        state.load_state_dict({
-            "initialized": True,
-            "restore_failed": True,
-            "lifecycle": "READY",
-        })
+        state.load_state_dict(
+            {
+                "initialized": True,
+                "restore_failed": True,
+                "lifecycle": "READY",
+            }
+        )
 
         assert state.initialized
         assert state.restore_failed
@@ -211,7 +213,7 @@ class TestSyncStateSerialization:
         assert not state.cache_stale
 
     def test_roundtrip_serialization(self):
-        from qgre.sync_state import SyncLifecycle, SyncState
+        from qgre.sync_state import SyncState
 
         state1 = SyncState()
         state1.begin_sync()

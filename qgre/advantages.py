@@ -192,7 +192,6 @@ def apply_egrs_matrix(
                     # Clamp importance to valid range before using in dampening
                     importance_val = importance[t].item()
                     if not (0.0 <= importance_val <= 1.0):
-                        import warnings
                         warnings.warn(
                             f"ERIC: importance value {importance_val} out of range [0,1] at position {t}. Clamping.",
                             stacklevel=2,
@@ -1196,11 +1195,13 @@ class QGREStepAdvantageEstimator:
                         first_occurrence_advs, torch.abs(q_adv * first_mask)
                     )
                     # Track signed value where first_mask is active (use max to avoid overwrite)
-                    new_signed = torch.where(first_mask > 0, q_adv, torch.zeros_like(first_occurrence_signed))
+                    new_signed = torch.where(
+                        first_mask > 0, q_adv, torch.zeros_like(first_occurrence_signed)
+                    )
                     first_occurrence_signed = torch.where(
                         torch.abs(new_signed) > torch.abs(first_occurrence_signed),
                         new_signed,
-                        first_occurrence_signed
+                        first_occurrence_signed,
                     )
                     # Clamp q_adv magnitude before adding repetition penalty to prevent unbounded accumulation
                     clamped_q_adv = max(-self._clip_advantage, min(self._clip_advantage, q_adv))

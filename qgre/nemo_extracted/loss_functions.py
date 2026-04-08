@@ -181,7 +181,13 @@ class ClippedPGLossFn:
                     f"RL3-006: {zero_mask.sum().item()} importance weights are exactly zero (underflow before nan_to_num). Setting to 1e-8.",
                     stacklevel=2,
                 )
-            importance_weights = torch.where(zero_mask, torch.tensor(1e-8, device=importance_weights.device, dtype=importance_weights.dtype), importance_weights)
+            importance_weights = torch.where(
+                zero_mask,
+                torch.tensor(
+                    1e-8, device=importance_weights.device, dtype=importance_weights.dtype
+                ),
+                importance_weights,
+            )
             importance_weights = importance_weights.clamp(min=1e-8)
             if self.truncated_importance_sampling_ratio is not None:
                 importance_weights = importance_weights.clamp(

@@ -58,6 +58,7 @@ def compute_llds_loss(
     mask_count = llds_mask.sum()
     if mask_count == 0:
         import torch
+
         loss = torch.tensor(0.0, device=log_prob.device, dtype=log_prob.dtype, requires_grad=True)
     else:
         displacement = (old_log_prob - log_prob) * llds_mask

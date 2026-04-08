@@ -31,6 +31,7 @@ from qgre.nemo_extracted.llds import compute_llds_loss
 from qgre.nemo_extracted.logits import logprobs_from_logits
 from qgre.nemo_extracted.loss_functions import ClippedPGLossFn
 from qgre.segments import Segmenter, uniform_segmenter
+from qgre.sync_state import SyncState
 from qgre.types import (
     GameState,
     RewardResult,
@@ -98,6 +99,10 @@ class QGRETrainer:
         self.reward_fn = reward_fn
         self.config = config
         self.generation_backend = generation_backend
+        # Single source of truth for all sync-related state. Injected into WeightBus,
+        # WeightLoader, and apply_lora_dropout so they share lifecycle, dropout, and
+        # initialization tracking.
+        self.sync_state = SyncState()
         self.game_state = game_state or GameState(
             mastery_threshold=config.training.mastery_threshold,
             stagnation_timeout=config.training.stagnation_timeout,
@@ -862,8 +867,6 @@ class QGRETrainer:
         )
 
         # SPO low-advantage filter: skip sequences with near-zero signal (PLAN.md lines 658-671)
-        # R2-MTO-005: Track original batch size separately from filtered batch size
-        original_batch_size = len(step)
         if self.config.algorithm.mode == "spo":
             useful = (step.padded_advs.abs() > self.config.algorithm.spo_filter_threshold).any(
                 dim=-1
@@ -2073,7 +2076,9 @@ class QGRETrainer:
             dataloader_state=self._dataloader.state_dict() if self._dataloader else None,
             training_context=self.ctx.to_dict(),
             hint_registry_state=self.hint_registry.to_dict() if self.hint_registry else None,
-            lora_pro_state=self._lora_pro_adjuster.state_dict() if self._lora_pro_adjuster else None,
+            lora_pro_state=self._lora_pro_adjuster.state_dict()
+            if self._lora_pro_adjuster
+            else None,
             trainer_state=trainer_state,  # Use StateSpec instead of individual fields
         )
 
@@ -2157,6 +2162,7 @@ class QGRETrainer:
                             break
                     if has_nan:
                         import warnings
+
                         warnings.warn(
                             "Optimizer state contains NaN values. Skipping load to prevent corruption.",
                             stacklevel=2,
@@ -2366,7 +2372,7 @@ class QGRETrainer:
             self._accumulated_samples = 0
             self._accumulation_count = 0
             # Reset scheduler last_epoch to match global_step
-            if self.scheduler is not None and hasattr(self.scheduler, 'last_epoch'):
+            if self.scheduler is not None and hasattr(self.scheduler, "last_epoch"):
                 # Scheduler last_epoch should match optimizer steps, not global_step
                 # Since we reset accumulation, the next optimizer step will be at the correct boundary
                 pass  # Document that last_epoch is not reset - it tracks optimizer steps, not accumulation
@@ -2417,8 +2423,17 @@ class QGRETrainer:
             and hasattr(self.generation_backend, "weight_loader")
         ):
             wl_state = checkpoint.weight_loader
-            self.generation_backend.weight_loader._direct_ready = wl_state.initialized
-            self.generation_backend.weight_loader._load_lora_called = wl_state.load_lora_called
+            # Drive lifecycle through SyncState rather than the read-only legacy
+            # _direct_ready / _load_lora_called properties (which now derive from
+            # state.lifecycle and have no setters).
+            loader_state = self.generation_backend.weight_loader._state
+            from qgre.sync_state import SyncLifecycle
+
+            if wl_state.initialized:
+                loader_state.lifecycle = SyncLifecycle.READY
+                loader_state.initialized = True
+            elif wl_state.load_lora_called:
+                loader_state.lifecycle = SyncLifecycle.LOADING
             # W1: Restore lora_request_id if present (backward compat: may be None in old checkpoints)
             if hasattr(wl_state, "lora_request_id") and wl_state.lora_request_id is not None:
                 # Note: _lora_request is the actual LoRARequest object, not restored from checkpoint
@@ -2701,10 +2716,19 @@ class QGRETrainer:
                 "No generation backend provided. Pass to train() or QGRETrainer constructor.",
             )
 
+        # Replace the backend's placeholder SyncState with trainer's authoritative instance.
+        # The backend creates a default SyncState in its __init__ because it can't know about
+        # the trainer at construction time. We swap it here so all components share one state.
+        if hasattr(backend, "weight_loader") and backend.weight_loader is not None:
+            backend.weight_loader._state = self.sync_state
+
         # Weight Sync Bus — coordinates weight transfer between training and vLLM
         from qgre.weight_bus import SyncStrategy, WeightBus
 
-        weight_bus = WeightBus(strategy=SyncStrategy(self.config.model.weight_sync_strategy))
+        weight_bus = WeightBus(
+            state=self.sync_state,
+            strategy=SyncStrategy(self.config.model.weight_sync_strategy),
+        )
 
         self._dataloader = dataloader  # Store ref for difficulty gate updates
 
@@ -2797,7 +2821,7 @@ class QGRETrainer:
                         self.global_step,
                     )
                     if current_rate > 0:
-                        restore_lora = apply_lora_dropout(self.model, current_rate)
+                        restore_lora = apply_lora_dropout(self.model, current_rate, self.sync_state)
                         # Sync noisy weights to vLLM via Weight Sync Bus
                         weight_bus.sync(
                             backend.weight_exporter,

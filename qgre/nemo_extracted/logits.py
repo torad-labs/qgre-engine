@@ -64,7 +64,6 @@ def selective_log_softmax(
         # logsumexp identity: log_softmax(x_i) = x_i - logsumexp(x)
         # Loop over batch to avoid materializing full [batch, seq, vocab]
         # LP-R3-01: Add bounds validation for fp32 path
-        original_logits_shape = logits.shape
         original_index_shape = index.shape
         if logits.ndim > 3:
             logits = logits.reshape(-1, logits.shape[-2], logits.shape[-1])

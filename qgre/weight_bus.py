@@ -16,15 +16,11 @@ import threading
 from enum import Enum
 from typing import TYPE_CHECKING
 
-# Import at module level to avoid ImportError in exception handler
-try:
-    from qgre.lora_dropout import apply_lora_dropout
-except ImportError:
-    apply_lora_dropout = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from torch import nn
 
+    from qgre.sync_state import SyncState
     from qgre.types import TrainingContext
     from qgre.weight_export import WeightExporter
     from qgre.weight_load import WeightLoader
@@ -45,15 +41,15 @@ class WeightBus:
     This makes it stateless and testable in isolation.
     """
 
-    def __init__(self, strategy: SyncStrategy = SyncStrategy.DIRECT_COPY):
+    def __init__(self, state: SyncState, strategy: SyncStrategy = SyncStrategy.DIRECT_COPY):
+        self._state = state
         self.strategy = strategy
-        self._initialized = False  # True after first successful sync
         self._engine_id: int | None = None  # W5: Track engine identity to detect recreation
         self._sync_lock = threading.Lock()  # Protect engine_id checks and _initialized updates
 
     def reset_on_engine_recreate(self):
-        """W5: Reset _initialized when vLLM engine is recreated."""
-        self._initialized = False
+        """W5: Reset state when vLLM engine is recreated."""
+        self._state.reset_for_engine_recreate()
         self._engine_id = None
 
     def sync(
@@ -76,16 +72,18 @@ class WeightBus:
             ctx: TrainingContext for device/dtype validation
             modules_to_save: Expected modules (e.g., ["lm_head"]). Warns if missing.
         """
-        # WS-R3-04: Track if sync actually ran (not skipped by dropout)
-        sync_executed = False
         with self._sync_lock:
             # R10: Handle None engine (lazy init) - skip engine_id tracking until engine exists
             engine = loader.engine
             engine_id = id(engine) if engine is not None else None
-            if engine_id is not None and self._engine_id is not None and self._engine_id != engine_id:
-                self._initialized = False
+            if (
+                engine_id is not None
+                and self._engine_id is not None
+                and self._engine_id != engine_id
+            ):
+                self._state.reset_for_engine_recreate()
                 self._engine_id = None
-            first_call = not self._initialized
+            first_call = not self._state.initialized
         try:
             if self.strategy == SyncStrategy.MERGE:
                 exporter.merge_lora(model)
@@ -94,7 +92,12 @@ class WeightBus:
                 )
                 # MERGE modifies base weights in-place — flush vLLM KV cache to prevent stale keys/values
                 loader.flush_kv_cache()
-                sync_executed = True
+                # Fortify-1: MERGE strategy must also mark sync complete; the legacy
+                # path only set _initialized=True in DIRECT_COPY, leaving MERGE users
+                # permanently at first_call=True.
+                self._state.complete_sync(first_call=first_call)
+                with self._sync_lock:
+                    self._engine_id = engine_id
             elif self.strategy == SyncStrategy.DIRECT_COPY:
                 # Dropout check moved inside WeightLoader.sync_lora_direct (inside lock)
                 loader.sync_lora_direct(model, ctx, first_call=first_call)
@@ -104,15 +107,12 @@ class WeightBus:
                 )
                 # Flush KV cache after DIRECT_COPY modules_to_save (embed_tokens, lm_head)
                 loader.flush_kv_cache()
-                # Mark sync as executed and set initialized flag
-                sync_executed = True
+                self._state.complete_sync(first_call=first_call)
                 with self._sync_lock:
-                    self._initialized = True
                     self._engine_id = engine_id
         except Exception as e:
             # Clear dropout state in exception handler to prevent stuck state
-            if apply_lora_dropout is not None and hasattr(apply_lora_dropout, "_dropout_active"):
-                apply_lora_dropout._dropout_active = False
+            self._state.fail_sync()
             # Don't set initialized=True on failure — next sync will retry first_call path
             raise RuntimeError(f"Weight sync failed: {e}") from e
 

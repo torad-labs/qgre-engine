@@ -15,7 +15,6 @@ preserved to maintain output space structure and formatting.
 
 from __future__ import annotations
 
-import threading
 import warnings
 from typing import TYPE_CHECKING
 
@@ -26,18 +25,19 @@ from torch import nn
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# Module-level lock for thread-safe state management
-# Protects _dropout_active and _restore_failed function attributes
-_dropout_lock = threading.Lock()
+    from qgre.sync_state import SyncState
 
 
-def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], None]:
+def apply_lora_dropout(
+    model: nn.Module, dropout_rate: float, state: SyncState
+) -> Callable[[], None]:
     """Apply Bernoulli dropout to LoRA A matrices. Returns a restore function.
 
     Args:
         model: The model with LoRA adapters (Unsloth/PEFT format)
         dropout_rate: Probability of zeroing each element in LoRA A weights.
             0.0 = no dropout (passthrough), 0.15 = recommended starting point.
+        state: SyncState object for thread-safe state management.
 
     Returns:
         restore(): Call this after generation to restore original weights.
@@ -45,28 +45,8 @@ def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], No
     if dropout_rate <= 0.0:
         return lambda: None  # No-op
 
-    # Thread-safe state management
-    with _dropout_lock:
-        # Track dropout state to detect inference without restore
-        if not hasattr(apply_lora_dropout, "_dropout_active"):
-            apply_lora_dropout._dropout_active = False  # type: ignore[attr-defined]
-        if not hasattr(apply_lora_dropout, "_restore_failed"):
-            apply_lora_dropout._restore_failed = False  # type: ignore[attr-defined]
-
-        # Check if previous restore failed
-        if apply_lora_dropout._restore_failed:  # type: ignore[attr-defined]
-            raise RuntimeError(
-                "Previous LoRA dropout restore failed. Weights are corrupted. "
-                "Cannot apply dropout again. Restart training from checkpoint."
-            )
-
-        if apply_lora_dropout._dropout_active:  # type: ignore[attr-defined]
-            warnings.warn(
-                "LoRA dropout applied twice without restore() call between. "
-                "Previous dropout state may be stale. Call restore() after each generation.",
-                stacklevel=2,
-            )
-        apply_lora_dropout._dropout_active = True  # type: ignore[attr-defined]
+    # Enter dropout state - handles all precondition checks and state transitions
+    state.enter_dropout()
 
     # W6: Use list instead of closure to allow cleanup on exception
     saved: list[tuple[torch.nn.Parameter, torch.Tensor]] = []
@@ -99,8 +79,7 @@ def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], No
                 param.data.copy_(original)
             saved.clear()
         finally:
-            with _dropout_lock:
-                apply_lora_dropout._dropout_active = False  # type: ignore[attr-defined]
+            state.exit_dropout(success=False)
         raise RuntimeError(
             f"W7: LoRA dropout application failed: {e}. Weights restored to original state.",
         ) from e
@@ -114,14 +93,11 @@ def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], No
                     param.grad.zero_()
             # Clear saved list to prevent memory leak
             saved.clear()
-            # Reset restore_failed flag on successful restore
-            with _dropout_lock:
-                apply_lora_dropout._restore_failed = False  # type: ignore[attr-defined]
+            # Exit dropout state on successful restore
+            state.exit_dropout(success=True)
         except Exception as e:
             # CRITICAL: Restore failure corrupts model weights — must re-raise
-            # Set flag to prevent further training
-            with _dropout_lock:
-                apply_lora_dropout._restore_failed = True  # type: ignore[attr-defined]
+            state.exit_dropout(success=False)
             warnings.warn(
                 f"LoRA dropout restore failed: {e}. Weights corrupted — aborting.", stacklevel=2
             )
@@ -129,10 +105,6 @@ def apply_lora_dropout(model: nn.Module, dropout_rate: float) -> Callable[[], No
                 f"LoRA dropout restore failed: {e}. Model weights are in dropped state. "
                 "Training cannot continue safely — restart from checkpoint.",
             ) from e
-        finally:
-            # WS3-007: Always clear dropout state flag (after restoration)
-            with _dropout_lock:
-                apply_lora_dropout._dropout_active = False  # type: ignore[attr-defined]
 
     return restore
 

@@ -15,12 +15,9 @@ from __future__ import annotations
 
 import threading
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    pass
 
 
 class SyncLifecycle(Enum):
@@ -101,6 +98,35 @@ class SyncState:
                 self.restore_failed = False  # Reset on successful restore
             else:
                 self.restore_failed = True
+
+    @contextmanager
+    def dropout_context(self):
+        """Context manager for dropout application.
+
+        Wraps enter_dropout/exit_dropout to guarantee cleanup even if
+        exceptions occur during the protected block — including
+        BaseException subclasses like KeyboardInterrupt and SystemExit.
+        This is the mechanism that makes "forgot to restore" structurally
+        impossible.
+
+        Uses try/finally with a success flag rather than try/except so
+        that cleanup runs on ANY exit path (normal return, Exception,
+        KeyboardInterrupt, SystemExit, GeneratorExit). The success flag
+        is only set after the yield returns normally — any exception
+        leaves it False and the restore is recorded as failed.
+
+        Usage:
+            with state.dropout_context():
+                apply_dropout(model)
+                generate(...)
+        """
+        self.enter_dropout()
+        success = False
+        try:
+            yield
+            success = True
+        finally:
+            self.exit_dropout(success=success)
 
     def can_sync(self) -> bool:
         """Check if sync is currently allowed.

@@ -1,0 +1,13 @@
+{
+  "title": "SyncState as Single Source of Truth",
+  "slug": "sync-state-leverage",
+  "type": "study",
+  "subtitle": "Wire the existing SyncState class to replace scattered boolean flags across 4 modules — the leverage point from 10-round adversarial hardening.",
+  "date": "2026-04-08",
+  "status": "draft",
+  "audio": false,
+  "reef": null,
+  "source": "feature-crystallize product",
+  "derivatives": [],
+  "connections": []
+}

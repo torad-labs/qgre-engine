@@ -21,48 +21,35 @@ from torch import nn
 if TYPE_CHECKING:
     from qgre.types import TrainingContext
 
-from qgre.types import WeightLoaderLifecycle
-
-
-try:
-    from qgre.lora_dropout import apply_lora_dropout
-except ImportError:
-    # SFH-006: Log when lora_dropout module is unavailable
-    warnings.warn(
-        "lora_dropout module not available. LoRA dropout will be disabled "
-        "even if lora_dropout_rate is configured.",
-        stacklevel=2,
-    )
-    apply_lora_dropout = None
+from qgre.sync_state import SyncLifecycle, SyncState
 
 
 class WeightLoader:
     """Inject weights into vLLM engine.
 
-    Uses WeightLoaderLifecycle state machine to prevent impossible states.
+    Uses SyncLifecycle state machine to prevent impossible states.
     State transitions are explicit methods that validate preconditions.
     """
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, state: SyncState):
         """Initialize with the PeftModel that has vllm_engine attached.
 
         Args:
             model: The PeftModel (Unsloth wraps vllm_engine onto it via patch_peft_fast_inference)
+            state: Shared SyncState for tracking sync lifecycle and flags
         """
         self._model = model
+        self._state = state
         self._lora_request = None  # Set during LOADING -> READY transition
-        self._lifecycle = WeightLoaderLifecycle.UNINITIALIZED
-        # CR-001: Thread lock for state machine transitions
+        # CR-001: Thread lock for state machine transitions and _lora_request access
         self._lock = threading.Lock()
-        # CR-002: Track if KV cache may be stale (zeroing failed)
-        self._cache_potentially_stale = False
 
     # --- Lifecycle state machine ---
 
     @property
-    def lifecycle(self) -> WeightLoaderLifecycle:
+    def lifecycle(self) -> SyncLifecycle:
         """Current lifecycle state."""
-        return self._lifecycle
+        return self._state.lifecycle
 
     @property
     def engine(self):
@@ -79,66 +66,73 @@ class WeightLoader:
                 return engine
         return None
 
-    def _transition_to(
-        self, target: WeightLoaderLifecycle, valid_from: tuple[WeightLoaderLifecycle, ...]
-    ) -> None:
+    def _transition_to(self, target: SyncLifecycle, valid_from: tuple[SyncLifecycle, ...]) -> None:
         """Transition to target state, validating preconditions."""
-        if self._lifecycle not in valid_from:
+        current = self._state.lifecycle
+        if current not in valid_from:
             raise RuntimeError(
-                f"WeightLoader: Invalid state transition {self._lifecycle.value} -> {target.value}. "
-                f"Valid source states: {[s.value for s in valid_from]}",
+                f"WeightLoader: Invalid state transition {current.name} -> {target.name}. "
+                f"Valid source states: {[s.name for s in valid_from]}",
             )
-        self._lifecycle = target
+        # Delegate to appropriate state method based on target
+        if target == SyncLifecycle.LOADING:
+            self._state.begin_sync()
+        elif target == SyncLifecycle.READY:
+            self._state.complete_sync()
+        elif target == SyncLifecycle.ERROR:
+            self._state.fail_sync()
+        elif target == SyncLifecycle.UNINITIALIZED:
+            self._state.reset_for_engine_recreate()
+        else:
+            raise ValueError(f"Unknown target state: {target}")
 
     def _transition_to_loading(self) -> None:
         """Transition to LOADING state (first sync_lora_direct call)."""
         self._transition_to(
-            WeightLoaderLifecycle.LOADING,
-            (WeightLoaderLifecycle.UNINITIALIZED, WeightLoaderLifecycle.ERROR),
+            SyncLifecycle.LOADING,
+            (SyncLifecycle.UNINITIALIZED, SyncLifecycle.ERROR),
         )
 
     def _transition_to_ready(self) -> None:
         """Transition to READY state (prepare_vllm_lora_loading succeeded)."""
         self._transition_to(
-            WeightLoaderLifecycle.READY,
-            (WeightLoaderLifecycle.LOADING,),
+            SyncLifecycle.READY,
+            (SyncLifecycle.LOADING,),
         )
 
     # ELI-001: Removed _transition_to_dropout - dropout state is tracked externally
-    # by lora_dropout.apply_lora_dropout._dropout_active, not by this state machine.
+    # by SyncState.dropout_active, not by this state machine.
 
     def _transition_to_error(self) -> None:
         """Transition to ERROR state (exception during operation)."""
         # Can transition to ERROR from any state
-        self._lifecycle = WeightLoaderLifecycle.ERROR
+        self._state.fail_sync()
         self._lora_request = None
 
     def _transition_to_uninitialized(self) -> None:
         """Transition to UNINITIALIZED state (reset for engine recreate)."""
         self._transition_to(
-            WeightLoaderLifecycle.UNINITIALIZED,
+            SyncLifecycle.UNINITIALIZED,
             (
-                WeightLoaderLifecycle.UNINITIALIZED,
-                WeightLoaderLifecycle.LOADING,
-                WeightLoaderLifecycle.READY,
-                WeightLoaderLifecycle.ERROR,
+                SyncLifecycle.UNINITIALIZED,
+                SyncLifecycle.LOADING,
+                SyncLifecycle.READY,
+                SyncLifecycle.ERROR,
             ),
         )
         self._lora_request = None
-        # Clear stale cache flag since engine is being recreated with fresh state
-        self._cache_potentially_stale = False
 
     # --- Legacy compatibility properties ---
 
     @property
     def _direct_ready(self) -> bool:
         """Legacy: True when in READY state (weights loaded and ready for sync)."""
-        return self._lifecycle == WeightLoaderLifecycle.READY
+        return self._state.lifecycle == SyncLifecycle.READY
 
     @property
     def _load_lora_called(self) -> bool:
         """Legacy: True when past UNINITIALIZED state."""
-        return self._lifecycle != WeightLoaderLifecycle.UNINITIALIZED
+        return self._state.lifecycle != SyncLifecycle.UNINITIALIZED
 
     @property
     def lora_request(self):
@@ -164,7 +158,7 @@ class WeightLoader:
         # to prevent race conditions between state checks and transitions
         with self._lock:
             # CR-002: Check if KV cache is potentially stale before sync
-            if self._cache_potentially_stale:
+            if self._state.cache_stale:
                 raise RuntimeError(
                     "KV cache is potentially stale due to previous flush failure. "
                     "Generations may use corrupted cache. Recreate vLLM engine or restart training."
@@ -172,9 +166,7 @@ class WeightLoader:
 
             # WS3-001: Track dropout state, skip sync if dropout active
             # (checked inside lock to prevent race with dropout activation)
-            if apply_lora_dropout is not None and getattr(
-                apply_lora_dropout, "_dropout_active", False
-            ):
+            if self._state.dropout_active:
                 warnings.warn(
                     "WS3-001: sync_lora_direct called while LoRA dropout is active. "
                     "Skipping sync to avoid race condition. Call restore() first.",
@@ -185,7 +177,7 @@ class WeightLoader:
             if first_call or not self._direct_ready:
                 # Bootstrap: register adapter once, set up GPU→GPU copy mappings
                 # State machine: UNINITIALIZED -> LOADING -> READY
-                if self._lifecycle == WeightLoaderLifecycle.UNINITIALIZED:
+                if self._state.lifecycle == SyncLifecycle.UNINITIALIZED:
                     self._transition_to_loading()
 
                 if self._lora_request is None:
@@ -246,7 +238,7 @@ class WeightLoader:
                     self._transition_to_error()
                     raise RuntimeError(
                         f"load_lora_directly fast path failed — weights may be inconsistent. "
-                        f"State was {WeightLoaderLifecycle.READY.value}, now ERROR. Error: {e}",
+                        f"State was {SyncLifecycle.READY.name}, now ERROR. Error: {e}",
                     ) from e
 
     def sync_modules_to_save(self, weights: dict[str, torch.Tensor], ctx: TrainingContext) -> None:
@@ -300,7 +292,7 @@ class WeightLoader:
         synced = []
         original_weights = {}
         try:
-            for name, _ in weights.items():
+            for name in weights:
                 if name == "lm_head":
                     original_weights[name] = vllm_model.lm_head.weight.data.clone()
                 elif name == "embed_tokens":
@@ -375,8 +367,10 @@ class WeightLoader:
                             if name == "lm_head":
                                 rollback_model.lm_head.weight.data.copy_(original_weights[name])
                             elif name == "embed_tokens":
-                                rollback_model.model.embed_tokens.weight.data.copy_(original_weights[name])
-            except Exception as rollback_err:
+                                rollback_model.model.embed_tokens.weight.data.copy_(
+                                    original_weights[name]
+                                )
+            except Exception as rollback_err:  # noqa: BLE001 — rollback path must never raise; log everything
                 warnings.warn(
                     f"WS3-006: Rollback also failed: {rollback_err}. Original error: {e}",
                     stacklevel=2,
@@ -566,11 +560,10 @@ class WeightLoader:
                         for t in layer_cache:
                             if isinstance(t, torch.Tensor):
                                 t.zero_()
-                # CR-002: Clear stale flag on successful zeroing
-                self._cache_potentially_stale = False
+                # CR-002: Cache stale flag only clears on engine recreate (conservative approach)
             except (RuntimeError, AttributeError, TypeError) as e:
                 # CR-002: Track that cache may be stale - generations could use old KV pairs
-                self._cache_potentially_stale = True
+                self._state.mark_cache_stale()
                 warnings.warn(
                     f"CRITICAL: KV cache tensor zeroing failed: {e}. "
                     "Model may generate with stale cache. Consider recreating vLLM engine.",
@@ -602,7 +595,7 @@ class WeightLoader:
     def reset_state(self) -> bool:
         """WS3-009: Reset state on engine recreate.
 
-        Transitions to UNINITIALIZED state, clearing _lora_request and cache flags.
+        Transitions to UNINITIALIZED state via SyncState, clearing all sync flags.
 
         Returns:
             True, indicating caller MUST also reset WeightBus._initialized.
@@ -614,10 +607,8 @@ class WeightLoader:
         Failure to do so will cause stale state and sync failures.
         """
         with self._lock:
-            self._transition_to_uninitialized()
-            self._cache_potentially_stale = False
+            self._state.reset_for_engine_recreate()
         # ELI-005: Return value enforces caller contract - must reset WeightBus
-        import warnings
         warnings.warn(
             "WeightLoader.reset_state() called. Caller MUST also call "
             "weight_bus.reset_on_engine_recreate() to prevent stale state.",

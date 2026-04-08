@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Implementation PRD — SyncState Leverage Point</title>
+    <style>
+:root {
+    --bg: #fafaf8;
+    --card: #ffffff;
+    --card-border: #e4e2dc;
+    --text: #1a1a1a;
+    --text-muted: #6b6b6b;
+    --accent: #0e8a7e;
+    --accent-dim: #b4dfda;
+    --amber: #c47a10;
+    --amber-dim: #f5e6c8;
+    --red-soft: #b84040;
+    --red-soft-dim: #e8c4c4;
+    --survived: #eaf5f3;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+}
+
+.container {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 0 24px;
+}
+
+.hero {
+    padding: 80px 0 48px;
+    border-bottom: 1px solid var(--card-border);
+}
+.hero-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+    color: var(--accent);
+}
+.hero h1 {
+    font-size: 38px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    margin-bottom: 14px;
+}
+.hero .subtitle {
+    font-size: 18px;
+    color: var(--text-muted);
+    max-width: 580px;
+}
+
+section {
+    padding: 56px 0;
+    border-bottom: 1px solid var(--card-border);
+}
+section:last-of-type { border-bottom: none; }
+.section-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    margin-bottom: 12px;
+}
+section h2 {
+    font-size: 24px;
+    font-weight: 700;
+    margin-bottom: 20px;
+    letter-spacing: -0.3px;
+}
+section h3 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-top: 32px;
+    margin-bottom: 16px;
+}
+section p { color: var(--text); margin-bottom: 16px; }
+
+.callout {
+    padding: 20px 24px;
+    border-left: 3px solid var(--accent);
+    border-radius: 0 8px 8px 0;
+    background: #f0f9f8;
+    margin: 20px 0;
+    font-size: 15px;
+    line-height: 1.6;
+}
+.callout strong { color: var(--accent); }
+
+.component-card {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 24px 28px;
+    margin-bottom: 16px;
+}
+.component-card h4 {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 12px;
+    font-family: 'SF Mono', Monaco, monospace;
+}
+.component-card p {
+    font-size: 14px;
+    margin-bottom: 8px;
+}
+.component-card .changes {
+    font-size: 13px;
+    color: var(--text-muted);
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--card-border);
+}
+.component-card .changes strong {
+    color: var(--text);
+}
+
+.code-block {
+    background: #1e1e1e;
+    color: #d4d4d4;
+    padding: 20px 24px;
+    border-radius: 8px;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    overflow-x: auto;
+    margin: 16px 0;
+}
+.code-block .comment { color: #6a9955; }
+.code-block .keyword { color: #569cd6; }
+.code-block .string { color: #ce9178; }
+.code-block .decorator { color: #dcdcaa; }
+
+.sequence-list {
+    list-style: none;
+    counter-reset: step;
+    margin: 24px 0;
+}
+.sequence-list li {
+    position: relative;
+    padding: 20px 20px 20px 64px;
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    margin-bottom: 12px;
+}
+.sequence-list li::before {
+    counter-increment: step;
+    content: counter(step);
+    position: absolute;
+    left: 20px;
+    top: 20px;
+    width: 28px;
+    height: 28px;
+    background: var(--accent);
+    color: white;
+    border-radius: 50%;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.sequence-list li strong {
+    display: block;
+    font-size: 15px;
+    margin-bottom: 4px;
+}
+.sequence-list li span {
+    font-size: 14px;
+    color: var(--text-muted);
+}
+
+.data-flow {
+    background: var(--card);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    padding: 28px 32px;
+    font-family: 'SF Mono', Monaco, monospace;
+    font-size: 13px;
+    line-height: 2;
+}
+.data-flow .node { color: var(--accent); font-weight: 600; }
+.data-flow .arrow { color: var(--text-muted); }
+.data-flow .method { color: var(--amber); }
+
+.quality-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 14px;
+}
+.quality-table th {
+    text-align: left;
+    padding: 12px 16px;
+    background: var(--survived);
+    font-weight: 600;
+    border-bottom: 2px solid var(--accent);
+}
+.quality-table td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--card-border);
+}
+.quality-table tr:last-child td { border-bottom: none; }
+.quality-bar {
+    height: 8px;
+    background: var(--card-border);
+    border-radius: 4px;
+    overflow: hidden;
+    min-width: 100px;
+}
+.quality-bar .fill {
+    height: 100%;
+    border-radius: 4px;
+}
+.quality-bar .fill.strong { background: var(--accent); }
+.quality-bar .fill.good { background: #3a9e94; }
+.quality-bar .fill.adequate { background: var(--amber); }
+
+.surprise-card {
+    background: var(--amber-dim);
+    border: 1px solid var(--amber);
+    border-radius: 10px;
+    padding: 20px 24px;
+    margin: 16px 0;
+}
+.surprise-card .badge {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--amber);
+    margin-bottom: 8px;
+}
+.surprise-card p {
+    font-size: 15px;
+    margin-bottom: 0;
+}
+
+.nav-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 32px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-decoration: none;
+}
+.nav-back:hover { color: var(--text); }
+
+.page-footer {
+    padding: 40px 0 60px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+@media (max-width: 640px) {
+    .hero h1 { font-size: 28px; }
+    .hero { padding: 48px 0 36px; }
+    section { padding: 40px 0; }
+    .sequence-list li { padding-left: 56px; }
+    .quality-table { font-size: 13px; }
+}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header class="hero">
+            <div class="hero-label">Implementation PRD</div>
+            <h1>Wire SyncState as Single Source of Truth</h1>
+            <p class="subtitle">Architecture, components, data flow, and build sequence. The full implementation plan for the leverage point.</p>
+        </header>
+
+        <section>
+            <div class="section-label">Core Addition</div>
+            <h2>Context Manager</h2>
+
+            <div class="callout">
+                <strong>Key addition:</strong> The <code>dropout_context()</code> method turns enter/exit into a context manager. This is the mechanism that makes "forgot to restore" impossible.
+            </div>
+
+            <div class="code-block">
+<span class="decorator">@contextmanager</span>
+<span class="keyword">def</span> dropout_context(self):
+    <span class="string">"""Context manager for dropout application."""</span>
+    self.enter_dropout()
+    <span class="keyword">try</span>:
+        <span class="keyword">yield</span>
+    <span class="keyword">except</span> Exception:
+        self.exit_dropout(success=<span class="keyword">False</span>)
+        <span class="keyword">raise</span>
+    <span class="keyword">else</span>:
+        self.exit_dropout(success=<span class="keyword">True</span>)
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Components</div>
+            <h2>Files to Modify</h2>
+
+            <div class="component-card">
+                <h4>qgre/sync_state.py</h4>
+                <p>Add <code>dropout_context()</code> context manager method.</p>
+                <div class="changes">
+                    <strong>Add:</strong> contextmanager import, dropout_context() method<br>
+                    <strong>Lines:</strong> ~15 new lines
+                </div>
+            </div>
+
+            <div class="component-card">
+                <h4>qgre/lora_dropout.py</h4>
+                <p>Change <code>apply_lora_dropout</code> to accept SyncState parameter. Remove module-level state.</p>
+                <div class="changes">
+                    <strong>Remove:</strong> _dropout_lock, _dropout_active attribute, _restore_failed attribute<br>
+                    <strong>Add:</strong> state: SyncState parameter<br>
+                    <strong>Change:</strong> Use state.enter_dropout(), state.exit_dropout(), state.restore_failed
+                </div>
+            </div>
+
+            <div class="component-card">
+                <h4>qgre/weight_load.py</h4>
+                <p>Accept SyncState in constructor. Use state methods instead of local flags.</p>
+                <div class="changes">
+                    <strong>Remove:</strong> _cache_potentially_stale<br>
+                    <strong>Add:</strong> state: SyncState in __init__<br>
+                    <strong>Change:</strong> Use state.cache_stale, state.lifecycle, state.mark_cache_stale()
+                </div>
+            </div>
+
+            <div class="component-card">
+                <h4>qgre/weight_bus.py</h4>
+                <p>Accept SyncState in constructor. Remove internal sync state.</p>
+                <div class="changes">
+                    <strong>Remove:</strong> _initialized, _engine_id, _sync_lock<br>
+                    <strong>Add:</strong> state: SyncState in __init__<br>
+                    <strong>Change:</strong> Use state.initialized, state.complete_sync(), state.reset_for_engine_recreate()
+                </div>
+            </div>
+
+            <div class="component-card">
+                <h4>qgre/trainer.py</h4>
+                <p>Instantiate SyncState. Inject into WeightBus and WeightLoader.</p>
+                <div class="changes">
+                    <strong>Add:</strong> self.sync_state = SyncState()<br>
+                    <strong>Change:</strong> Pass state to WeightBus(), WeightLoader() constructors
+                </div>
+            </div>
+
+            <div class="component-card">
+                <h4>qgre/generation.py</h4>
+                <p>Pass SyncState to apply_lora_dropout calls.</p>
+                <div class="changes">
+                    <strong>Change:</strong> apply_lora_dropout(model, rate) → apply_lora_dropout(model, rate, state)
+                </div>
+            </div>
+
+            <div class="component-card">
+                <h4>tests/*.py</h4>
+                <p>Update test fixtures to create and inject SyncState.</p>
+                <div class="changes">
+                    <strong>Add:</strong> state = SyncState() in test setup<br>
+                    <strong>Change:</strong> Pass state to constructors and functions
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-label">Flow</div>
+            <h2>Data Flow</h2>
+
+            <div class="data-flow">
+<span class="node">Trainer</span> <span class="comment">owns SyncState</span>
+    │
+    ├─→ <span class="node">WeightBus</span>(strategy, <span class="method">state</span>)
+    │       └─→ <span class="method">sync()</span> uses state.initialized, state.complete_sync()
+    │
+    ├─→ <span class="node">WeightLoader</span>(..., <span class="method">state</span>)
+    │       └─→ <span class="method">sync_lora_direct()</span> uses state.cache_stale, state.begin_sync()
+    │
+    └─→ <span class="method">apply_lora_dropout</span>(model, rate, <span class="method">state</span>)
+            └─→ uses state.enter_dropout(), state.exit_dropout()
+            </div>
+
+            <p style="margin-top: 24px;">All state flows from Trainer. No module owns its own flags. State mutations happen through SyncState methods, which handle locking internally.</p>
+        </section>
+
+        <section>
+            <div class="section-label">Sequence</div>
+            <h2>Build Order</h2>
+
+            <ol class="sequence-list">
+                <li>
+                    <strong>sync_state.py — Add context manager</strong>
+                    <span>Foundation. Enables guaranteed cleanup pattern. No dependencies.</span>
+                </li>
+                <li>
+                    <strong>lora_dropout.py — Accept state parameter</strong>
+                    <span>Breaking change: function signature changes. Depends on step 1.</span>
+                </li>
+                <li>
+                    <strong>weight_load.py — Accept state parameter</strong>
+                    <span>Remove _cache_potentially_stale. Use state methods. Independent of step 2.</span>
+                </li>
+                <li>
+                    <strong>weight_bus.py — Accept state parameter</strong>
+                    <span>Remove _initialized, _engine_id, _sync_lock. Use state methods. Independent of steps 2-3.</span>
+                </li>
+                <li>
+                    <strong>trainer.py — Instantiate and inject</strong>
+                    <span>Create SyncState, pass to WeightBus/WeightLoader. Depends on steps 3-4.</span>
+                </li>
+                <li>
+                    <strong>generation.py — Pass state to dropout</strong>
+                    <span>Wire the call site. Depends on steps 2 and 5.</span>
+                </li>
+                <li>
+                    <strong>tests/ — Update fixtures</strong>
+                    <span>Create state in test setup, pass to constructors. Depends on all above.</span>
+                </li>
+                <li>
+                    <strong>Final cleanup — Delete dead code</strong>
+                    <span>Verify no remaining references to old flags. Remove any stragglers.</span>
+                </li>
+            </ol>
+        </section>
+
+        <section>
+            <div class="section-label">Profile</div>
+            <h2>Analysis Quality</h2>
+
+            <table class="quality-table">
+                <tr>
+                    <th>Dimension</th>
+                    <th>Score</th>
+                    <th style="width: 120px;"></th>
+                </tr>
+                <tr>
+                    <td>Collapse (deliberation value)</td>
+                    <td>0.95</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 95%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Phase Transition (commitment)</td>
+                    <td>0.90</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 90%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Fascia (entanglement)</td>
+                    <td>0.90</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 90%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Resonance (coherence)</td>
+                    <td>0.85</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 85%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Diffusion (spread)</td>
+                    <td>0.85</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 85%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Lyapunov (fixed point)</td>
+                    <td>0.85</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 85%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Antibody (immune)</td>
+                    <td>0.85</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 85%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>KL Divergence (feasibility)</td>
+                    <td>0.85</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 85%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Entropy (information)</td>
+                    <td>0.85</td>
+                    <td><div class="quality-bar"><div class="fill strong" style="width: 85%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Contamination (bias)</td>
+                    <td>0.80</td>
+                    <td><div class="quality-bar"><div class="fill good" style="width: 80%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Gradient (complexity flow)</td>
+                    <td>0.80</td>
+                    <td><div class="quality-bar"><div class="fill good" style="width: 80%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Valence (felt signal)</td>
+                    <td>0.80</td>
+                    <td><div class="quality-bar"><div class="fill good" style="width: 80%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Delta (contamination)</td>
+                    <td>0.75</td>
+                    <td><div class="quality-bar"><div class="fill good" style="width: 75%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Uncertainty (constraints)</td>
+                    <td>0.70</td>
+                    <td><div class="quality-bar"><div class="fill adequate" style="width: 70%;"></div></div></td>
+                </tr>
+                <tr>
+                    <td>Annealing (exploration)</td>
+                    <td>0.60</td>
+                    <td><div class="quality-bar"><div class="fill adequate" style="width: 60%;"></div></div></td>
+                </tr>
+            </table>
+
+            <p><strong>ELBO: 0.78</strong> = Accuracy (0.90) − Complexity (0.12)</p>
+            <p>High accuracy: the plan fully addresses the requirement. Low complexity: follows existing patterns, net code deletion.</p>
+        </section>
+
+        <section>
+            <div class="section-label">Emergence</div>
+            <h2>What Surprised Us</h2>
+
+            <div class="surprise-card">
+                <div class="badge">Surprise</div>
+                <p><strong>SyncState was already implemented.</strong> The leverage point isn't "design a state machine" — it's "wire the one that exists." The sync_state.py file has all the right methods. It's just dead code.</p>
+            </div>
+
+            <div class="surprise-card">
+                <div class="badge">Surprise</div>
+                <p><strong>Context managers are the real unlock.</strong> The methods exist but <code>dropout_context()</code> doesn't. Adding it makes the restore-forget bug class structurally impossible — not caught at runtime, not possible to write.</p>
+            </div>
+
+            <div class="surprise-card">
+                <div class="badge">Surprise</div>
+                <p><strong>This deletes code.</strong> Net line count goes down. The scattered flags, their associated locks, and their synchronization logic all get removed. Fewer lines, fewer bugs, simpler mental model.</p>
+            </div>
+
+            <a href="index.html" class="nav-back">
+                <span class="arrow">&larr;</span> Back to hub
+            </a>
+        </section>
+
+        <footer class="page-footer">
+            Generated by feature-crystallize skill &middot; 2026-04-08
+        </footer>
+    </div>
+</body>
+</html>

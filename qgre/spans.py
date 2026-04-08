@@ -203,13 +203,11 @@ def scored_spans_to_token_masks(
         for char_start, char_end in spans:
             cs = max(0, min(char_start, max_char - 1))
             ce = max(0, min(char_end, max_char))
-            span_has_mapped_char = False
             for c in range(cs, ce):
                 if char_to_token[c] != -1:
                     any_quality_has_valid_tokens = True
                     if mask[char_to_token[c]] == 0.0:
                         has_any_first_occurrence = True
-                        span_has_mapped_char = True
                         break
             if has_any_first_occurrence:
                 break
@@ -224,8 +222,6 @@ def scored_spans_to_token_masks(
         for span_idx, (char_start, char_end) in enumerate(spans):
             # AE-R2-03: Skip span if completely outside bounds (don't relocate)
             if char_start >= max_char:
-                import warnings
-
                 warnings.warn(
                     f"Span completely outside bounds for quality '{quality_name}': "
                     f"char_start={char_start} >= max_char={max_char}. Skipping span.",
@@ -236,8 +232,6 @@ def scored_spans_to_token_masks(
             cs = max(0, min(char_start, max_char - 1))
             ce = max(0, min(char_end, max_char))
             if cs != char_start or ce != char_end:
-                import warnings
-
                 warnings.warn(
                     f"Span offset clamped for quality '{quality_name}': "
                     f"original ({char_start}, {char_end}) → clamped ({cs}, {ce}). "
@@ -248,8 +242,6 @@ def scored_spans_to_token_masks(
                 _clamped_count[0] += 1
             # Warn if clamping caused zero-length span
             if cs >= ce:
-                import warnings
-
                 warnings.warn(
                     f"Span became zero-length after clamping for quality '{quality_name}': "
                     f"original ({char_start}, {char_end}) → clamped ({cs}, {ce}). "

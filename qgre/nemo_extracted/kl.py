@@ -81,6 +81,6 @@ def masked_mean(
         if (normalization_factor == 0).all():
             return torch.zeros_like(torch.sum(values * mask, dim=dim))
         return torch.sum(values * mask, dim=dim) / normalization_factor.clamp(min=1e-6)
-    elif normalization_factor == 0:
+    if normalization_factor == 0:
         return torch.tensor(0.0, device=values.device, dtype=values.dtype)
     return torch.sum(values * mask, dim=dim) / max(normalization_factor, 1e-6)

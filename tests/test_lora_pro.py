@@ -59,7 +59,7 @@ class TestLoRAProDiscovery:
         adjuster = LoRAProAdjuster(model, lora_rank=8, lora_alpha=16, config=config)
 
         assert len(adjuster._lora_pairs) == 1
-        A, B, layer_id = adjuster._lora_pairs[0]
+        A, B, _layer_id = adjuster._lora_pairs[0]
         assert A.shape == (8, 64)  # [rank, in_dim]
         assert B.shape == (32, 8)  # [out_dim, rank]
 

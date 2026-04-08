@@ -663,7 +663,6 @@ class TestLatex2SympyParsing:
 
     def test_parse_math_nested_frac(self):
         """Nested fractions: \\frac{p^2}{2m} where m is a symbol."""
-        import sympy as sp
 
         from examples.hamiltonian.reward_fn import _parse_math
 
@@ -674,7 +673,6 @@ class TestLatex2SympyParsing:
 
     def test_parse_math_frac_variables(self):
         """\\frac{dx}{dt} parses as x/t (not a derivative - that's \\frac{d}{dt}x)."""
-        import sympy as sp
 
         from examples.hamiltonian.reward_fn import _parse_math
 
