@@ -108,6 +108,24 @@ The engine loads the model, tokenizes the data, creates the trainer, and runs th
 
 ---
 
+## Development setup
+
+If you're working on the engine itself (not just running training), bootstrap the dev toolchain once:
+
+```bash
+bash scripts/setup-dev.sh
+```
+
+That script syncs `.venv` with the dev extras (pre-commit, pytest, ruff, pyright, bandit), installs `pyright` as a `uv tool` so the bare binary lands on PATH, and wires `pre-commit` into both `.git/hooks/pre-commit` and `.git/hooks/pre-push`. After that, `git commit` and `git push` automatically run ruff, ruff-format, pyright, and bandit on every change. Re-run the script any time `.pre-commit-config.yaml` or the dev extras change — it's idempotent.
+
+Verify the toolchain manually with:
+
+```bash
+uv run pre-commit run --all-files
+```
+
+---
+
 ## Architecture
 
 ```
