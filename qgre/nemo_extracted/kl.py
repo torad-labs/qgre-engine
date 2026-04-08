@@ -55,7 +55,7 @@ def calculate_kl(
         raise ValueError(f"Invalid KL type: {kl_type}")
 
     if output_clamp_value is not None:
-        kl = kl.clamp(min=-output_clamp_value, max=output_clamp_value)
+        kl = kl.clamp(min=0, max=output_clamp_value)
 
     return kl
 
@@ -80,6 +80,7 @@ def masked_mean(
     if isinstance(normalization_factor, torch.Tensor):
         if (normalization_factor == 0).all():
             return torch.zeros_like(torch.sum(values * mask, dim=dim))
+        return torch.sum(values * mask, dim=dim) / normalization_factor.clamp(min=1e-6)
     elif normalization_factor == 0:
         return torch.tensor(0.0, device=values.device, dtype=values.dtype)
-    return torch.sum(values * mask, dim=dim) / (normalization_factor + 1e-8)
+    return torch.sum(values * mask, dim=dim) / max(normalization_factor, 1e-6)

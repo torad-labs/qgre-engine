@@ -189,7 +189,16 @@ def apply_egrs_matrix(
                 # Apply ERIC dampening if importance provided (prevents cascade destabilization)
                 if importance is not None:
                     clamped_strength = min(eric_strength, 10.0)
-                    dampening = 1.0 + clamped_strength * importance[t].item()
+                    # Clamp importance to valid range before using in dampening
+                    importance_val = importance[t].item()
+                    if not (0.0 <= importance_val <= 1.0):
+                        import warnings
+                        warnings.warn(
+                            f"ERIC: importance value {importance_val} out of range [0,1] at position {t}. Clamping.",
+                            stacklevel=2,
+                        )
+                        importance_val = max(0.0, min(1.0, importance_val))
+                    dampening = 1.0 + clamped_strength * importance_val
                     scaled_adv = scaled_adv / dampening
                 modified_advs[t] = scaled_adv
         else:
@@ -1128,6 +1137,8 @@ class QGREStepAdvantageEstimator:
             overlap_count = torch.zeros(seq_len, device=device, dtype=dtype)
             # R3-RSP-009: Track first-occurrence advantages to cap repetition penalty accumulation
             first_occurrence_advs = torch.zeros(seq_len, device=device, dtype=dtype)
+            # Track signed first occurrence for correct cap application
+            first_occurrence_signed = torch.zeros(seq_len, device=device, dtype=dtype)
             masks = batch_token_masks[i]
 
             # A5: Warn if masks dict is empty
@@ -1180,11 +1191,17 @@ class QGREStepAdvantageEstimator:
                 # Repetition: always penalize with -|q_adv| * multiplier
                 # This ensures repeating correct = net negative, repeating wrong = even more negative
                 token_advs += q_adv * first_mask
-                # R3-RSP-009: Track first-occurrence advantage magnitude for capping repetition penalty
+                # R3-RSP-009: Track first-occurrence advantage magnitude and sign for capping repetition penalty
                 first_occurrence_advs = torch.maximum(
                     first_occurrence_advs, torch.abs(q_adv * first_mask)
                 )
-                token_advs += -abs(q_adv) * REPETITION_PENALTY_MULTIPLIER * repeat_mask
+                # Track signed value where first_mask is active (preserves 0 elsewhere)
+                first_occurrence_signed = torch.where(
+                    first_mask > 0, q_adv, first_occurrence_signed
+                )
+                # Clamp q_adv magnitude before adding repetition penalty to prevent unbounded accumulation
+                clamped_q_adv = max(-self._clip_advantage, min(self._clip_advantage, q_adv))
+                token_advs += -abs(clamped_q_adv) * REPETITION_PENALTY_MULTIPLIER * repeat_mask
 
                 # For overlap normalization, count both first and repeat as participating
                 overlap_count += first_mask + repeat_mask
@@ -1216,9 +1233,10 @@ class QGREStepAdvantageEstimator:
 
             # R3-RSP-009: Cap accumulated repetition penalty to not exceed first-occurrence magnitude
             # This prevents multiple repeat annotations from training correct token as wrong.
-            # For tokens with first_occurrence_advs > 0, ensure token_advs >= -first_occurrence_advs.
+            # For tokens with positive first occurrence (correct), ensure token_advs >= -first_occurrence_advs.
+            # For negative first occurrence (wrong), no cap needed (penalty can accumulate).
             token_advs = torch.where(
-                first_occurrence_advs > 0,
+                first_occurrence_signed > 0,
                 torch.maximum(token_advs, -first_occurrence_advs),
                 token_advs,
             )

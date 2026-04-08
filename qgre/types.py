@@ -331,6 +331,8 @@ class CheckpointState:
     vprm_optimizer_state: dict | None = None
     # EGRS hint registry state (optional)
     hint_registry_state: dict | None = None
+    # LoRA-Pro momentum state (optional)
+    lora_pro_state: dict | None = None
     # Training context (optional)
     training_context: dict | None = None
     # Schema version for migration
@@ -346,6 +348,7 @@ class CheckpointState:
         "vprm_critic_state",
         "vprm_optimizer_state",
         "hint_registry_state",
+        "lora_pro_state",
         "training_context",
     )
 
@@ -580,18 +583,9 @@ class CheckpointState:
                 )
                 game_state = GameState()
             elif isinstance(game_state_raw, dict):
-                # R3-CSM-006: Don't reconstruct GameState from dict here — checkpoint.py handles that
-                # via gamestate_from_dict which handles deque reconstruction.
-                # WARNING: Caller must convert game_state from dict to GameState using gamestate_from_dict.
-                import warnings
-
-                warnings.warn(
-                    "R3-CSM-006: CheckpointState.from_dict returning game_state as dict. "
-                    "Caller must convert using gamestate_from_dict() before use.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-                game_state = game_state_raw  # Will be converted by caller
+                # Convert dict to GameState using gamestate_from_dict
+                from qgre.checkpoint import gamestate_from_dict
+                game_state = gamestate_from_dict(game_state_raw)
             else:
                 game_state = game_state_raw
 

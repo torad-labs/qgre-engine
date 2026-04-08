@@ -116,9 +116,9 @@ class VPRMCritic(nn.Module):
                     import warnings
 
                     warnings.warn(
-                        f"NaN/Inf in online head '{q_name}' — skipping Polyak update", stacklevel=2
+                        f"NaN/Inf in online head '{q_name}' — skipping Polyak update for this head", stacklevel=2
                     )
-                    return
+                    continue
                 # Move online params to target device before Polyak update
                 op_data = op.data.to(device=tp.device, dtype=tp.dtype)
                 tp.data.mul_(1.0 - tau).add_(op_data, alpha=tau)
@@ -416,10 +416,9 @@ class VPRMCritic(nn.Module):
                 continue
 
             mask = token_masks[q_name]
-            # RSP-003: Filter out REPETITION_MARKER (-1.0) from pooling
-            # For span masks: 1.0 = first occurrence, REPETITION_MARKER (-1.0) = repeat
-            # Pool only first occurrences (1.0 values), not repeats
-            float_mask = (mask == 1.0).float()
+            # Include both first occurrences (1.0) and repetition markers (-1.0)
+            # Treat both as valid signal for critic training
+            float_mask = (mask.abs() == 1.0).float()
 
             # Align mask to hidden_states length (mask may be completion-only, hidden_states may include prompt)
             hs_len = hidden_states.shape[0]
@@ -436,7 +435,7 @@ class VPRMCritic(nn.Module):
 
             count = float_mask.sum()
 
-            if count == 0:
+            if count < 1e-6:
                 # Empty mask — skip
                 advantages[q_name] = None
                 continue

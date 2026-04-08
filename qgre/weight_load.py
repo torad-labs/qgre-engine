@@ -110,6 +110,8 @@ class WeightLoader:
             ),
         )
         self._lora_request = None
+        # Clear stale cache flag since engine is being recreated with fresh state
+        self._cache_potentially_stale = False
 
     # --- Legacy compatibility properties ---
 
@@ -146,6 +148,13 @@ class WeightLoader:
         # ELI-002/003: Lock protects ALL operations including dropout check and fast path
         # to prevent race conditions between state checks and transitions
         with self._lock:
+            # CR-002: Check if KV cache is potentially stale before sync
+            if self._cache_potentially_stale:
+                raise RuntimeError(
+                    "KV cache is potentially stale due to previous flush failure. "
+                    "Generations may use corrupted cache. Recreate vLLM engine or restart training."
+                )
+
             # WS3-001: Track dropout state, skip sync if dropout active
             # (checked inside lock to prevent race with dropout activation)
             if apply_lora_dropout is not None and getattr(
@@ -559,10 +568,20 @@ class WeightLoader:
             True, indicating caller MUST also reset WeightBus._initialized.
             This is an explicit contract: ignoring the return value risks
             WeightBus thinking it's still initialized when the loader is not.
+
+        CRITICAL: After calling this method, you MUST call:
+            weight_bus.reset_on_engine_recreate()
+        Failure to do so will cause stale state and sync failures.
         """
         with self._lock:
             self._transition_to_uninitialized()
         # ELI-005: Return value enforces caller contract - must reset WeightBus
+        import warnings
+        warnings.warn(
+            "WeightLoader.reset_state() called. Caller MUST also call "
+            "weight_bus.reset_on_engine_recreate() to prevent stale state.",
+            stacklevel=2,
+        )
         return True  # weight_bus_needs_reset
 
     def cleanup_adapter_tempdir(self):

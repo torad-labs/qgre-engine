@@ -77,7 +77,7 @@ def selective_log_softmax(
     # logsumexp in BF16 loses precision — compute log_softmax in FP32.
     # GB2-004: Use functional approach to preserve gradients (no in-place)
     logprobs_list = []
-    for logits_row, index_row in zip(logits, index, strict=False):
+    for logits_row, index_row in zip(logits, index, strict=True):
         # LP-R2-04: Validate bounds before bf16 path
         vocab_size = logits_row.shape[-1]
         if (index_row < 0).any() or (index_row >= vocab_size).any():

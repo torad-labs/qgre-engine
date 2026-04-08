@@ -335,6 +335,10 @@ class QGRETrainer:
             _device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.ctx = TrainingContext.from_config(config, device=str(_device))
 
+        # LoRA-Pro gradient adjustment — initialized lazily after optimizer setup
+        self._lora_pro_config = config.lora_pro
+        self._lora_pro_adjuster = None
+
     @property
     def completion_logger(self):
         """Lazy completion logger — creates on first access, handles resume."""
@@ -462,6 +466,30 @@ class QGRETrainer:
             )
         else:
             self.scheduler = main_scheduler
+
+        # Initialize LoRA-Pro gradient adjuster if enabled
+        if self._lora_pro_config.enabled:
+            from qgre.lora_pro import LoRAProAdjuster, LoRAProConfig
+
+            lora_pro_cfg = LoRAProConfig(
+                enabled=True,
+                beta1=self._lora_pro_config.beta1,
+                beta2=self._lora_pro_config.beta2,
+                eps=self._lora_pro_config.eps,
+                delta=self._lora_pro_config.delta,
+                use_rslora=self._lora_pro_config.use_rslora,
+            )
+            self._lora_pro_adjuster = LoRAProAdjuster(
+                model=self.model,
+                lora_rank=self.config.model.lora_rank,
+                lora_alpha=self.config.model.lora_alpha,
+                config=lora_pro_cfg,
+            )
+            logging.getLogger(__name__).info(
+                f"LoRA-Pro: Enabled with rank={self.config.model.lora_rank}, "
+                f"alpha={self.config.model.lora_alpha}, "
+                f"rslora={self._lora_pro_config.use_rslora}"
+            )
 
     def compute_response_mask(
         self,
@@ -898,6 +926,10 @@ class QGRETrainer:
                 self._accumulated_samples += len(step)
                 self.global_step += 1
                 self.ctx.step = self.global_step
+                # T3: Call scheduler.step() if gradient accumulation step completes
+                if (self.global_step % self.config.training.gradient_accumulation_steps == 0
+                    and self.scheduler is not None):
+                    self.scheduler.step()
                 return metrics
             if useful.sum() >= 2 and useful.sum() < len(step):
                 idx = useful.nonzero(as_tuple=True)[0]
@@ -1732,8 +1764,8 @@ class QGRETrainer:
         # Track accumulated loss across gradient accumulation steps
         self._accumulated_loss += total_loss
         self._accumulation_count += 1
-        # R2-MTO-005: Track original samples (not filtered) for accurate metrics denominator
-        self._accumulated_samples += original_batch_size
+        # Track filtered samples (not original) for accurate loss averaging
+        self._accumulated_samples += len(step)
 
         # Optimizer step (backward already done in micro-batches above)
         if (self.global_step + 1) % self.config.training.gradient_accumulation_steps == 0:
@@ -1844,6 +1876,11 @@ class QGRETrainer:
                     "TRANSITIONAL": 2,
                     "TURBULENT": 3,
                 }.get(state, 0)
+
+            # LoRA-Pro: Adjust gradients before optimizer step
+            if self._lora_pro_adjuster is not None:
+                lora_pro_metrics = self._lora_pro_adjuster.adjust_gradients(self.global_step)
+                metrics.update(lora_pro_metrics)
 
             self.optimizer.step()
 
@@ -2036,6 +2073,7 @@ class QGRETrainer:
             dataloader_state=self._dataloader.state_dict() if self._dataloader else None,
             training_context=self.ctx.to_dict(),
             hint_registry_state=self.hint_registry.to_dict() if self.hint_registry else None,
+            lora_pro_state=self._lora_pro_adjuster.state_dict() if self._lora_pro_adjuster else None,
             trainer_state=trainer_state,  # Use StateSpec instead of individual fields
         )
 
@@ -2260,6 +2298,20 @@ class QGRETrainer:
                 f"CT-1: Checkpoint contains {hint_count} hint entries but EGRS is disabled in config. "
                 f"All {hint_count} flagged hints will be LOST. "
                 "Set egrs.enabled=True to restore hint registry.",
+                stacklevel=2,
+            )
+        # Restore LoRA-Pro momentum state (if saved and enabled)
+        if checkpoint.lora_pro_state and self._lora_pro_adjuster is not None:
+            self._lora_pro_adjuster.load_state_dict(checkpoint.lora_pro_state)
+            logging.getLogger(__name__).info(
+                f"LoRA-Pro: Restored momentum state for {len(checkpoint.lora_pro_state)} layers",
+            )
+        elif checkpoint.lora_pro_state and self._lora_pro_adjuster is None:
+            import warnings
+
+            warnings.warn(
+                "Checkpoint contains LoRA-Pro state but lora_pro.enabled=False in config. "
+                "LoRA-Pro momentum will not be restored.",
                 stacklevel=2,
             )
         # CheckpointState: RNG state is in trainer

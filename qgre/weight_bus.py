@@ -81,33 +81,23 @@ class WeightBus:
                 loader.flush_kv_cache()
                 sync_executed = True
             elif self.strategy == SyncStrategy.DIRECT_COPY:
-                # WS-R3-04: Check if dropout is active before sync
-                try:
-                    from qgre.lora_dropout import apply_lora_dropout
-
-                    dropout_active = getattr(apply_lora_dropout, "_dropout_active", False)
-                except ImportError:
-                    # SFH-003: Log import failure so users know dropout checking is disabled
-                    import warnings
-
-                    warnings.warn(
-                        "SFH-003: lora_dropout module not available — dropout_active check disabled. "
-                        "If you expect LoRA dropout to be active, verify qgre.lora_dropout module exists.",
-                        stacklevel=2,
-                    )
-                    dropout_active = False
-
+                # Dropout check moved inside WeightLoader.sync_lora_direct (inside lock)
                 loader.sync_lora_direct(model, ctx, first_call=not self._initialized)
                 # Get fresh state_dict inside sync_modules_to_save to avoid stale tensor references
                 loader.sync_modules_to_save(
                     exporter.get_modules_to_save(model, expected=modules_to_save), ctx
                 )
-                # WS-R3-04: Only mark sync_executed if dropout wasn't active
-                sync_executed = not dropout_active
-                # WS-R3-04: Only set initialized if sync actually executed (dropout not active)
-                if sync_executed:
-                    self._initialized = True
+                # Mark sync as executed and set initialized flag
+                sync_executed = True
+                self._initialized = True
         except Exception as e:
+            # Clear dropout state in exception handler to prevent stuck state
+            try:
+                from qgre.lora_dropout import apply_lora_dropout
+                if hasattr(apply_lora_dropout, "_dropout_active"):
+                    apply_lora_dropout._dropout_active = False
+            except ImportError:
+                pass
             # Don't set initialized=True on failure — next sync will retry first_call path
             raise RuntimeError(f"Weight sync failed: {e}") from e
 

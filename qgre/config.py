@@ -291,6 +291,28 @@ class EGRSConfig:
 
 
 @dataclass
+class LoRAProConfig:
+    """LoRA-Pro gradient adjustment for better approximation of full fine-tuning.
+
+    Paper: "LoRA-Pro: Are Low-Rank Adapters Properly Optimized?" (ICLR 2025)
+    https://arxiv.org/abs/2407.18242
+
+    When enabled, adjusts LoRA A/B gradients after backward() so that the
+    equivalent low-rank gradient better approximates what full fine-tuning
+    would produce. Adds ~4GB memory overhead, no additional training time.
+    """
+
+    enabled: bool = False  # Enable LoRA-Pro gradient adjustment
+    beta1: float = 0.9  # Adam beta1 for equivalent gradient momentum
+    beta2: float = 0.999  # Adam beta2 for equivalent gradient momentum
+    eps: float = 1e-8  # Epsilon for numerical stability
+    delta: float = 1e-8  # Regularization for matrix pseudo-inverse
+    use_rslora: bool = True  # RSLoRA scaling (alpha/sqrt(r)) vs standard (alpha/r)
+    grad_scale: float = 1.0  # Post-adjustment gradient multiplier (counteracts 1/s² attenuation for RL)
+    grad_floor: float = 1e-7  # Minimum gradient norm (prevents numerical collapse)
+
+
+@dataclass
 class AlgorithmConfig:
     mode: str = "spo"  # "spo" or "grpo"
     spo: SPOConfig = field(default_factory=SPOConfig)
@@ -439,6 +461,7 @@ class QGREConfig:
     vprm: VPRMConfig = field(default_factory=VPRMConfig)
     tutorial: TutorialConfig = field(default_factory=TutorialConfig)
     egrs: EGRSConfig = field(default_factory=EGRSConfig)
+    lora_pro: LoRAProConfig = field(default_factory=LoRAProConfig)
 
     def validate(self) -> None:
         """Validate config for common misconfigurations. Called after from_yaml()."""

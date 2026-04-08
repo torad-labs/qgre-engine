@@ -151,11 +151,19 @@ def _restore_tier_mastery(tm: dict, quality_window_size: int) -> dict:
                     f"Data loss: {data_loss} entries.",
                     stacklevel=2,
                 )
+            # CK2: Coerce values to float before isfinite check
+            try:
+                coerced_values = [float(v) for v in values]
+            except (ValueError, TypeError) as e:
+                raise TypeError(
+                    f"CK2: Cannot convert tier_mastery['{tier}'][{step_num}] values to float: {e}. "
+                    f"Got values: {values[:5]}...",
+                ) from e
             # Filter NaN/Inf
-            filtered = [v for v in values if math.isfinite(v)]
-            if len(filtered) < len(values):
+            filtered = [v for v in coerced_values if math.isfinite(v)]
+            if len(filtered) < len(coerced_values):
                 warnings.warn(
-                    f"SCHEMA: Filtered {len(values) - len(filtered)} NaN/Inf values "
+                    f"SCHEMA: Filtered {len(coerced_values) - len(filtered)} NaN/Inf values "
                     f"from tier_mastery['{tier}'][{step_num}]",
                     stacklevel=2,
                 )
@@ -237,6 +245,7 @@ def save_checkpoint(
     dataloader_state: dict | None = None,
     training_context: dict | None = None,
     hint_registry_state: dict | None = None,
+    lora_pro_state: dict | None = None,
     # New: accept TrainerState directly (preferred)
     trainer_state: TrainerState | None = None,
     weight_loader_state: WeightLoaderState | None = None,
@@ -296,6 +305,7 @@ def save_checkpoint(
         vprm_critic_state=vprm_critic_state,
         vprm_optimizer_state=vprm_optimizer_state,
         hint_registry_state=hint_registry_state,
+        lora_pro_state=lora_pro_state,
         training_context=training_context,
         schema_version=CHECKPOINT_SCHEMA_VERSION,
     )

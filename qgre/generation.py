@@ -481,12 +481,14 @@ class UnslothBackend:
                 if sample_hints:
                     # Format hints as guidance text appended to prompt
                     hint_lines = []
+                    injected_span_ids = []
                     for span_id, hint in sample_hints.items():
                         if hint:
                             # MIO-003: Decode and validate hint is not empty
                             hint_str = str(hint).strip()
                             if hint_str:
                                 hint_lines.append(f"[{hint_str}]")
+                                injected_span_ids.append(span_id)
                                 # H-2: Don't mark as used yet - wait until after overflow check
                             else:
                                 import logging
@@ -513,12 +515,12 @@ class UnslothBackend:
                                 "Skipping hint injection for this sample.",
                             )
                             # H-2: Mark all hints as NOT used since injection was skipped
-                            for span_id in sample_hints:
+                            for span_id in injected_span_ids:
                                 hints_used_dict[span_id] = False
                         else:
                             text = combined_text
                             # H-2: NOW mark hints as successfully used (AFTER successful injection)
-                            for span_id in sample_hints:
+                            for span_id in injected_span_ids:
                                 hints_used_dict[span_id] = True
 
             prompts.append(text)

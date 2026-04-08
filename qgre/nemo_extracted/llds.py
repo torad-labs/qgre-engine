@@ -56,7 +56,11 @@ def compute_llds_loss(
     # Combined gate: only penalize tokens on correct responses that are declining
     llds_mask = traj_gate * token_gate * action_gate * response_mask
     mask_count = llds_mask.sum()
-    displacement = (old_log_prob - log_prob) * llds_mask
-    loss = displacement.sum() / mask_count.clamp(min=1)
+    if mask_count == 0:
+        import torch
+        loss = torch.tensor(0.0, device=log_prob.device, dtype=log_prob.dtype)
+    else:
+        displacement = (old_log_prob - log_prob) * llds_mask
+        loss = displacement.sum() / mask_count
 
     return loss, llds_mask

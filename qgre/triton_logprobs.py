@@ -62,7 +62,7 @@ if HAS_TRITON:
 
         # Compute logsumexp and gather the label logit in one pass over vocab tiles
         max_logit = float("-inf")
-        label_logit = tl.zeros([], dtype=tl.float32)
+        label_logit = float("-inf")
 
         # First pass: find max logit (for numerical stability) + label logit
         for v_start in range(0, vocab_size, BLOCK_V):

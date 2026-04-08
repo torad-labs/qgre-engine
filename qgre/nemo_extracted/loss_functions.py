@@ -45,16 +45,17 @@ def apply_eligibility_traces(
     # Backward pass: accumulate eligibility trace from end of sequence
     trace = torch.zeros(batch, device=advantages.device)
     for t in range(seq - 1, -1, -1):
-        # RL3-001: Check for NaN before accumulation
+        # RL3-001: Check for NaN and Inf before accumulation
         adv_t = advantages[:, t]
-        if torch.isnan(adv_t).any():
+        invalid_mask = torch.isnan(adv_t) | torch.isinf(adv_t)
+        if invalid_mask.any():
             import warnings
 
             warnings.warn(
-                f"NaN detected in eligibility trace at position {t}. Replacing with 0.0",
+                f"NaN/Inf detected in eligibility trace at position {t}. Replacing with 0.0",
                 stacklevel=2,
             )
-            adv_t = torch.where(torch.isnan(adv_t), torch.zeros_like(adv_t), adv_t)
+            adv_t = torch.where(invalid_mask, torch.zeros_like(adv_t), adv_t)
         trace = adv_t + lambda_val * trace
         traces[:, t] = trace
     return traces
@@ -131,6 +132,7 @@ class ClippedPGLossFn:
             ratios_clamped = ratios
         else:
             log_ratios = curr_logprobs - prev_logprobs
+            log_ratios = log_ratios.clamp(min=-20.0, max=20.0)
             ratios = log_ratios.exp()
             ratios_clamped = ratios.clamp(
                 1.0 - self.ratio_clip_min,
@@ -155,7 +157,8 @@ class ClippedPGLossFn:
 
         # Importance sampling correction (ratio: π_current / π_generation)
         if self.use_importance_sampling_correction:
-            importance_weights = torch.exp(curr_logprobs.detach() - prev_logprobs).detach()
+            log_importance = (curr_logprobs.detach() - prev_logprobs).clamp(min=-20.0, max=20.0)
+            importance_weights = torch.exp(log_importance).detach()
             importance_weights = torch.nan_to_num(
                 importance_weights, nan=0.0, posinf=0.0, neginf=0.0
             )
@@ -222,7 +225,7 @@ class ClippedPGLossFn:
             )
             kl_loss = masked_mean(kl, mask, global_normalization_factor=global_valid_toks)
         else:
-            kl_loss = torch.tensor(0.0, device=actor_loss.device)
+            kl_loss = torch.zeros(1, device=actor_loss.device, requires_grad=False).squeeze()
 
         loss = actor_loss + kl_loss
 
