@@ -280,7 +280,14 @@ class WeightLoader:
                     )
 
         synced = []
+        original_weights = {}
         try:
+            for name, _ in weights.items():
+                vllm_model = self.engine.model_executor.driver_worker.model_runner.model
+                if name == "lm_head":
+                    original_weights[name] = vllm_model.lm_head.weight.data.clone()
+                elif name == "embed_tokens":
+                    original_weights[name] = vllm_model.model.embed_tokens.weight.data.clone()
             for name, tensor in weights.items():
                 # C08-DTYPE: Validate tensor dtype matches ctx.dtype
                 if tensor.dtype != ctx.dtype:
@@ -343,10 +350,17 @@ class WeightLoader:
                     synced.append(name)
         except Exception as e:
             # WS3-006: Rollback on failure (log error, don't crash)
+            vllm_model = self.engine.model_executor.driver_worker.model_runner.model
+            for name in synced:
+                if name in original_weights:
+                    if name == "lm_head":
+                        vllm_model.lm_head.weight.data.copy_(original_weights[name])
+                    elif name == "embed_tokens":
+                        vllm_model.model.embed_tokens.weight.data.copy_(original_weights[name])
             warnings.warn(
                 f"WS3-006: modules_to_save sync failed mid-operation. "
                 f"Synced: {synced}, expected: {expected}. Error: {e}. "
-                "Weights may be inconsistent — restart training from checkpoint.",
+                "Rolled back partial sync. vLLM state restored.",
                 stacklevel=2,
             )
             raise
@@ -562,7 +576,7 @@ class WeightLoader:
     def reset_state(self) -> bool:
         """WS3-009: Reset state on engine recreate.
 
-        Transitions to UNINITIALIZED state, clearing _lora_request.
+        Transitions to UNINITIALIZED state, clearing _lora_request and cache flags.
 
         Returns:
             True, indicating caller MUST also reset WeightBus._initialized.
@@ -575,6 +589,7 @@ class WeightLoader:
         """
         with self._lock:
             self._transition_to_uninitialized()
+            self._cache_potentially_stale = False
         # ELI-005: Return value enforces caller contract - must reset WeightBus
         import warnings
         warnings.warn(

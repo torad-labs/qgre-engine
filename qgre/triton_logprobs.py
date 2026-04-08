@@ -91,7 +91,6 @@ if HAS_TRITON:
             # Gather label logit if in this tile
             label_in_tile = (label >= v_start) & (label < v_start + BLOCK_V)
             if label_in_tile:
-                label - v_start
                 # GB3-003: Explicit -inf assignment if label not found (was implicit)
                 label_logit = tl.load(
                     weight_ptr + label * hidden_dim + h_offs,

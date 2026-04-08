@@ -41,7 +41,6 @@ def compute_attention_entropy(attentions: tuple) -> dict:
             "per_head_entropy": [],
         }
 
-    len(attentions)
     per_layer_entropy = []
     per_head_entropy = []
 

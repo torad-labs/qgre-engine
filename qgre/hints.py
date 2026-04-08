@@ -357,10 +357,21 @@ class HintRegistry:
                     continue
 
                 entry_validated = validate_schema(hint_data, HINT_ENTRY_SCHEMA, "hint_entry")
+                hint_tokens = entry_validated["hint_tokens"]
+                if not all(isinstance(t, int) and t >= 0 for t in hint_tokens):
+                    skipped_entries += 1
+                    if skipped_entries == 1:
+                        first_error_msg = f"Invalid hint_tokens: {hint_tokens}"
+                        warnings.warn(
+                            f"SCHEMA: Invalid hint_tokens in HintEntry: {hint_tokens}. "
+                            "Skipping entry.",
+                            stacklevel=2,
+                        )
+                    continue
                 entry = HintEntry(
                     prompt_id=entry_validated["prompt_id"],
                     span_id=entry_validated["span_id"],
-                    hint_tokens=entry_validated["hint_tokens"],
+                    hint_tokens=hint_tokens,
                     mastery_at_flag=entry_validated["mastery_at_flag"],
                     flagged_step=entry_validated["flagged_step"],
                     success_count=entry_validated["success_count"],

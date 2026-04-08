@@ -534,9 +534,14 @@ class CheckpointState:
                 game_state = GameState()
             elif isinstance(game_state_raw, GameState):
                 game_state = game_state_raw
+            elif isinstance(game_state_raw, dict):
+                from qgre.checkpoint import gamestate_from_dict
+                game_state = gamestate_from_dict(game_state_raw)
             else:
-                # Assume it's already been converted by checkpoint.py's gamestate_from_dict
-                game_state = game_state_raw
+                raise TypeError(
+                    f"Expected dict or GameState for 'game_state', got {type(game_state_raw).__name__}. "
+                    "Checkpoint may be corrupted.",
+                )
         else:
             # New format: validate required keys exist
             required_keys = ["trainer"]
@@ -586,8 +591,13 @@ class CheckpointState:
                 # Convert dict to GameState using gamestate_from_dict
                 from qgre.checkpoint import gamestate_from_dict
                 game_state = gamestate_from_dict(game_state_raw)
-            else:
+            elif isinstance(game_state_raw, GameState):
                 game_state = game_state_raw
+            else:
+                raise TypeError(
+                    f"Expected dict or GameState for 'game_state', got {type(game_state_raw).__name__}. "
+                    "Checkpoint may be corrupted.",
+                )
 
         # Build optional fields from registry — no hardcoding field names
         optional_kwargs = {field: d.get(field) for field in cls.OPTIONAL_FIELDS}

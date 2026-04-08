@@ -1166,8 +1166,7 @@ class QGREStepAdvantageEstimator:
                     skipped_count += 1
                     continue
                 q_adv = all_quality_advs[i].get(quality_name, 0.0)
-                if abs(q_adv) < 1e-10:
-                    continue
+                skip_quality = abs(q_adv) < 1e-10
                 q_mask = masks[quality_name]
                 # Graceful handling instead of assert — don't crash on data-dependent mismatch
                 if q_mask.shape[0] != seq_len:
@@ -1187,24 +1186,28 @@ class QGREStepAdvantageEstimator:
                 first_mask = (q_mask == 1.0).float()
                 repeat_mask = (q_mask == REPETITION_MARKER).float()
 
-                # First occurrence: normal q_adv (positive for correct, negative for wrong)
-                # Repetition: always penalize with -|q_adv| * multiplier
-                # This ensures repeating correct = net negative, repeating wrong = even more negative
-                token_advs += q_adv * first_mask
-                # R3-RSP-009: Track first-occurrence advantage magnitude and sign for capping repetition penalty
-                first_occurrence_advs = torch.maximum(
-                    first_occurrence_advs, torch.abs(q_adv * first_mask)
-                )
-                # Track signed value where first_mask is active (preserves 0 elsewhere)
-                first_occurrence_signed = torch.where(
-                    first_mask > 0, q_adv, first_occurrence_signed
-                )
-                # Clamp q_adv magnitude before adding repetition penalty to prevent unbounded accumulation
-                clamped_q_adv = max(-self._clip_advantage, min(self._clip_advantage, q_adv))
-                token_advs += -abs(clamped_q_adv) * REPETITION_PENALTY_MULTIPLIER * repeat_mask
+                if not skip_quality:
+                    # First occurrence: normal q_adv (positive for correct, negative for wrong)
+                    # Repetition: always penalize with -|q_adv| * multiplier
+                    # This ensures repeating correct = net negative, repeating wrong = even more negative
+                    token_advs += q_adv * first_mask
+                    # R3-RSP-009: Track first-occurrence advantage magnitude and sign for capping repetition penalty
+                    first_occurrence_advs = torch.maximum(
+                        first_occurrence_advs, torch.abs(q_adv * first_mask)
+                    )
+                    # Track signed value where first_mask is active (use max to avoid overwrite)
+                    new_signed = torch.where(first_mask > 0, q_adv, torch.zeros_like(first_occurrence_signed))
+                    first_occurrence_signed = torch.where(
+                        torch.abs(new_signed) > torch.abs(first_occurrence_signed),
+                        new_signed,
+                        first_occurrence_signed
+                    )
+                    # Clamp q_adv magnitude before adding repetition penalty to prevent unbounded accumulation
+                    clamped_q_adv = max(-self._clip_advantage, min(self._clip_advantage, q_adv))
+                    token_advs += -abs(clamped_q_adv) * REPETITION_PENALTY_MULTIPLIER * repeat_mask
 
-                # For overlap normalization, count both first and repeat as participating
-                overlap_count += first_mask + repeat_mask
+                    # For overlap normalization, count both first and repeat as participating
+                    overlap_count += first_mask + repeat_mask
 
             # RL3-008: Raise if ALL qualities were skipped AND at least one was due to shape mismatch
             # (Empty masks dict is backward compat, not an error)
@@ -1236,7 +1239,7 @@ class QGREStepAdvantageEstimator:
             # For tokens with positive first occurrence (correct), ensure token_advs >= -first_occurrence_advs.
             # For negative first occurrence (wrong), no cap needed (penalty can accumulate).
             token_advs = torch.where(
-                first_occurrence_signed > 0,
+                first_occurrence_signed != 0,
                 torch.maximum(token_advs, -first_occurrence_advs),
                 token_advs,
             )

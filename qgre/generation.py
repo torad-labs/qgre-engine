@@ -430,6 +430,11 @@ class UnslothBackend:
                 llm_engine = getattr(engine, "llm_engine", engine)
                 if hasattr(llm_engine, "model_config"):
                     max_lp = getattr(llm_engine.model_config, "max_logprobs", 0)
+                    if max_lp == 0 and llds_enabled:
+                        raise ValueError(
+                            "max_logprobs=0 with LLDS enabled. LLDS requires max_logprobs >= 1. "
+                            "Set max_logprobs in vLLM engine config."
+                        )
                     if max_lp < requested_logprobs:
                         # GB2-001: Raise error instead of warning if LLDS enabled and max_logprobs insufficient
                         if llds_enabled:
@@ -485,16 +490,24 @@ class UnslothBackend:
                     for span_id, hint in sample_hints.items():
                         if hint:
                             # MIO-003: Decode and validate hint is not empty
-                            hint_str = str(hint).strip()
-                            if hint_str:
-                                hint_lines.append(f"[{hint_str}]")
-                                injected_span_ids.append(span_id)
-                                # H-2: Don't mark as used yet - wait until after overflow check
-                            else:
+                            try:
+                                hint_str = str(hint).strip()
+                                if hint_str:
+                                    hint_lines.append(f"[{hint_str}]")
+                                    injected_span_ids.append(span_id)
+                                    # H-2: Don't mark as used yet - wait until after overflow check
+                                else:
+                                    import logging
+
+                                    logging.getLogger(__name__).warning(
+                                        f"MIO-003: Empty hint text after decoding for span {span_id} in sample {i}",
+                                    )
+                                    hints_used_dict[span_id] = False
+                            except (UnicodeDecodeError, ValueError) as e:
                                 import logging
 
                                 logging.getLogger(__name__).warning(
-                                    f"MIO-003: Empty hint text after decoding for span {span_id} in sample {i}",
+                                    f"MIO-003: Failed to decode hint for span {span_id} in sample {i}: {e}. Skipping hint.",
                                 )
                                 hints_used_dict[span_id] = False
                         else:
@@ -615,6 +628,11 @@ class UnslothBackend:
             all(lps is not None and len(lps) > 0 for lps in all_logprobs) if all_logprobs else False
         )
         if not has_logprobs and any(lps is not None and len(lps) > 0 for lps in all_logprobs):
+            if llds_enabled:
+                raise RuntimeError(
+                    f"Partial logprobs with LLDS enabled: {sum(1 for lps in all_logprobs if lps is not None and len(lps) > 0)}"
+                    f"/{len(all_logprobs)} samples have logprobs. LLDS requires consistent logprobs across batch."
+                )
             import logging
 
             # DP-R2-07: Log at WARNING level instead of DEBUG

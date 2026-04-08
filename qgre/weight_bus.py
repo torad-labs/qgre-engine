@@ -12,6 +12,7 @@ Strategies:
 
 from __future__ import annotations
 
+import threading
 from enum import Enum
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,7 @@ class WeightBus:
         self.strategy = strategy
         self._initialized = False  # True after first successful sync
         self._engine_id: int | None = None  # W5: Track engine identity to detect recreation
+        self._sync_lock = threading.Lock()  # Protect engine_id checks and _initialized updates
 
     def reset_on_engine_recreate(self):
         """W5: Reset _initialized when vLLM engine is recreated."""
@@ -71,6 +73,12 @@ class WeightBus:
         """
         # WS-R3-04: Track if sync actually ran (not skipped by dropout)
         sync_executed = False
+        with self._sync_lock:
+            engine_id = id(loader.engine)
+            if self._engine_id is not None and self._engine_id != engine_id:
+                self._initialized = False
+                self._engine_id = None
+            first_call = not self._initialized
         try:
             if self.strategy == SyncStrategy.MERGE:
                 exporter.merge_lora(model)
@@ -82,14 +90,16 @@ class WeightBus:
                 sync_executed = True
             elif self.strategy == SyncStrategy.DIRECT_COPY:
                 # Dropout check moved inside WeightLoader.sync_lora_direct (inside lock)
-                loader.sync_lora_direct(model, ctx, first_call=not self._initialized)
+                loader.sync_lora_direct(model, ctx, first_call=first_call)
                 # Get fresh state_dict inside sync_modules_to_save to avoid stale tensor references
                 loader.sync_modules_to_save(
                     exporter.get_modules_to_save(model, expected=modules_to_save), ctx
                 )
                 # Mark sync as executed and set initialized flag
                 sync_executed = True
-                self._initialized = True
+                with self._sync_lock:
+                    self._initialized = True
+                    self._engine_id = engine_id
         except Exception as e:
             # Clear dropout state in exception handler to prevent stuck state
             try:

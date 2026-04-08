@@ -131,6 +131,7 @@ class ClippedPGLossFn:
             ratios = log_ratios.exp()
             ratios_clamped = ratios
         else:
+            prev_logprobs = torch.nan_to_num(prev_logprobs, nan=-20.0, posinf=-20.0, neginf=-20.0)
             log_ratios = curr_logprobs - prev_logprobs
             log_ratios = log_ratios.clamp(min=-20.0, max=20.0)
             ratios = log_ratios.exp()
@@ -159,12 +160,13 @@ class ClippedPGLossFn:
         if self.use_importance_sampling_correction:
             log_importance = (curr_logprobs.detach() - prev_logprobs).clamp(min=-20.0, max=20.0)
             importance_weights = torch.exp(log_importance).detach()
+            zero_mask = importance_weights == 0.0
             importance_weights = torch.nan_to_num(
                 importance_weights, nan=0.0, posinf=0.0, neginf=0.0
             )
             # Clamp to prevent underflow (silent zero gradients)
             # RL3-006: Track when clamping occurs
-            clamped_mask = importance_weights < 1e-8
+            clamped_mask = (importance_weights < 1e-8) & ~zero_mask
             if clamped_mask.any():
                 import warnings
 
@@ -172,6 +174,14 @@ class ClippedPGLossFn:
                     f"RL3-006: {clamped_mask.sum().item()} importance weights clamped to minimum (1e-8). Gradients may be suppressed.",
                     stacklevel=2,
                 )
+            if zero_mask.any():
+                import warnings
+
+                warnings.warn(
+                    f"RL3-006: {zero_mask.sum().item()} importance weights are exactly zero (underflow before nan_to_num). Setting to 1e-8.",
+                    stacklevel=2,
+                )
+            importance_weights = torch.where(zero_mask, torch.tensor(1e-8, device=importance_weights.device, dtype=importance_weights.dtype), importance_weights)
             importance_weights = importance_weights.clamp(min=1e-8)
             if self.truncated_importance_sampling_ratio is not None:
                 importance_weights = importance_weights.clamp(

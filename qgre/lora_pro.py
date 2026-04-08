@@ -357,11 +357,20 @@ class LoRAProAdjuster:
                 state = self._states[layer_id]
                 if saved_state["exp_avg"] is not None:
                     # Find device from corresponding parameter
+                    device_found = False
                     for A, B, lid in self._lora_pairs:
                         if lid == layer_id:
                             state.exp_avg = saved_state["exp_avg"].to(A.device)
                             state.exp_avg_sq = saved_state["exp_avg_sq"].to(A.device)
+                            device_found = True
                             break
+                    if not device_found:
+                        import warnings
+                        warnings.warn(
+                            f"LoRA-Pro: Could not find device for layer {layer_id}. "
+                            "State may be on wrong device.",
+                            stacklevel=2,
+                        )
 
 
 def compute_gradient_approximation_error(

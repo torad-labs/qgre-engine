@@ -194,7 +194,11 @@ def scored_spans_to_token_masks(
         # Reward FIRST span for each quality — later repetitions get penalized
         # The original answer is typically the correct one; repeats are noise
         # First span gets +1.0, later spans get REPETITION_MARKER penalty
-        len(spans)
+        has_any_first_occurrence = any(
+            (mask[char_to_token[c]] == 0.0 if 0 <= c < max_char and char_to_token[c] != -1 else False)
+            for char_start, char_end in spans
+            for c in range(max(0, min(char_start, max_char - 1)), max(0, min(char_end, max_char)))
+        )
         for span_idx, (char_start, char_end) in enumerate(spans):
             # AE-R2-03: Skip span if completely outside bounds (don't relocate)
             if char_start >= max_char:
@@ -233,7 +237,7 @@ def scored_spans_to_token_masks(
             # Map char range → token indices and set mask
             # First span: +1.0 (reward original answer), later spans: REPETITION_MARKER (penalize repeats)
             # The marker is detected in advantages.py where sign-aware penalty is applied
-            is_first_span = span_idx == 0
+            is_first_span = has_any_first_occurrence and span_idx == 0
             span_value = 1.0 if is_first_span else REPETITION_MARKER
             for c in range(cs, ce):
                 tok_idx = char_to_token[c]
