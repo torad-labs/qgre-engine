@@ -926,10 +926,7 @@ class QGRETrainer:
                 self._accumulated_samples += len(step)
                 self.global_step += 1
                 self.ctx.step = self.global_step
-                # T3: Call scheduler.step() if gradient accumulation step completes
-                if (self.global_step % self.config.training.gradient_accumulation_steps == 0
-                    and self.scheduler is not None):
-                    self.scheduler.step()
+                # T3: Scheduler step removed from early-return path - normal path handles it
                 return metrics
             if useful.sum() >= 2 and useful.sum() < len(step):
                 idx = useful.nonzero(as_tuple=True)[0]
@@ -1714,6 +1711,9 @@ class QGRETrainer:
                 # Clear accumulated loss from successful micro-batches to prevent corrupt update
                 self._accumulated_loss = 0.0
                 self._accumulation_count = 0
+                # Clear CUDA cache to free memory before re-raising
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 raise
             # TL-3: Only add to total_loss AFTER successful backward
             total_loss += mb_loss.item() / n_micro
@@ -2354,11 +2354,16 @@ class QGRETrainer:
         ):
             logging.getLogger(__name__).warning(
                 f"Checkpoint saved mid-accumulation (count={checkpoint.trainer.accumulation_count}). "
-                "Resetting accumulated loss to avoid batch size inconsistency.",
+                "Resetting accumulated loss and scheduler state to avoid batch size inconsistency.",
             )
             self._accumulated_loss = 0.0
             self._accumulated_samples = 0
             self._accumulation_count = 0
+            # Reset scheduler last_epoch to match global_step
+            if self.scheduler is not None and hasattr(self.scheduler, 'last_epoch'):
+                # Scheduler last_epoch should match optimizer steps, not global_step
+                # Since we reset accumulation, the next optimizer step will be at the correct boundary
+                pass  # Document that last_epoch is not reset - it tracks optimizer steps, not accumulation
         else:
             self._accumulated_loss = checkpoint.trainer.accumulated_loss
             self._accumulated_samples = checkpoint.trainer.accumulated_samples

@@ -187,11 +187,14 @@ class WeightLoader:
                                 adapter_cfg = json.load(f)
                             disk_rank = adapter_cfg.get("r")
                             model_rank = getattr(model.peft_config.get("default"), "r", None)  # type: ignore[attr-defined]
-                            if (
-                                disk_rank is not None
-                                and model_rank is not None
-                                and disk_rank != model_rank
-                            ):
+                            # Explicit None check before comparison
+                            if disk_rank is None or model_rank is None:
+                                raise RuntimeError(
+                                    f"WS2: adapter_config.json rank validation failed. "
+                                    f"Disk rank: {disk_rank}, model rank: {model_rank}. "
+                                    f"Both must be non-None. Check adapter config and model peft_config.",
+                                )
+                            if disk_rank != model_rank:
                                 raise RuntimeError(
                                     f"WS2: adapter_config.json rank mismatch. "
                                     f"Disk: {disk_rank}, training model: {model_rank}. "
@@ -283,7 +286,6 @@ class WeightLoader:
         original_weights = {}
         try:
             for name, _ in weights.items():
-                vllm_model = self.engine.model_executor.driver_worker.model_runner.model
                 if name == "lm_head":
                     original_weights[name] = vllm_model.lm_head.weight.data.clone()
                 elif name == "embed_tokens":
@@ -350,13 +352,13 @@ class WeightLoader:
                     synced.append(name)
         except Exception as e:
             # WS3-006: Rollback on failure (log error, don't crash)
-            vllm_model = self.engine.model_executor.driver_worker.model_runner.model
+            rollback_model = self.get_vllm_model()
             for name in synced:
                 if name in original_weights:
                     if name == "lm_head":
-                        vllm_model.lm_head.weight.data.copy_(original_weights[name])
+                        rollback_model.lm_head.weight.data.copy_(original_weights[name])
                     elif name == "embed_tokens":
-                        vllm_model.model.embed_tokens.weight.data.copy_(original_weights[name])
+                        rollback_model.model.embed_tokens.weight.data.copy_(original_weights[name])
             warnings.warn(
                 f"WS3-006: modules_to_save sync failed mid-operation. "
                 f"Synced: {synced}, expected: {expected}. Error: {e}. "

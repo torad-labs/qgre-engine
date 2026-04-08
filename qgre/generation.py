@@ -483,7 +483,30 @@ class UnslothBackend:
             # Force disable thinking mode: append </think> if not already present
             # This ensures model generates direct answers, not <think> blocks
             if "</think>" not in text:
-                text = text.rstrip() + "<think>\n</think>\n\n"
+                template = "<think>\n</think>\n\n"
+                text_with_template = text.rstrip() + template
+                # Validate total length after template injection
+                template_tokens = self.tokenizer.encode(text_with_template, add_special_tokens=False)  # type: ignore[union-attr]
+                max_seq_length = self.max_prompt_length + self.generation_config.max_tokens
+                if len(template_tokens) > max_seq_length:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"Thinking template injection exceeds budget ({len(template_tokens)} > {max_seq_length}). "
+                        f"Truncating prompt to fit within budget.",
+                    )
+                    # Truncate original text to make room for template
+                    budget_for_text = max_seq_length - len(self.tokenizer.encode(template, add_special_tokens=False))  # type: ignore[union-attr]
+                    if budget_for_text > 0:
+                        truncated_tokens = self.tokenizer.encode(text, add_special_tokens=False)[:budget_for_text]  # type: ignore[union-attr]
+                        text = self.tokenizer.decode(truncated_tokens, skip_special_tokens=False)  # type: ignore[union-attr]
+                        text = text.rstrip() + template
+                    else:
+                        # Template itself exceeds budget - skip template
+                        logging.getLogger(__name__).warning(
+                            f"Thinking template itself exceeds budget. Skipping template injection.",
+                        )
+                else:
+                    text = text_with_template
 
             # Inject hints if available for this prompt (EGRS Phase 5)
             hints_used_dict: dict[str, bool] = {}

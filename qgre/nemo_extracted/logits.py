@@ -64,6 +64,8 @@ def selective_log_softmax(
         # logsumexp identity: log_softmax(x_i) = x_i - logsumexp(x)
         # Loop over batch to avoid materializing full [batch, seq, vocab]
         # LP-R3-01: Add bounds validation for fp32 path
+        original_logits_shape = logits.shape
+        original_index_shape = index.shape
         if logits.ndim > 3:
             logits = logits.reshape(-1, logits.shape[-2], logits.shape[-1])
         if index.ndim > 2:
@@ -76,7 +78,11 @@ def selective_log_softmax(
             )
         lse = torch.stack([torch.logsumexp(lg, dim=-1) for lg in logits])
         selected = torch.gather(logits, dim=-1, index=index.unsqueeze(-1)).squeeze(-1)
-        return (selected - lse).to(torch.float32)
+        result = (selected - lse).to(torch.float32)
+        # Reshape output back to original index shape if reshaped
+        if original_index_shape != index.shape:
+            result = result.reshape(original_index_shape)
+        return result
     # GEN-R1-5: bf16/fp16: convert to FP32 BEFORE log_softmax for stability
     # logsumexp in BF16 loses precision — compute log_softmax in FP32.
     # GB2-004: Use functional approach to preserve gradients (no in-place)

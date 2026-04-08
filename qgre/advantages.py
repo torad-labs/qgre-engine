@@ -1238,8 +1238,9 @@ class QGREStepAdvantageEstimator:
             # This prevents multiple repeat annotations from training correct token as wrong.
             # For tokens with positive first occurrence (correct), ensure token_advs >= -first_occurrence_advs.
             # For negative first occurrence (wrong), no cap needed (penalty can accumulate).
+            # Only apply cap for tokens that actually had valid token mappings (first_occurrence_advs > 0)
             token_advs = torch.where(
-                first_occurrence_signed != 0,
+                (first_occurrence_signed != 0) & (first_occurrence_advs > 0),
                 torch.maximum(token_advs, -first_occurrence_advs),
                 token_advs,
             )

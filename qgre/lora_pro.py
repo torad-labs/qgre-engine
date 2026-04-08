@@ -51,7 +51,7 @@ def solve_sylvester(
     """
     orig_dtype = A.dtype
     # Eigendecomposition requires float32 precision
-    if A.dtype == torch.bfloat16:
+    if A.dtype in (torch.bfloat16, torch.float16):
         A = A.to(torch.float32)
         B = B.to(torch.float32)
         C = C.to(torch.float32)

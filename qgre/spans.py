@@ -195,18 +195,28 @@ def scored_spans_to_token_masks(
         # The original answer is typically the correct one; repeats are noise
         # First span gets +1.0, later spans get REPETITION_MARKER penalty
         has_any_first_occurrence = False
+        any_quality_has_valid_tokens = False
         for char_start, char_end in spans:
             cs = max(0, min(char_start, max_char - 1))
             ce = max(0, min(char_end, max_char))
             span_has_mapped_char = False
             for c in range(cs, ce):
                 if char_to_token[c] != -1:
+                    any_quality_has_valid_tokens = True
                     if mask[char_to_token[c]] == 0.0:
                         has_any_first_occurrence = True
                         span_has_mapped_char = True
                         break
             if has_any_first_occurrence:
                 break
+        # If no chars in ANY span map to valid tokens, skip mask assignment with warning
+        if spans and not any_quality_has_valid_tokens:
+            warnings.warn(
+                f"Quality '{quality_name}': all character spans map to invalid tokens (char_to_token=-1). "
+                "Skipping mask assignment for this quality — no advantage signal will be applied.",
+                stacklevel=2,
+            )
+            continue
         for span_idx, (char_start, char_end) in enumerate(spans):
             # AE-R2-03: Skip span if completely outside bounds (don't relocate)
             if char_start >= max_char:
