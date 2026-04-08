@@ -206,6 +206,13 @@ def _coerce_single_type(value: Any, expected: type, path: str) -> Any:
         if expected == str:
             return str(value)
         if expected == bool:
+            # FIX #10: Special-case string "false"/"true" before bool() conversion
+            if isinstance(value, str):
+                lower_val = value.lower()
+                if lower_val in ("false", "0", "no"):
+                    return False
+                if lower_val in ("true", "1", "yes"):
+                    return True
             return bool(value)
         if expected == list:
             return list(value)

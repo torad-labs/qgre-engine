@@ -667,8 +667,8 @@ class UnslothBackend:
                     f"Accepting first {len(sample_lps)} logprobs (stop token or early truncation).",
                     stacklevel=2,
                 )
-                # Pad with None to maintain length consistency
-                sample_lps.extend([None] * (len(completion_ids) - len(sample_lps)))  # type: ignore[arg-type]
+                # FIX #1: Filter None values before padding - don't extend with None
+                # Trainer expects list[float], not list[float | None]
                 all_logprobs.append(sample_lps)
             elif len(sample_lps) > len(completion_ids):
                 # More logprobs than tokens — error condition

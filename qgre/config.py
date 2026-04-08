@@ -110,6 +110,18 @@ class DataConfig:
                     f"DP3-009: initial_tiers {self.initial_tiers} contains tiers not in tier_order {self.tier_order}. "
                     f"Invalid tiers: {initial_set - tier_order_set}",
                 )
+        # FIX #4: tier_advance_threshold bounds
+        if not (0 <= self.tier_advance_threshold <= 1):
+            raise ValueError(
+                f"DataConfig: tier_advance_threshold ({self.tier_advance_threshold}) not in [0, 1]. "
+                "Must be a normalized mastery threshold.",
+            )
+        # FIX #8: tier_advance_quality_phase >= 1
+        if self.tier_advance_quality_phase < 1:
+            raise ValueError(
+                f"DataConfig: tier_advance_quality_phase ({self.tier_advance_quality_phase}) < 1. "
+                "Quality phase must be at least 1.",
+            )
 
     system_prompt_column: str | None = (
         None  # e.g. "system_prompt" — separate system message in chat template
@@ -139,6 +151,26 @@ class GenerationConfig:
     lora_dropout_rate: float = 0.0  # 0.0 = disabled, 0.15 = recommended
     lora_dropout_anneal_steps: int = 500  # Linear anneal to 0 over this many steps
 
+    def __post_init__(self):
+        """Validate GenerationConfig after initialization."""
+        # FIX #7: top_p/min_p bounds
+        if not (0 <= self.top_p <= 1):
+            raise ValueError(
+                f"GenerationConfig: top_p ({self.top_p}) not in [0, 1]. "
+                "Must be a probability.",
+            )
+        if not (0 <= self.min_p <= 1):
+            raise ValueError(
+                f"GenerationConfig: min_p ({self.min_p}) not in [0, 1]. "
+                "Must be a probability.",
+            )
+        # FIX #14: lora_dropout_rate bounds
+        if not (0 <= self.lora_dropout_rate <= 1):
+            raise ValueError(
+                f"GenerationConfig: lora_dropout_rate ({self.lora_dropout_rate}) not in [0, 1]. "
+                "Must be a dropout probability.",
+            )
+
 
 @dataclass
 class SPOConfig:
@@ -163,6 +195,21 @@ class SPOConfig:
     # Per-quality baseline staleness: decay toward prior when quality hasn't been seen in N steps
     staleness_window: int = 50  # Steps before baseline starts decaying toward prior
     baseline_prior: float = 0.5  # Prior value for unseen/stale qualities (middle of [0,1])
+
+    def __post_init__(self):
+        """Validate SPOConfig after initialization."""
+        # FIX #2: min_lr > max_lr validation
+        if self.min_lr > self.max_lr:
+            raise ValueError(
+                f"SPOConfig: min_lr ({self.min_lr}) > max_lr ({self.max_lr}). "
+                "Adaptive LR range is invalid.",
+            )
+        # FIX #5: aspiration_target bounds
+        if not (0 <= self.aspiration_target <= 1):
+            raise ValueError(
+                f"SPOConfig: aspiration_target ({self.aspiration_target}) not in [0, 1]. "
+                "Target must be a normalized value.",
+            )
 
 
 @dataclass
@@ -213,6 +260,21 @@ class SkillConfig:
     # learnability = p(1-p) where p = mastery_score. At p=0.5: 0.25 (max), p=0.9: 0.09 (ready)
     learnability_threshold: float = 0.10  # Advance when p(1-p) < this (p > 0.89 or p < 0.11)
 
+    def __post_init__(self):
+        """Validate SkillConfig after initialization."""
+        # FIX #6: learnability_threshold mathematical bounds
+        if not (0 < self.learnability_threshold <= 0.25):
+            raise ValueError(
+                f"SkillConfig: learnability_threshold ({self.learnability_threshold}) not in (0, 0.25]. "
+                "p(1-p) has max value 0.25 at p=0.5, making higher thresholds impossible.",
+            )
+        # FIX #12: review_probability bounds
+        if not (0 <= self.review_probability <= 1):
+            raise ValueError(
+                f"SkillConfig: review_probability ({self.review_probability}) not in [0, 1]. "
+                "Must be a probability.",
+            )
+
 
 _VALID_POST_MASTERY_BEHAVIORS = {"review_only", "pause", "continue_all"}
 
@@ -238,6 +300,15 @@ class VPRMConfig:
     polyak_tau: float = 0.01  # Polyak averaging rate for target network
     use_target_network: bool = True  # Stable baselines via slow-moving target
     target_warmup_steps: int = 500  # Hard-sync target every 100 steps during warmup
+
+    def __post_init__(self):
+        """Validate VPRMConfig after initialization."""
+        # FIX #9: polyak_tau bounds
+        if not (0 < self.polyak_tau <= 1):
+            raise ValueError(
+                f"VPRMConfig: polyak_tau ({self.polyak_tau}) not in (0, 1]. "
+                "Must be a positive update rate.",
+            )
 
 
 @dataclass
@@ -406,6 +477,24 @@ class AlgorithmConfig:
                         f"R3-CSM-008: step_qualities step {step} has empty quality list. "
                         f"Empty quality list produces zero gradient. Remove the step or add qualities.",
                     )
+        # FIX #3: clip_ratio_low <= clip_ratio_high
+        if self.clip_ratio_low > self.clip_ratio_high:
+            raise ValueError(
+                f"AlgorithmConfig: clip_ratio_low ({self.clip_ratio_low}) > clip_ratio_high ({self.clip_ratio_high}). "
+                "Clipping range is invalid.",
+            )
+        # FIX #11: kl_cov_ratio bounds
+        if not (0 <= self.kl_cov_ratio <= 1):
+            raise ValueError(
+                f"AlgorithmConfig: kl_cov_ratio ({self.kl_cov_ratio}) not in [0, 1]. "
+                "Must be a mixing ratio.",
+            )
+        # FIX #11: lambda_return bounds
+        if not (0 <= self.lambda_return <= 1):
+            raise ValueError(
+                f"AlgorithmConfig: lambda_return ({self.lambda_return}) not in [0, 1]. "
+                "Must be a discount factor.",
+            )
 
 
 @dataclass
@@ -437,6 +526,15 @@ class TrainingConfig:
     attention_log_freq: int = (
         10  # Log attention stats every N steps (if log_attention_patterns enabled)
     )
+
+    def __post_init__(self):
+        """Validate TrainingConfig after initialization."""
+        # FIX #13: embedding_lr_ratio bounds
+        if not (0 < self.embedding_lr_ratio <= 1):
+            raise ValueError(
+                f"TrainingConfig: embedding_lr_ratio ({self.embedding_lr_ratio}) not in (0, 1]. "
+                "Must be a positive scaling factor <= 1.",
+            )
 
 
 @dataclass
