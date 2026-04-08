@@ -367,13 +367,20 @@ class WeightLoader:
                     synced.append(name)
         except Exception as e:
             # WS3-006: Rollback on failure (log error, don't crash)
-            rollback_model = self.get_vllm_model()
-            for name in synced:
-                if name in original_weights:
-                    if name == "lm_head":
-                        rollback_model.lm_head.weight.data.copy_(original_weights[name])
-                    elif name == "embed_tokens":
-                        rollback_model.model.embed_tokens.weight.data.copy_(original_weights[name])
+            try:
+                rollback_model = self.get_vllm_model()
+                if rollback_model is not None:
+                    for name in synced:
+                        if name in original_weights:
+                            if name == "lm_head":
+                                rollback_model.lm_head.weight.data.copy_(original_weights[name])
+                            elif name == "embed_tokens":
+                                rollback_model.model.embed_tokens.weight.data.copy_(original_weights[name])
+            except Exception as rollback_err:
+                warnings.warn(
+                    f"WS3-006: Rollback also failed: {rollback_err}. Original error: {e}",
+                    stacklevel=2,
+                )
             warnings.warn(
                 f"WS3-006: modules_to_save sync failed mid-operation. "
                 f"Synced: {synced}, expected: {expected}. Error: {e}. "

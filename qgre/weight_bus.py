@@ -79,8 +79,10 @@ class WeightBus:
         # WS-R3-04: Track if sync actually ran (not skipped by dropout)
         sync_executed = False
         with self._sync_lock:
-            engine_id = id(loader.engine)
-            if self._engine_id is not None and self._engine_id != engine_id:
+            # R10: Handle None engine (lazy init) - skip engine_id tracking until engine exists
+            engine = loader.engine
+            engine_id = id(engine) if engine is not None else None
+            if engine_id is not None and self._engine_id is not None and self._engine_id != engine_id:
                 self._initialized = False
                 self._engine_id = None
             first_call = not self._initialized
