@@ -64,6 +64,21 @@ class WeightLoader:
         """Current lifecycle state."""
         return self._lifecycle
 
+    @property
+    def engine(self):
+        """Get vLLM engine for engine_id tracking in WeightBus.
+
+        Returns the vllm_engine object (or None if not available).
+        Used by WeightBus to detect engine recreation via id() comparison.
+        """
+        for obj in [self._model, getattr(self._model, "model", None)]:
+            if obj is None:
+                continue
+            engine = getattr(obj, "vllm_engine", None)
+            if engine is not None:
+                return engine
+        return None
+
     def _transition_to(
         self, target: WeightLoaderLifecycle, valid_from: tuple[WeightLoaderLifecycle, ...]
     ) -> None:
