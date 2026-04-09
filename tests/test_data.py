@@ -260,3 +260,155 @@ def test_set_priorities_none_falls_back_to_uniform(sample_prompts, tokenizer):
     # No priorities set — should behave like uniform shuffle
     batches = list(loader)
     assert len(batches[0].prompt_ids) == 5
+
+
+# ---------------------------------------------------------------------------
+# load_state_dict() — the checkpoint resume path.
+#
+# Regression coverage for the dict/tuple format mismatch that blocked resume
+# for weeks: trainer.resume() hands a dict produced by asdict(DataLoaderState)
+# where difficulty_gate is already a tuple[set, str] (post-convert_difficulty_gate),
+# but load_state_dict used to validate with a schema that only accepted dict,
+# raising TypeError at the first resume attempt.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def prompts_with_difficulty():
+    return [
+        {"prompt": "2+2?", "ground_truth": "4", "difficulty": "easy"},
+        {"prompt": "3+3?", "ground_truth": "6", "difficulty": "easy"},
+        {"prompt": "4*7?", "ground_truth": "28", "difficulty": "medium"},
+        {"prompt": "sqrt(144)?", "ground_truth": "12", "difficulty": "medium"},
+        {"prompt": "d/dx x^3?", "ground_truth": "3x^2", "difficulty": "hard"},
+    ]
+
+
+@pytest.fixture
+def gated_loader(prompts_with_difficulty, tokenizer):
+    loader = QGREDataLoader(
+        prompts=prompts_with_difficulty,
+        tokenizer=tokenizer,
+        max_prompt_length=512,
+        train_batch_size=4,
+        metadata_columns=["ground_truth", "difficulty"],
+    )
+    loader.set_difficulty_gate({"easy", "medium"}, difficulty_column="difficulty")
+    return loader
+
+
+def test_state_dict_roundtrip_preserves_difficulty_gate(
+    gated_loader, prompts_with_difficulty, tokenizer
+):
+    """state_dict() → load_state_dict() preserves the difficulty gate (dict format)."""
+    state = gated_loader.state_dict()
+    # state_dict stores difficulty_gate as a nested dict (portable format)
+    assert isinstance(state["difficulty_gate"], dict)
+    assert set(state["difficulty_gate"]["allowed_difficulties"]) == {"easy", "medium"}
+
+    fresh = QGREDataLoader(
+        prompts=prompts_with_difficulty,
+        tokenizer=tokenizer,
+        max_prompt_length=512,
+        train_batch_size=4,
+        metadata_columns=["ground_truth", "difficulty"],
+    )
+    fresh.load_state_dict(state)
+    assert fresh._difficulty_gate == ({"easy", "medium"}, "difficulty")
+
+
+def test_load_state_dict_accepts_tuple_format_from_asdict(prompts_with_difficulty, tokenizer):
+    """trainer.resume() hands asdict(DataLoaderState) where difficulty_gate is a tuple.
+
+    This is the exact format that triggered the 'Cannot coerce tuple to any of
+    dict | NoneType' error before the fix. load_state_dict must accept it.
+    """
+    from dataclasses import asdict
+
+    from qgre.types import DataLoaderState
+
+    # Build the state the way trainer.resume() does: DataLoaderState dataclass
+    # (via from_dict, which runs convert_difficulty_gate), then asdict().
+    dataloader_state = DataLoaderState.from_dict(
+        {
+            "epoch": 2,
+            "step_in_epoch": 17,
+            "total_steps": 100,
+            "priority_weights": None,
+            "difficulty_gate": {
+                "allowed_difficulties": ["easy", "medium"],
+                "difficulty_column": "difficulty",
+            },
+        }
+    )
+    # At this point difficulty_gate is a tuple (set, str) — convert_difficulty_gate ran.
+    assert isinstance(dataloader_state.difficulty_gate, tuple)
+    assert dataloader_state.difficulty_gate[0] == {"easy", "medium"}
+
+    # asdict preserves the tuple structure in the emitted dict.
+    post_asdict = asdict(dataloader_state)
+    assert isinstance(post_asdict["difficulty_gate"], tuple)
+
+    # load_state_dict must accept the tuple format without raising.
+    fresh = QGREDataLoader(
+        prompts=prompts_with_difficulty,
+        tokenizer=tokenizer,
+        max_prompt_length=512,
+        train_batch_size=4,
+        metadata_columns=["ground_truth", "difficulty"],
+    )
+    fresh.load_state_dict(post_asdict)
+
+    # And the gate is restored identically.
+    assert fresh._difficulty_gate == ({"easy", "medium"}, "difficulty")
+    assert fresh.epoch == 2
+    assert fresh.step_in_epoch == 17
+    assert fresh.total_steps == 100
+
+
+def test_load_state_dict_none_difficulty_gate_is_noop(prompts_with_difficulty, tokenizer):
+    """difficulty_gate=None should leave the runtime field untouched."""
+    fresh = QGREDataLoader(
+        prompts=prompts_with_difficulty,
+        tokenizer=tokenizer,
+        max_prompt_length=512,
+        train_batch_size=4,
+        metadata_columns=["ground_truth", "difficulty"],
+    )
+    fresh.load_state_dict(
+        {
+            "epoch": 0,
+            "step_in_epoch": 0,
+            "total_steps": 0,
+            "priority_weights": None,
+            "difficulty_gate": None,
+        }
+    )
+    assert fresh._difficulty_gate is None
+
+
+def test_load_state_dict_malformed_tuple_warns_and_skips(prompts_with_difficulty, tokenizer):
+    """A tuple with the wrong shape should warn and leave the gate unset."""
+    import warnings
+
+    fresh = QGREDataLoader(
+        prompts=prompts_with_difficulty,
+        tokenizer=tokenizer,
+        max_prompt_length=512,
+        train_batch_size=4,
+        metadata_columns=["ground_truth", "difficulty"],
+    )
+    # A tuple whose second element is not a string — convert_difficulty_gate
+    # returns it as-is, post-conversion sanity checks catch it.
+    malformed = {
+        "epoch": 0,
+        "step_in_epoch": 0,
+        "total_steps": 0,
+        "priority_weights": None,
+        "difficulty_gate": ({"easy"}, 42),
+    }
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fresh.load_state_dict(malformed)
+    assert any("difficulty_column" in str(w.message) for w in caught)
+    assert fresh._difficulty_gate is None

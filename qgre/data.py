@@ -462,29 +462,35 @@ class QGREDataLoader:
         return state
 
     def load_state_dict(self, state: dict):
-        """Resume from checkpoint."""
+        """Resume from checkpoint.
+
+        Accepts either:
+        - A raw dict produced by self.state_dict() (difficulty_gate as nested dict)
+        - A dict produced by asdict(DataLoaderState) (difficulty_gate as tuple[set, str])
+
+        Both formats are normalized via convert_difficulty_gate, so resume works
+        whether the caller passes the raw state_dict format or the dataclass-derived
+        format that trainer.resume() produces from CheckpointState.dataloader.
+        """
         import math
 
-        from qgre.schema import FieldSpec, Required, validate_schema
-
-        # Validate state dict structure
-        validated = validate_schema(
-            state,
-            {
-                "epoch": FieldSpec(int, Required.NO, default=0),
-                "step_in_epoch": FieldSpec(int, Required.NO, default=0),
-                "total_steps": FieldSpec(int, Required.NO, default=0),
-                "priority_weights": FieldSpec((dict, type(None)), Required.NO, default=None),
-                "difficulty_gate": FieldSpec((dict, type(None)), Required.NO, default=None),
-            },
-            "dataloader_state",
+        from qgre.schema import (
+            DATALOADER_STATE_SCHEMA,
+            convert_difficulty_gate,
+            validate_schema,
         )
+
+        # Validate against the canonical schema — accepts tuple|dict|None for
+        # difficulty_gate and list|dict|None for priority_weights. Same schema
+        # DataLoaderState.from_dict uses, so there's one source of truth.
+        validated = validate_schema(state, DATALOADER_STATE_SCHEMA, "dataloader_state")
 
         self.epoch = validated["epoch"]
         self.step_in_epoch = validated["step_in_epoch"]
         self.total_steps = validated["total_steps"]
 
-        # Validate priority_weights if present
+        # Validate priority_weights if present. Canonical schema permits list|dict|None,
+        # but runtime code only handles dict — if we ever get a list here we warn and skip.
         if validated.get("priority_weights"):
             weights = validated["priority_weights"]
             if not isinstance(weights, dict):
@@ -525,47 +531,45 @@ class QGREDataLoader:
                 else:
                     self._priorities = weights
 
-        # Restore difficulty_gate if present
-        # SFH-001: Add explicit warnings for each validation failure branch
-        if validated.get("difficulty_gate"):
-            gate = validated["difficulty_gate"]
-            if not isinstance(gate, dict):
+        # Restore difficulty_gate if present. convert_difficulty_gate accepts:
+        #   - dict {"allowed_difficulties": [...], "difficulty_column": "..."}
+        #   - tuple (set[str], str)  [post-asdict format from CheckpointState.dataloader]
+        #   - None
+        # and always returns tuple[set[str], str] | None. This is the SAME converter
+        # used by DataLoaderState.from_dict so both call sites stay in lockstep.
+        raw_gate = validated.get("difficulty_gate")
+        if raw_gate is not None:
+            converted = convert_difficulty_gate(raw_gate)
+            if converted is None:
                 import warnings
 
                 warnings.warn(
-                    f"SFH-001: difficulty_gate expected dict, got {type(gate).__name__}. "
-                    "Difficulty gate will not be restored — curriculum learning disabled.",
-                    stacklevel=2,
-                )
-            elif "allowed_difficulties" not in gate or "difficulty_column" not in gate:
-                import warnings
-
-                warnings.warn(
-                    f"SFH-001: difficulty_gate missing required keys. Got keys: {list(gate.keys())}. "
+                    f"SFH-001: difficulty_gate in unrecognized format ({type(raw_gate).__name__}). "
                     "Difficulty gate will not be restored — curriculum learning disabled.",
                     stacklevel=2,
                 )
             else:
-                allowed = gate["allowed_difficulties"]
-                col = gate["difficulty_column"]
-                if not isinstance(allowed, list):
+                allowed, col = converted
+                # Post-conversion sanity checks: both components must be non-empty
+                # and the right types, otherwise the runtime code will misbehave.
+                if not isinstance(allowed, set):
                     import warnings
 
                     warnings.warn(
-                        f"SFH-001: allowed_difficulties expected list, got {type(allowed).__name__}. "
-                        "Difficulty gate will not be restored — curriculum learning disabled.",
+                        f"SFH-001: allowed_difficulties expected set after conversion, "
+                        f"got {type(allowed).__name__}. Difficulty gate will not be restored.",
                         stacklevel=2,
                     )
-                elif not isinstance(col, str):
+                elif not isinstance(col, str) or not col:
                     import warnings
 
                     warnings.warn(
-                        f"SFH-001: difficulty_column expected str, got {type(col).__name__}. "
-                        "Difficulty gate will not be restored — curriculum learning disabled.",
+                        f"SFH-001: difficulty_column expected non-empty str, got "
+                        f"{type(col).__name__}={col!r}. Difficulty gate will not be restored.",
                         stacklevel=2,
                     )
                 else:
-                    self._difficulty_gate = (set(allowed), col)
+                    self._difficulty_gate = (allowed, col)
 
 
 def load_prompts_from_parquet(path: str | Path) -> list[dict[str, Any]]:
