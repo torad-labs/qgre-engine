@@ -59,6 +59,14 @@ class CompletionLogger:
         self._file = None
         self._step = 0
 
+    @staticmethod
+    def _tail_collapse_ratio(text: str, tail_chars: int = 200) -> float:
+        """Measure repetition in the last N characters. 0 = all unique, ~1 = total collapse."""
+        if len(text) < 20:
+            return 0.0
+        tail = text[-tail_chars:] if len(text) >= tail_chars else text
+        return 1.0 - len(set(tail)) / max(len(tail), 1)
+
     def log_completion(
         self,
         step: int,
@@ -98,6 +106,9 @@ class CompletionLogger:
             "score": reward,
             "reward_components": reward_components or {},
             "phase": phase,
+            "completion_words": len(completion.split()),
+            "completion_chars": len(completion),
+            "tail_collapse": self._tail_collapse_ratio(completion),
         }
         self._file.write(json.dumps(record) + "\n")
         self._file.flush()

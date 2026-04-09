@@ -77,8 +77,12 @@ class WeightExporter:
     def merge_lora(self, model: nn.Module) -> None:
         """Merge LoRA A/B into base weights in-place.
 
-        WARNING: On 4-bit quantized models, merge creates NEW tensors (dequant→add→requant).
-        This breaks shared memory with vLLM. Only use for full-precision models or deployment.
+        On 4-bit quantized models, PEFT's merge_adapter dequantizes, adds LoRA deltas,
+        and requantizes. The Params4bit monkey-patch (applied at import time by this
+        module) ensures the requantization succeeds on current bitsandbytes versions.
+        Under Unsloth's fast_inference colocation, the requantized weights remain
+        accessible to vLLM via shared memory. Tested working at 9.8 GB VRAM on
+        RTX 5080 with Qwen3-1.7B 4-bit + MERGE strategy (April 2026).
         """
         model.merge_adapter()  # type: ignore[attr-defined]
 

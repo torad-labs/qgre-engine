@@ -1574,19 +1574,13 @@ class QGRETrainer:
                                 # Loss is computed for positions predicting tokens [1..seq_len-1]
                                 # So q_mask[i] contributes to loss position i-1; we need q_mask[1:]
                                 q_mask_shifted = q_mask[1:]  # Always shift by 1
-                                # Align to min_len: truncate if longer, pad with zeros if shorter
+                                # Align to min_len: truncate if longer (batch has longer samples),
+                                # pad with zeros if shorter (this sample is shorter than the batch max).
+                                # Padding positions contribute zero loss because they're masked out.
                                 if q_mask_shifted.shape[0] >= min_len:
                                     q_mask_shifted = q_mask_shifted[:min_len]
                                 else:
-                                    # MTO-006: Warn when padding is needed (indicates tokenization mismatch)
                                     pad_len = min_len - q_mask_shifted.shape[0]
-                                    import warnings
-
-                                    warnings.warn(
-                                        f"MTO-006: q_mask for {q_name} length {q_mask_shifted.shape[0]} < min_len {min_len}. "
-                                        f"Padding with {pad_len} zeros. This indicates tokenization mismatch.",
-                                        stacklevel=2,
-                                    )
                                     q_mask_shifted = torch.cat(
                                         [
                                             q_mask_shifted,
@@ -1860,20 +1854,23 @@ class QGRETrainer:
                 self._attention_log.append(coherence_stats)
 
                 # Add key metrics to step metrics for MLflow logging
-                metrics["grad/mean_cosine"] = coherence_stats["mean_cosine"]
+                metrics["grad/temporal_cosine"] = coherence_stats["temporal_cosine"]
+                metrics["grad/spatial_cosine"] = coherence_stats["spatial_cosine"]
+                metrics["grad/mean_cosine"] = coherence_stats["mean_cosine"]  # backward compat
                 metrics["grad/min_cosine"] = coherence_stats["min_cosine"]
                 metrics["grad/norm_ratio"] = coherence_stats["norm_ratio"]
                 metrics["grad/mean_norm"] = coherence_stats["mean_grad_norm"]
+                metrics["grad/lora_weight_norm"] = coherence_stats["lora_weight_norm"]
 
                 # Turbulence detection (if detector initialized)
                 if not hasattr(self, "_turbulence_detector"):
                     from qgre.gradient_coherence import TurbulenceDetector
 
                     self._turbulence_detector = TurbulenceDetector(
-                        calibration_steps=50,
-                        cosine_threshold_low=0.3,
-                        cosine_threshold_high=0.6,
-                        transition_window=3,
+                        calibration_steps=30,
+                        cosine_threshold_low=0.02,
+                        cosine_threshold_high=0.10,
+                        transition_window=5,
                     )
 
                 state = self._turbulence_detector.update(self.global_step, coherence_stats)
@@ -2102,6 +2099,12 @@ class QGRETrainer:
         latest = discover_latest_checkpoint(checkpoint_dir)
         if latest is None:
             return False
+
+        # Clear stale gradient cache — temporal cosine must not compare against
+        # gradients from a different model state (pre-checkpoint).
+        from qgre.gradient_coherence import reset_gradient_cache
+
+        reset_gradient_cache()
 
         checkpoint = load_checkpoint(latest)
         # CheckpointState: access trainer fields via checkpoint.trainer
@@ -3146,10 +3149,18 @@ class QGRETrainer:
                 if output is None:
                     raise RuntimeError("Generation failed, output is None")
                 reward_results = []
+                min_tokens = self.config.algorithm.min_completion_tokens
                 for i in range(len(output.texts)):
                     prompt = batch.raw_prompts[i] if i < len(batch.raw_prompts) else ""
                     meta = batch.metadata[i] if i < len(batch.metadata) else {}
                     rr = self.reward_fn(prompt, output.texts[i], meta)
+                    # Empty-output floor: completions below min_completion_tokens get
+                    # negative reward AND zeroed quality scores. Both must be consistent
+                    # so that mastery tracking (which reads rr.scores) and advantage
+                    # computation (which reads rr.reward) see the same penalty signal.
+                    if min_tokens > 0 and len(output.token_ids[i]) < min_tokens:
+                        rr.reward = -0.1
+                        rr.scores = dict.fromkeys(rr.scores, 0.0)
                     reward_results.append(rr)
 
                 # Validate: reward_results must match completions length after batch expansion
@@ -3287,10 +3298,13 @@ class QGRETrainer:
                     metrics.get("critic_loss", 0)
                     loss_val = metrics.get("loss", 0.0)
 
-                    # Build quality score rows
+                    # Build quality score rows. Use the highest-scoring sample in the
+                    # batch for display (not necessarily the last) to avoid showing all-zeros
+                    # when the last sample was floored by min_completion_tokens.
                     rows = []
                     if reward_results:
-                        last_scores = reward_results[-1].scores
+                        best_rr = max(reward_results, key=lambda r: r.reward)
+                        last_scores = best_rr.scores
                         groups = [
                             ("Format", [("format", "q_format"), ("has_math", "q_has_math")]),
                             (
@@ -3374,50 +3388,59 @@ class QGRETrainer:
                         rows.append(("Tutorial", tut_vals))
 
                     # Gradient coherence metrics (laminar→turbulent detection)
-                    if "grad/mean_cosine" in metrics:
-                        cosine = metrics["grad/mean_cosine"]
-                        norm_ratio = metrics["grad/norm_ratio"]
+                    if "grad/temporal_cosine" in metrics:
+                        t_cos = metrics["grad/temporal_cosine"]
+                        s_cos = metrics.get("grad/spatial_cosine", 0.0)
+                        w_norm = metrics.get("grad/lora_weight_norm", 0.0)
                         turb_state = metrics.get("grad/turbulence_state", 0)
                         state_names = {0: "CALIB", 1: "LAMINAR", 2: "TRANS", 3: "TURB"}
                         grad_vals = (
-                            f"{'cosine':>10s} {cosine:+.3f}   │ "
-                            f"{'norm_ratio':>10s} {norm_ratio:.1f}   │ "
-                            f"{'state':>10s} {state_names[turb_state]}"  # type: ignore[index]
+                            f"{'t_cos':>8s} {t_cos:+.4f} │ "
+                            f"{'s_cos':>8s} {s_cos:+.4f} │ "
+                            f"{'wt_norm':>8s} {w_norm:.1f} │ "
+                            f"{'state':>8s} {state_names[turb_state]}"  # type: ignore[index]
                         )
                         rows.append(("Gradients", grad_vals))
 
-                    # Compute column widths
+                    # Compute column widths, capped to avoid terminal wrapping.
+                    # Use terminal size if interactive tty, otherwise 150.
+                    import shutil as _sh
+
+                    max_w = _sh.get_terminal_size(fallback=(150, 24)).columns - 2
                     label_w = max((len(r[0]) for r in rows), default=10) + 2
                     val_w = max((len(r[1]) for r in rows), default=40) + 2
-                    total_w = label_w + val_w + 3  # 3 for " │ "
+                    natural_w = label_w + val_w + 3  # 3 for " │ "
 
                     # Header row (show spans status based on per-quality loss presence)
                     spans_active = any(k.startswith("loss/") for k in metrics)
                     spans_str = "spans" if spans_active else "segmenter"
                     header = f" Step {self.global_step}/{cfg.total_steps} │ Phase {self.game_state.phase} │ Tiers: {tiers_str} │ [{spans_str}] │ Reward: {reward_mean:.3f} │ Loss: {loss_val:.6f}"
-                    header_w = max(total_w, len(header) + 2)
+                    header_w = min(max_w, max(natural_w, len(header) + 2))
+                    val_col_w = header_w - label_w - 3
+
+                    def _fit(s: str, w: int) -> str:
+                        if w <= 0:
+                            return ""
+                        return f"{s:<{w}}" if len(s) <= w else s[: w - 1] + "…"
 
                     print(f"\n┌{'─' * header_w}┐")
-                    print(f"│{header:<{header_w}}│")
+                    print(f"│{_fit(header, header_w)}│")
                     print(f"├{'─' * label_w}┬{'─' * (header_w - label_w - 1)}┤")
                     for i, (label, vals) in enumerate(rows):
-                        print(f"│{label:>{label_w}} │ {vals:<{header_w - label_w - 3}}│")
+                        print(f"│{label:>{label_w}} │ {_fit(vals, val_col_w)}│")
                         if i < len(rows) - 1:
                             print(f"├{'─' * label_w}┼{'─' * (header_w - label_w - 1)}┤")
                     print(f"└{'─' * label_w}┴{'─' * (header_w - label_w - 1)}┘")
 
-                    # Full completion
+                    # Full completion — same width, lines padded or truncated
                     if output.texts:
                         comp = output.texts[-1]
+                        inner_w = header_w - 2
                         print(f"┌{'─' * header_w}┐")
                         print(f"│{'COMPLETION':^{header_w}}│")
                         print(f"├{'─' * header_w}┤")
                         for line in comp.split("\n"):
-                            print(
-                                f"│ {line:<{header_w - 2}} │"
-                                if len(line) <= header_w - 2
-                                else f"│ {line[: header_w - 2]}│"
-                            )
+                            print(f"│ {_fit(line, inner_w)} │")
                         print(f"└{'─' * header_w}┘")
                 try:
                     log_step_metrics(

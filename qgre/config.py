@@ -446,6 +446,11 @@ class AlgorithmConfig:
     # Mastered steps get weight 1.0, frontier steps get (1 + frontier_amplification).
     # 0=off, 2.0=triple gradient on bottleneck steps (recommended for multi-step curriculum).
     frontier_amplification: float = 2.0
+    # Minimum completion token count. Completions shorter than this get their reward
+    # replaced with a negative floor (-0.1) to prevent the empty-output attractor where
+    # the model discovers that outputting nothing scores ~0 and commits to it.
+    # 0=disabled. 50=recommended for structured output domains.
+    min_completion_tokens: int = 0
     # Scale factor for final token advantages before loss computation.
     # Compresses advantage signal to fit small model logit resolution.
     # 1.0 = no scaling, 0.1 = 10x compression (recommended for 1-3B models).
