@@ -477,13 +477,19 @@ class VPRMCritic(nn.Module):
                 reward_target = torch.tensor(actual, device=ctx.device, dtype=online_pred.dtype)
                 critic_losses[q_name] = (online_pred - reward_target) ** 2
 
-        # Raise when all qualities return None (prevents silent zero-advantage bugs)
+        # Warn when all qualities return None — the reward function produced no
+        # scored tokens for any quality. This can happen legitimately when the A4
+        # heterogeneous-batch guard clears all masks because one sample in the batch
+        # had no spans. Return empty advantages (zero signal) instead of crashing.
         if all(v is None for v in advantages.values()):
-            raise RuntimeError(
-                "Critic compute_advantages_from_spans called with all-empty masks — "
+            import warnings
+
+            warnings.warn(
+                "Critic compute_advantages_from_spans: all-empty masks — "
                 "reward function returned no scored tokens for any quality in this batch. "
                 f"Quality names: {self.quality_names}, masks: {list(token_masks.keys())}. "
-                "Check reward_fn output."
+                "This step will have zero advantage signal.",
+                stacklevel=2,
             )
 
         return advantages, critic_losses

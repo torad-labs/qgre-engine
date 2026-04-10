@@ -76,11 +76,19 @@ algorithm:
   # Correctness-only qualities — no format scoring. RL teaches WHAT (math),
   # SFT teaches HOW (formatting). Format scoring is the #1 reward hacking
   # vector (gradient regularization paper arxiv:2602.18037).
+  #
+  # Steps 1-4 are the curriculum phases. Steps 5-6 map to the Hamiltonian
+  # segmenter's STEP_5/STEP_6 regions (used as fallback when scored_spans
+  # are unavailable for some samples in a batch). Without these, the A4
+  # heterogeneous-batch guard forces segmenter mode and the unmatched
+  # regions get zero advantage, causing all-empty-masks crash in the critic.
   step_qualities:
     1: [q_kinetic, q_potential]       # Can the model get T and V right?
     2: [q_hamiltonian]                # Can it compose H = T + V correctly?
     3: [q_dqdt, q_dpdt]              # Can it derive Hamilton's equations?
     4: [q_consistency]                # Are the equations consistent with H?
+    5: [q_dqdt, q_dpdt]              # Segmenter fallback: EQUATIONS region
+    6: [q_consistency]                # Segmenter fallback: final section
 
 training:
   total_steps: 7000
@@ -129,7 +137,7 @@ tutorial:
       regression_threshold: 0.65
       mastery_window: 20
       review_probability: 0.30
-      score_key: q_V_correct
+      score_key: q_potential
       learnability_threshold: 0.17  # Advance when p >= 0.80
 
     spring_only:
@@ -139,7 +147,7 @@ tutorial:
       regression_threshold: 0.65
       mastery_window: 20
       review_probability: 0.30
-      score_key: q_V_correct
+      score_key: q_potential
       learnability_threshold: 0.17
 
     # Compound skills — prerequisites required, lower threshold
@@ -151,7 +159,7 @@ tutorial:
       regression_threshold: 0.55
       mastery_window: 20
       review_probability: 0.30
-      score_key: q_correct_H
+      score_key: q_hamiltonian
       learnability_threshold: 0.20  # More lenient for compound skills
 
     damped_spring:
@@ -161,7 +169,7 @@ tutorial:
       regression_threshold: 0.55
       mastery_window: 20
       review_probability: 0.30
-      score_key: q_correct_H
+      score_key: q_hamiltonian
       learnability_threshold: 0.20
 
     # Boss level — multiple interacting components
@@ -172,7 +180,7 @@ tutorial:
       regression_threshold: 0.50
       mastery_window: 20
       review_probability: 0.30
-      score_key: q_correct_H
+      score_key: q_hamiltonian
       learnability_threshold: 0.22  # Most lenient — boss is harder
 
 logging:
