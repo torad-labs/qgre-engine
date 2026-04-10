@@ -100,69 +100,48 @@ def _gold_parse(sympy_str: str) -> list | None:
 # ─── Expression extraction ─────────────────────────────────────────────────────
 
 
-def _find_math_regions(text: str) -> list[tuple[str, int, int]]:
-    """Find all math-containing regions by scanning for delimiters + bare equations.
-
-    Returns (content, char_start, char_end) for each region.
-    No regex for finding regions — character scanning only.
-    """
-    regions: list[tuple[str, int, int]] = []
-    i = 0
-    n = len(text)
-
-    while i < n:
-        # $$ ... $$ (display math)
-        if i < n - 1 and text[i] == "$" and text[i + 1] == "$":
-            end = text.find("$$", i + 2)
-            if end == -1:
-                break
-            content = text[i + 2 : end].strip()
-            if content:
-                regions.append((content, i, end + 2))
-            i = end + 2
-            continue
-
-        # $ ... $ (inline math)
-        if text[i] == "$":
-            end = text.find("$", i + 1)
-            if end == -1:
-                break
-            content = text[i + 1 : end].strip()
-            if content:
-                regions.append((content, i, end + 1))
-            i = end + 1
-            continue
-
-        # Bare lines with = (plain text math, no $ delimiters)
-        if text[i] == "\n" or i == 0:
-            line_start = i + 1 if text[i] == "\n" else i
-            line_end = text.find("\n", line_start)
-            if line_end == -1:
-                line_end = n
-            line = text[line_start:line_end].strip()
-            if "=" in line and "$" not in line and len(line) > 2:
-                regions.append((line, line_start, line_end))
-            i = line_end if line_end < n else n
-            continue
-
-        i += 1
-
-    return regions
-
-
 def _extract_rhs_expressions(
     text: str,
 ) -> list[tuple[str, str, int, int]]:
-    """Extract all (lhs, rhs, char_start, char_end) from math regions.
+    """Extract all (lhs, rhs, char_start, char_end) from text.
 
-    For each region containing '=', splits into LHS/RHS pairs.
-    Handles chain equations like 'T = p^2/2m = kinetic energy'.
+    Format-agnostic: finds expressions regardless of whether they're wrapped
+    in $ delimiters, $$ blocks, bold markers, or plain text. The model can
+    write in ANY format — we scan every line for '=' and extract.
+
+    Strategy: split text into lines, for each line containing '=':
+    1. Strip all formatting artifacts ($, $$, *, #, labels with colons)
+    2. Split on '=' to get LHS/RHS pairs
+    3. Return the cleaned LHS, raw RHS, and character offsets into original text
+
+    No dependency on specific delimiters. math-verify handles LaTeX vs plain
+    text internally when parsing the RHS.
     """
     results: list[tuple[str, str, int, int]] = []
     normalized = _normalize_text(text)
 
-    for content, char_start, char_end in _find_math_regions(normalized):
-        parts = content.split("=")
+    char_pos = 0
+    for line in normalized.split("\n"):
+        line_start = char_pos
+        line_end = char_pos + len(line)
+        char_pos = line_end + 1  # +1 for the \n
+
+        if "=" not in line:
+            continue
+
+        # Strip ALL formatting from the line before splitting on =
+        cleaned = line.strip()
+        # Strip $$ and $ delimiters
+        cleaned = cleaned.replace("$$", "").replace("$", "")
+        # Strip markdown bold/heading markers at boundaries
+        cleaned = cleaned.lstrip("*#").rstrip("*").strip()
+        # Strip LaTeX alignment markers
+        cleaned = cleaned.lstrip("&").strip()
+
+        if "=" not in cleaned or len(cleaned) < 3:
+            continue
+
+        parts = cleaned.split("=")
         if len(parts) < 2:
             continue
 
@@ -171,18 +150,21 @@ def _extract_rhs_expressions(
         # Strip label prefixes (KINETIC:, **MOMENTUM**:, etc.)
         if ":" in lhs_raw:
             lhs_raw = lhs_raw.split(":")[-1].strip()
-        # Strip markdown
+        # Strip remaining markdown/LaTeX at boundaries
         lhs_raw = lhs_raw.lstrip("*#").rstrip("*").strip()
-        # Take last token as variable name
+        # Take last whitespace-separated token as variable name
         tokens = lhs_raw.split()
         lhs = tokens[-1].strip("*$\\()") if tokens else ""
+
+        if not lhs:
+            continue
 
         # Each part after the first = is a potential RHS
         for rhs_raw in parts[1:]:
             rhs = rhs_raw.strip()
             if not rhs or len(rhs) < 1:
                 continue
-            # Skip prose
+            # Skip prose: if RHS starts with a common English word, skip
             first_word = rhs.split()[0].lower() if rhs.split() else ""
             if first_word in {
                 "the",
@@ -202,7 +184,7 @@ def _extract_rhs_expressions(
                 "we",
             }:
                 continue
-            results.append((lhs, rhs, char_start, char_end))
+            results.append((lhs, rhs, line_start, line_end))
 
     return results
 
