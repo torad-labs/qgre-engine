@@ -421,6 +421,9 @@ class AlgorithmConfig:
     fused_logprob_chunk_size: int = (
         256  # Tokens per chunk (lower = less memory, more kernel launches)
     )
+    # Triton fused logprobs: single GPU launch replaces 16 chunked Python→CUDA round-trips.
+    # Requires Triton and vocab_size % 128 == 0. Falls back to chunked path when unavailable.
+    use_triton_logprobs: bool = True
     kl_input_clamp: float = (
         20.0  # Clamp KL input before computing penalty (prevents gradient explosion)
     )

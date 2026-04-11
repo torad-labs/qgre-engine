@@ -294,6 +294,12 @@ class QGRETrainer:
         self._fused_chunk_size = config.algorithm.fused_logprob_chunk_size
         self._fused_validated = False  # One-time validation on first use
 
+        # Triton fused logprobs: single GPU launch replaces chunked path.
+        # Forward via Triton kernel (zero vocab-tensor allocation), backward via PyTorch.
+        self._use_triton_logprobs = config.algorithm.use_triton_logprobs
+        self._triton_available: bool | None = None  # Lazy detection on first use
+        self._triton_validated = False
+
         # Completion logger (lazily initialized on first log to handle checkpoint resume)
         self._completion_logger_path = config.logging.completion_dir
         self._completion_logger = None
@@ -1084,21 +1090,57 @@ class QGRETrainer:
                     )
                     attentions = None
                 if hidden_states is not None and lm_head is not None:
-                    # Fused path: chunked lm_head + checkpoint avoids full [seq, vocab] logit tensor.
-                    mb_lp = chunked_logprobs_from_hidden(
-                        hidden_states[:, :-1, :],
-                        lm_head,
-                        mb_ids[:, 1:],
-                        chunk_size=self._fused_chunk_size,
-                    )
-                    # One-time validation: chunking correctness only.
-                    # Compares chunked vs full lm_head projection from same hidden states.
-                    # Does NOT validate model-level correctness (caught by training loop).
-                    if not self._fused_validated and mb_lp.shape[1] > 0:
+                    # Fused path: compute logprobs without materializing full [seq, vocab] tensor.
+                    # Priority: Triton kernel > chunked lm_head + checkpoint
+                    _use_triton = self._use_triton_logprobs and self._triton_available is not False
+                    mb_lp: torch.Tensor | None = None
+                    if _use_triton:
+                        try:
+                            from qgre.triton_logprobs import (
+                                HAS_TRITON,
+                                triton_logprobs_with_grad,
+                            )
+
+                            if not HAS_TRITON:
+                                self._triton_available = False
+                                _use_triton = False
+                            else:
+                                if self._triton_available is None:
+                                    logging.getLogger(__name__).info(
+                                        "Triton fused logprobs enabled — single GPU launch, "
+                                        "zero vocab-tensor allocation in forward",
+                                    )
+                                    self._triton_available = True
+                                mb_lp = triton_logprobs_with_grad(
+                                    hidden_states[:, :-1, :],
+                                    lm_head,
+                                    mb_ids[:, 1:],
+                                )
+                        except (ImportError, ValueError, RuntimeError) as e:
+                            if self._triton_available is None:
+                                logging.getLogger(__name__).warning(
+                                    f"Triton logprobs unavailable ({e}), falling back to chunked path",
+                                )
+                            self._triton_available = False
+                            _use_triton = False
+
+                    if mb_lp is None:
+                        _use_triton = False
+                        mb_lp = chunked_logprobs_from_hidden(
+                            hidden_states[:, :-1, :],
+                            lm_head,
+                            mb_ids[:, 1:],
+                            chunk_size=self._fused_chunk_size,
+                        )
+
+                    # One-time validation: compare against full lm_head projection.
+                    _validated = self._triton_validated if _use_triton else self._fused_validated
+                    if not _validated and mb_lp.shape[1] > 0:
                         if mb_lp.grad_fn is None:
+                            path_name = "Triton" if _use_triton else "Fused"
                             raise RuntimeError(
-                                "Fused logprobs has no grad_fn — autograd graph is broken. "
-                                "Set algorithm.use_fused_logprobs=false to fall back.",
+                                f"{path_name} logprobs has no grad_fn — autograd graph is broken. "
+                                f"Set algorithm.use_triton_logprobs=false or use_fused_logprobs=false.",
                             )
                         with torch.no_grad():
                             manual_logits = lm_head(hidden_states[:, :-1, :]).float()
@@ -1114,12 +1156,17 @@ class QGRETrainer:
                                     .max()
                                     .item()
                                 )
+                                path_name = "Triton" if _use_triton else "Fused"
                                 raise RuntimeError(
-                                    f"Fused logprobs diverge from full projection (max diff: {max_diff:.6f}). "
-                                    f"Set algorithm.use_fused_logprobs=false to fall back.",
+                                    f"{path_name} logprobs diverge from full projection "
+                                    f"(max diff: {max_diff:.6f}). Disable with "
+                                    f"algorithm.use_triton_logprobs=false or use_fused_logprobs=false.",
                                 )
                             del std_lp
-                        self._fused_validated = True
+                        if _use_triton:
+                            self._triton_validated = True
+                        else:
+                            self._fused_validated = True
                     # Compute importance for advantage constraint
                     # Priority: attention bond strength > hidden state proxy > disabled
                     if attentions is not None:

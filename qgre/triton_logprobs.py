@@ -130,91 +130,71 @@ if HAS_TRITON:
         tl.store(output_ptr + pid, log_prob)
 
 
-def triton_logprobs_from_hidden(
+def _validate_triton_inputs(
     hidden_states: torch.Tensor,
-    lm_head: nn.Linear,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
     labels: torch.Tensor,
-) -> torch.Tensor:
-    """Compute logprobs using Triton fused kernel — zero vocab-tensor allocation.
-
-    Args:
-        hidden_states: [batch, seq, hidden_dim] from model body
-        lm_head: nn.Linear(hidden_dim, vocab_size)
-        labels: [batch, seq] token IDs
-
-    Returns:
-        [batch, seq] log probabilities (float32)
-    """
-    if not HAS_TRITON:
-        # Fallback to PyTorch selective_log_softmax path
-        from qgre.fused_logprobs import chunked_logprobs_from_hidden
-
-        return chunked_logprobs_from_hidden(hidden_states, lm_head, labels)
-
+) -> tuple[int, int, int, int, bool]:
+    """Shared validation for Triton logprob paths. Returns (batch, seq_len, hidden_dim, vocab_size, has_bias)."""
     batch, seq_len, hidden_dim = hidden_states.shape
-    vocab_size = lm_head.weight.shape[0]
-    has_bias = lm_head.bias is not None
+    vocab_size = weight.shape[0]
+    has_bias = bias is not None
 
-    # L2: Validate labels are within vocab bounds before kernel call
     if labels.numel() > 0:
         label_min = labels.min().item()
         label_max = labels.max().item()
         if label_min < 0 or label_max >= vocab_size:
             raise ValueError(
-                f"L2: Triton logprob kernel: label out of bounds. "
-                f"Label range [{label_min}, {label_max}] exceeds vocab_size={vocab_size}. "
-                f"Invalid labels would cause -inf logprobs without masking. "
-                f"Check tokenizer and label data.",
+                f"Triton logprob: label out of bounds [{label_min}, {label_max}] "
+                f"vs vocab_size={vocab_size}.",
             )
 
-    # Qwen3: vocab=151936, divisible by 128 but NOT 256
     BLOCK_V = 128
-
-    # Validate vocab_size is divisible by BLOCK_V
     if vocab_size % BLOCK_V != 0:
         raise ValueError(
-            f"Triton logprob kernel requires vocab_size % BLOCK_V == 0, "
-            f"got vocab_size={vocab_size}, BLOCK_V={BLOCK_V}. "
-            f"Use a different BLOCK_V or disable fused logprobs.",
+            f"Triton logprob: vocab_size={vocab_size} not divisible by BLOCK_V={BLOCK_V}.",
         )
 
-    # Return empty tensor early if seq_len=0 or batch=0
-    if seq_len == 0 or batch == 0:
-        return torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
-
-    result = torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
-
-    # Validate all tensors on same device before kernel call
     ref_device = hidden_states.device
-    if lm_head.weight.device != ref_device:
+    if weight.device != ref_device:
         raise RuntimeError(
-            f"Device mismatch: hidden_states on {ref_device}, lm_head.weight on {lm_head.weight.device}. "
-            "All tensors must be on the same device for Triton kernel.",
+            f"Device mismatch: hidden_states on {ref_device}, weight on {weight.device}.",
         )
-    if has_bias and lm_head.bias.device != ref_device:
+    if has_bias and bias.device != ref_device:
         raise RuntimeError(
-            f"Device mismatch: hidden_states on {ref_device}, lm_head.bias on {lm_head.bias.device}. "
-            "All tensors must be on the same device for Triton kernel.",
+            f"Device mismatch: hidden_states on {ref_device}, bias on {bias.device}.",
         )
+
+    return batch, seq_len, hidden_dim, vocab_size, has_bias
+
+
+def _run_triton_forward(
+    hidden_states: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    labels: torch.Tensor,
+    batch: int,
+    seq_len: int,
+    hidden_dim: int,
+    vocab_size: int,
+    has_bias: bool,
+) -> torch.Tensor:
+    """Run the Triton kernel over all batches. Returns [batch, seq] logprobs."""
+    result = torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
+    BLOCK_V = 128
 
     for b in range(batch):
-        h = hidden_states[b].contiguous()  # [seq, hidden_dim]
-        lab = labels[b].contiguous()  # [seq]
-        out = result[b]  # [seq]
+        h = hidden_states[b].contiguous()
+        lab = labels[b].contiguous()
+        out = result[b]
 
-        if lab.device != ref_device:
-            raise RuntimeError(
-                f"Device mismatch: batch {b} labels on {lab.device}, expected {ref_device}. "
-                "All tensors must be on the same device for Triton kernel.",
-            )
-
-        grid = (seq_len,)
-        _fused_logprob_kernel[grid](
+        _fused_logprob_kernel[(seq_len,)](
             h,
-            lm_head.weight,
+            weight,
             lab,
             out,
-            lm_head.bias if has_bias else h,  # dummy ptr when no bias
+            bias if has_bias else h,  # dummy ptr when no bias
             seq_len,
             hidden_dim,
             vocab_size,
@@ -222,11 +202,199 @@ def triton_logprobs_from_hidden(
             BLOCK_V=BLOCK_V,
         )
 
-        # LP-R2-07: Check for NaN in output (indicates inf/nan in hidden states)
         if torch.isnan(out).any():
             raise RuntimeError(
-                f"LP-R2-07: NaN detected in Triton logprob output for batch {b}. "
-                "This indicates inf/nan in hidden states. Check model stability.",
+                f"NaN in Triton logprob output for batch {b}. "
+                "Check model stability (inf/nan in hidden states).",
             )
 
     return result
+
+
+def triton_logprobs_from_hidden(
+    hidden_states: torch.Tensor,
+    lm_head: nn.Linear,
+    labels: torch.Tensor,
+) -> torch.Tensor:
+    """Compute logprobs using Triton fused kernel — zero vocab-tensor allocation.
+
+    No autograd graph — output is detached. Use triton_logprobs_with_grad
+    for the differentiable version.
+
+    Args:
+        hidden_states: [batch, seq, hidden_dim] from model body
+        lm_head: nn.Linear(hidden_dim, vocab_size)
+        labels: [batch, seq] token IDs
+
+    Returns:
+        [batch, seq] log probabilities (float32), no grad_fn
+    """
+    if not HAS_TRITON:
+        from qgre.fused_logprobs import chunked_logprobs_from_hidden
+
+        return chunked_logprobs_from_hidden(hidden_states, lm_head, labels)
+
+    batch, seq_len, hidden_dim, vocab_size, has_bias = _validate_triton_inputs(
+        hidden_states,
+        lm_head.weight,
+        lm_head.bias,
+        labels,
+    )
+
+    if seq_len == 0 or batch == 0:
+        return torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
+
+    return _run_triton_forward(
+        hidden_states,
+        lm_head.weight,
+        lm_head.bias,
+        labels,
+        batch,
+        seq_len,
+        hidden_dim,
+        vocab_size,
+        has_bias,
+    )
+
+
+# ─── Differentiable Triton logprobs (autograd.Function) ──────────────────────
+
+
+class _TritonLogprobAutograd(torch.autograd.Function):
+    """Triton forward + PyTorch backward for differentiable logprob computation.
+
+    Forward: fused Triton kernel — one GPU launch per batch element, zero [seq, vocab]
+    allocation. Replaces 16 Python→CUDA round-trips from chunked lm_head + checkpoint.
+
+    Backward: chunked PyTorch matmul. Recomputes softmax per chunk (same as
+    torch.checkpoint recomputation in the chunked path). Peak per chunk:
+    chunk_size × vocab × 4 bytes (e.g., 64 × 151936 × 4 = 37 MB).
+
+    Net savings vs chunked_logprobs_from_hidden:
+    - Forward: single Triton launch vs 16 Python→CUDA round-trips
+    - No torch.checkpoint metadata (~500 MB)
+    - No 16 autograd CheckpointFunction nodes
+    - Backward: same memory profile as checkpoint recomputation
+    """
+
+    BACKWARD_CHUNK_SIZE = 64
+
+    @staticmethod
+    def forward(ctx, hidden_states, weight, bias, labels) -> torch.Tensor:
+        has_bias = bias is not None and bias.numel() > 0
+        batch, seq_len, hidden_dim = hidden_states.shape
+        vocab_size = weight.shape[0]
+
+        result = _run_triton_forward(
+            hidden_states,
+            weight,
+            bias if has_bias else None,
+            labels,
+            batch,
+            seq_len,
+            hidden_dim,
+            vocab_size,
+            has_bias,
+        )
+
+        ctx.save_for_backward(hidden_states, weight, bias, labels)
+        ctx.has_bias = has_bias
+        return result
+
+    @staticmethod
+    def backward(ctx, grad_output) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, None]:
+        hidden, weight, bias, labels = ctx.saved_tensors
+        has_bias = ctx.has_bias
+        batch, seq_len, _hidden_dim = hidden.shape
+        chunk_size = _TritonLogprobAutograd.BACKWARD_CHUNK_SIZE
+
+        grad_hidden = torch.zeros_like(hidden)
+        grad_weight = torch.zeros(weight.shape, dtype=torch.float32, device=weight.device)
+        grad_bias = (
+            torch.zeros(bias.shape, dtype=torch.float32, device=bias.device)
+            if has_bias and bias is not None and bias.requires_grad
+            else None
+        )
+
+        for b in range(batch):
+            for start in range(0, seq_len, chunk_size):
+                end = min(start + chunk_size, seq_len)
+                c = end - start
+                h_chunk = hidden[b, start:end].float()  # [C, D]
+
+                # Recompute logits (same as Triton kernel, but in PyTorch for backward)
+                logits = h_chunk @ weight.T  # [C, V]
+                if has_bias and bias is not None:
+                    logits = logits + bias.unsqueeze(0)
+
+                # diff = one_hot(label) - softmax(logits)
+                probs = torch.softmax(logits, dim=-1)  # [C, V]
+                del logits
+                probs.neg_()  # -softmax
+                lab = labels[b, start:end]
+                probs.scatter_add_(
+                    1,
+                    lab.unsqueeze(1),
+                    torch.ones(c, 1, device=probs.device, dtype=probs.dtype),
+                )
+                # probs is now (one_hot - softmax)
+
+                g = grad_output[b, start:end].unsqueeze(1)  # [C, 1]
+                g_diff = g * probs  # [C, V] — scaled gradient
+
+                # grad_hidden: [C, V] @ [V, D] → [C, D]
+                grad_hidden[b, start:end] = (g_diff @ weight).to(hidden.dtype)
+
+                # grad_weight: [V, D] += [V, C] @ [C, D]
+                grad_weight.addmm_(g_diff.T, h_chunk)
+
+                # grad_bias: [V] += sum([C, V], dim=0)
+                if grad_bias is not None:
+                    grad_bias.add_(g_diff.sum(0))
+
+                del probs, g_diff
+
+        return grad_hidden, grad_weight.to(weight.dtype), grad_bias, None
+
+
+def triton_logprobs_with_grad(
+    hidden_states: torch.Tensor,
+    lm_head: nn.Linear,
+    labels: torch.Tensor,
+) -> torch.Tensor:
+    """Differentiable logprobs via Triton forward + PyTorch backward.
+
+    Drop-in replacement for chunked_logprobs_from_hidden. Uses the Triton kernel
+    for the forward pass (zero vocab-tensor allocation, single GPU launch), and
+    chunked PyTorch matmul for backward (same memory profile as checkpoint path).
+
+    Args:
+        hidden_states: [batch, seq, hidden_dim] from model body
+        lm_head: nn.Linear(hidden_dim, vocab_size)
+        labels: [batch, seq] token IDs
+
+    Returns:
+        [batch, seq] log probabilities (float32) WITH grad_fn
+    """
+    if not HAS_TRITON:
+        from qgre.fused_logprobs import chunked_logprobs_from_hidden
+
+        return chunked_logprobs_from_hidden(hidden_states, lm_head, labels)
+
+    _validate_triton_inputs(hidden_states, lm_head.weight, lm_head.bias, labels)
+
+    batch, seq_len = hidden_states.shape[:2]
+    if seq_len == 0 or batch == 0:
+        return torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
+
+    # Pass bias as empty tensor if None — autograd.Function needs consistent arg count
+    bias = (
+        lm_head.bias
+        if lm_head.bias is not None
+        else torch.empty(
+            0,
+            device=hidden_states.device,
+        )
+    )
+
+    return _TritonLogprobAutograd.apply(hidden_states, lm_head.weight, bias, labels)
