@@ -196,10 +196,14 @@ def _find_correct(
     expressions: list[tuple[str, str, int, int]],
     gold_parsed: list,
     lhs_patterns: list[str] | None = None,
+    substitutions: dict | None = None,
 ) -> tuple[float, list[tuple[int, int]]]:
     """Find the first expression that matches gold via math-verify.
 
     Returns (1.0, [(span)]) on match, (0.0, []) otherwise.
+    If substitutions is provided (e.g., {m: 2}), tries substituting free
+    variables in the model's answer before comparing — handles generic
+    formulas like p²/(2m) when gold has numeric values like p²/4.
     """
     for lhs, rhs, char_start, char_end in expressions:
         # Filter by LHS if specified
@@ -217,12 +221,26 @@ def _find_correct(
         if not answer_parsed:
             continue
 
-        # Verify equivalence
+        # Verify equivalence — direct comparison first
         try:
             if verify(gold_parsed, answer_parsed):
                 return 1.0, [(char_start, char_end)]
         except Exception:
-            continue
+            pass
+
+        # Substitution fallback: model wrote generic formula with free variables
+        if substitutions and answer_parsed:
+            try:
+                expr = answer_parsed[0] if isinstance(answer_parsed, list) else answer_parsed
+                if hasattr(expr, "free_symbols") and expr.free_symbols:
+                    subbed = expr.subs(substitutions)
+                    subbed_simplified = sp.simplify(subbed)
+                    subbed_latex = sp.latex(subbed_simplified)
+                    subbed_parsed = parse(f"${subbed_latex}$")
+                    if subbed_parsed and verify(gold_parsed, subbed_parsed):
+                        return 1.0, [(char_start, char_end)]
+            except Exception:
+                pass
 
     return 0.0, []
 
@@ -231,6 +249,7 @@ def _find_derivative(
     expressions: list[tuple[str, str, int, int]],
     gold_parsed: list,
     var: str,
+    substitutions: dict | None = None,
 ) -> tuple[float, list[tuple[int, int]]]:
     """Find a correct Hamilton equation dVAR/dt = gold."""
     # All ways the model might write the LHS of a derivative
@@ -261,7 +280,19 @@ def _find_derivative(
             if verify(gold_parsed, answer_parsed):
                 return 1.0, [(char_start, char_end)]
         except Exception:
-            continue
+            pass
+
+        # Substitution fallback for generic formulas (p/m instead of p/2)
+        if substitutions and answer_parsed:
+            try:
+                expr = answer_parsed[0] if isinstance(answer_parsed, list) else answer_parsed
+                if hasattr(expr, "free_symbols") and expr.free_symbols:
+                    subbed = sp.simplify(expr.subs(substitutions))
+                    subbed_parsed = parse(f"${sp.latex(subbed)}$")
+                    if subbed_parsed and verify(gold_parsed, subbed_parsed):
+                        return 1.0, [(char_start, char_end)]
+            except Exception:
+                pass
 
     return 0.0, []
 
@@ -370,6 +401,65 @@ def _score_consistency(
     return 0.0
 
 
+# ─── Substitution helpers ──────────────────────────────────────────────────────
+
+
+def _build_substitutions(meta: dict) -> dict:
+    """Extract known constants from metadata for substitution into generic formulas.
+
+    The model often writes correct formulas with symbolic variables (p²/(2m))
+    instead of substituting numeric values (p²/4 when m=2). This builds a
+    substitution dict so we can verify equivalence after plugging in constants.
+
+    Only substitutes values that are DERIVABLE from the problem metadata —
+    never introduces assumptions. Wrong formulas still score 0.
+    """
+    subs: dict = {}
+    T_str = meta.get("T_expr")
+    if T_str:
+        try:
+            p = _SYMBOL_MAP["p"]
+            T_sym = sp.sympify(T_str, locals=_SYMBOL_MAP)
+            coeff = T_sym.coeff(p, 2)
+            if coeff and coeff != 0:
+                mass = sp.Rational(1, 2) / coeff
+                subs[_SYMBOL_MAP["m"]] = mass
+        except Exception:
+            pass
+
+    # Extract g from V_expr if it's a gravity problem: V = m*g*q → g = V/(m*q)
+    V_str = meta.get("V_expr")
+    coord = meta.get("coordinates", "x")
+    if V_str and subs.get(_SYMBOL_MAP["m"]):
+        try:
+            q_sym = _SYMBOL_MAP.get(coord, sp.Symbol(coord))
+            V_sym = sp.sympify(V_str, locals=_SYMBOL_MAP)
+            # V should be linear in q for gravity: V = c*q where c = m*g
+            v_coeff = V_sym.coeff(q_sym, 1)
+            if v_coeff and v_coeff != 0:
+                mass = subs[_SYMBOL_MAP["m"]]
+                g_val = v_coeff / mass
+                if g_val.is_number:
+                    subs[_SYMBOL_MAP["g"]] = g_val
+        except Exception:
+            pass
+
+    # Extract k from V_expr if it's a spring problem: V = ½kq² → k = 2*coeff_q²
+    if V_str:
+        try:
+            q_sym = _SYMBOL_MAP.get(coord, sp.Symbol(coord))
+            V_sym = sp.sympify(V_str, locals=_SYMBOL_MAP)
+            v_coeff2 = V_sym.coeff(q_sym, 2)
+            if v_coeff2 and v_coeff2 != 0:
+                k_val = 2 * v_coeff2
+                if k_val.is_number:
+                    subs[_SYMBOL_MAP["k"]] = k_val
+        except Exception:
+            pass
+
+    return subs
+
+
 # ─── Velocity-form fallback ────────────────────────────────────────────────────
 
 
@@ -442,9 +532,9 @@ def hamiltonian_reward(
     # Extract all expressions from the completion
     expressions = _extract_rhs_expressions(text)
 
-    # Velocity-form fallback: model may write T in terms of ẏ instead of p.
-    # T = p²/(2m) in momentum form, T = ½mẏ² in velocity form — equivalent.
-    # Extract mass from T_expr to enable substitution: p → m*coord_dot
+    # Build substitutions for generic formulas: model writes p²/(2m) instead of p²/4.
+    # Extract mass from T_expr and build {m: mass_value, g: 9.8, k: spring_const} subs.
+    subs = _build_substitutions(meta)
     velocity_gold = _velocity_form_gold(meta)
 
     # Score each quality
@@ -456,12 +546,22 @@ def hamiltonian_reward(
         if meta.get(meta_key):
             gold = _gold_parse(meta[meta_key])
             if gold:
-                score, spans = _find_correct(expressions, gold, lhs_patterns)
+                score, spans = _find_correct(
+                    expressions,
+                    gold,
+                    lhs_patterns,
+                    substitutions=subs,
+                )
                 # Velocity-form fallback for T and H
                 if score == 0.0 and meta_key in velocity_gold:
                     vel_gold = velocity_gold[meta_key]
                     if vel_gold:
-                        score, spans = _find_correct(expressions, vel_gold, lhs_patterns)
+                        score, spans = _find_correct(
+                            expressions,
+                            vel_gold,
+                            lhs_patterns,
+                            substitutions=subs,
+                        )
                 scores[quality] = score
                 if spans:
                     scored_spans[quality] = spans
@@ -475,9 +575,9 @@ def hamiltonian_reward(
         gold = _gold_parse(meta["dqdt"])
         if gold:
             coord = meta.get("coordinates", "x")
-            score, spans = _find_derivative(expressions, gold, var=coord)
+            score, spans = _find_derivative(expressions, gold, var=coord, substitutions=subs)
             if score == 0.0 and coord != "q":
-                score, spans = _find_derivative(expressions, gold, var="q")
+                score, spans = _find_derivative(expressions, gold, var="q", substitutions=subs)
             scores["q_dqdt"] = score
             if spans:
                 scored_spans["q_dqdt"] = spans
@@ -487,7 +587,7 @@ def hamiltonian_reward(
     if meta.get("dpdt"):
         gold = _gold_parse(meta["dpdt"])
         if gold:
-            score, spans = _find_derivative(expressions, gold, var="p")
+            score, spans = _find_derivative(expressions, gold, var="p", substitutions=subs)
             scores["q_dpdt"] = score
             if spans:
                 scored_spans["q_dpdt"] = spans
