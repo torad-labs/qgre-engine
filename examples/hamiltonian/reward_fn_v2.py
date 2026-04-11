@@ -370,6 +370,57 @@ def _score_consistency(
     return 0.0
 
 
+# ─── Velocity-form fallback ────────────────────────────────────────────────────
+
+
+def _velocity_form_gold(meta: dict) -> dict[str, list | None]:
+    """Generate velocity-form gold expressions by substituting p → m*coord_dot.
+
+    Hamiltonian formalism uses (q, p) but students often write T = ½mv².
+    Both are correct. This creates alternate gold expressions in velocity form
+    so math-verify can match either.
+
+    Returns dict mapping meta_key → parsed gold, for T_expr and H_expr only.
+    """
+    result: dict[str, list | None] = {}
+    T_str = meta.get("T_expr")
+    if not T_str:
+        return result
+
+    try:
+        p = _SYMBOL_MAP["p"]
+        T_sym = sp.sympify(T_str, locals=_SYMBOL_MAP)
+
+        # Extract mass: T = p²/(2m) → coeff of p² is 1/(2m) → m = 1/(2*coeff)
+        coeff = T_sym.coeff(p, 2)
+        if not coeff or coeff == 0:
+            return result
+        mass = sp.Rational(1, 2) / coeff
+
+        # Create velocity symbol: dot{coord} (e.g., dot{y}, dot{x})
+        coord = meta.get("coordinates", "x")
+        q_dot = sp.Symbol(f"dot{{{coord}}}")
+
+        # Substitute p → m * q_dot in T and H
+        p_sub = mass * q_dot
+        T_vel = T_sym.subs(p, p_sub)
+        T_vel_simplified = sp.simplify(T_vel)
+        T_latex = sp.latex(T_vel_simplified)
+        result["T_expr"] = parse(f"${T_latex}$") or None
+
+        H_str = meta.get("H_expr")
+        if H_str:
+            H_sym = sp.sympify(H_str, locals=_SYMBOL_MAP)
+            H_vel = H_sym.subs(p, p_sub)
+            H_vel_simplified = sp.simplify(H_vel)
+            H_latex = sp.latex(H_vel_simplified)
+            result["H_expr"] = parse(f"${H_latex}$") or None
+    except (SympyTimeoutError, Exception):
+        pass
+
+    return result
+
+
 # ─── Main reward function ──────────────────────────────────────────────────────
 
 
@@ -391,6 +442,11 @@ def hamiltonian_reward(
     # Extract all expressions from the completion
     expressions = _extract_rhs_expressions(text)
 
+    # Velocity-form fallback: model may write T in terms of ẏ instead of p.
+    # T = p²/(2m) in momentum form, T = ½mẏ² in velocity form — equivalent.
+    # Extract mass from T_expr to enable substitution: p → m*coord_dot
+    velocity_gold = _velocity_form_gold(meta)
+
     # Score each quality
     for quality, meta_key, lhs_patterns in [
         ("q_kinetic", "T_expr", ["T", "t", "kinetic"]),
@@ -401,6 +457,11 @@ def hamiltonian_reward(
             gold = _gold_parse(meta[meta_key])
             if gold:
                 score, spans = _find_correct(expressions, gold, lhs_patterns)
+                # Velocity-form fallback for T and H
+                if score == 0.0 and meta_key in velocity_gold:
+                    vel_gold = velocity_gold[meta_key]
+                    if vel_gold:
+                        score, spans = _find_correct(expressions, vel_gold, lhs_patterns)
                 scores[quality] = score
                 if spans:
                     scored_spans[quality] = spans
