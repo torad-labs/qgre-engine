@@ -918,29 +918,38 @@ class MicrobatchFrame:
 
 @dataclass
 class AlignedLossFrame:
-    """Pre-shifted tensors in Level-1 coordinate space.
+    """Pre-shifted tensors in logprob coordinate space.
 
-    Level 1 shift (applied at build()): skip position 0. All tensors
-    have shape [batch, L1_len] where L1_len = max_comp_len - 1.
+    After build(), all tensors share the same coordinate system as mb_lp:
+    position t corresponds to the prediction of token t+1.
 
-    Level 2 shift (applied at slice_for_microbatch): logprob[t] predicts
-    token[t+1], so advantage[t+1] pairs with logprob[t]. Applied to
-    advantages and kl_weights only; mask is truncated, not shifted.
+    Coordinate algebra:
+      - Raw token space:  advantages[t] = advantage for generating token t
+      - Logprob space:    mb_lp[t] = log P(token[t+1] | tokens[0..t])
+      - After [:, 1:] shift: advantages_shifted[t] = advantages[t+1]
+        = advantage for generating token t+1 → matches mb_lp[t]
+
+    All inputs to build() are in raw token space. build() applies the [:, 1:]
+    shift to align everything with logprob space. No further shifts are needed.
+
+    IMPORTANT: Code that mutates frame.advantages (e.g., VPRM) must write
+    values in logprob space, NOT raw token space. Position t must contain
+    the advantage for generating token t+1.
 
     Usage::
 
         frame = AlignedLossFrame.build(response_mask, advs, gen_lp, kl_w)
         # In microbatch loop:
-        mb_advs_l1 = frame.advantages[mb_start:mb_end]  # for EGRS mutation
-        # ... EGRS mutates mb_advs_l1 in-place ...
-        mb = frame.slice_for_microbatch(mb_start, mb_end)  # L2 shift
+        mb_advs = frame.advantages[mb_start:mb_end]  # for EGRS mutation
+        # ... EGRS mutates mb_advs in-place (already in logprob space) ...
+        mb = frame.slice_for_microbatch(mb_start, mb_end)
         loss = loss_fn(lp[:, : mb.loss_len], advantages=mb.advantages, mask=mb.mask)
     """
 
-    response_mask: torch.Tensor  # [batch, L1_len]
-    advantages: torch.Tensor  # [batch, L1_len]
-    gen_logprobs: torch.Tensor | None  # [batch, L1_len]
-    kl_weights: torch.Tensor | None  # [batch, L1_len]
+    response_mask: torch.Tensor  # [batch, loss_len]
+    advantages: torch.Tensor  # [batch, loss_len]
+    gen_logprobs: torch.Tensor | None  # [batch, loss_len]
+    kl_weights: torch.Tensor | None  # [batch, loss_len]
 
     @staticmethod
     def build(
@@ -949,10 +958,11 @@ class AlignedLossFrame:
         gen_logprobs_padded: torch.Tensor | None,
         kl_region_weights: torch.Tensor | None,
     ) -> AlignedLossFrame:
-        """Apply Level 1 shift to all tensors and validate shape alignment.
+        """Shift from raw token space to logprob space and validate alignment.
 
-        All inputs are in raw token space [batch, max_comp_len].
-        All outputs are in L1 space [batch, max_comp_len - 1].
+        All inputs: [batch, max_comp_len] in raw token space.
+        All outputs: [batch, max_comp_len - 1] in logprob space.
+        The [:, 1:] shift aligns advantages[t+1] with logprob[t].
         """
         mask = response_mask[:, 1:]
         advs = padded_advs[:, 1:]
@@ -961,7 +971,7 @@ class AlignedLossFrame:
 
         if advs.shape != mask.shape:
             raise RuntimeError(
-                f"AlignedLossFrame: shape mismatch after L1 shift: "
+                f"AlignedLossFrame: shape mismatch after shift: "
                 f"advantages={advs.shape} vs response_mask={mask.shape}"
             )
         if gen_lp is not None and gen_lp.shape != mask.shape:
@@ -983,16 +993,11 @@ class AlignedLossFrame:
         )
 
     def slice_for_microbatch(self, start: int, end: int) -> MicrobatchFrame:
-        """Slice batch dimension and apply Level 2 shift.
-
-        Level 2: advantages[t+1] pairs with logprob[t], so shift
-        advantages and kl_weights by [:, 1:]. Mask is truncated
-        (not shifted) to match the resulting loss_len.
-        """
-        mb_advs = self.advantages[start:end, 1:]
-        mb_kl = self.kl_weights[start:end, 1:] if self.kl_weights is not None else None
+        """Slice batch dimension. All tensors are already in logprob space."""
+        mb_advs = self.advantages[start:end]
+        mb_kl = self.kl_weights[start:end] if self.kl_weights is not None else None
         loss_len = mb_advs.shape[1]
-        mb_mask = self.response_mask[start:end, :loss_len]
+        mb_mask = self.response_mask[start:end]
 
         return MicrobatchFrame(
             mask=mb_mask,

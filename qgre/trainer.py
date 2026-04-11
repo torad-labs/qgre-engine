@@ -1456,8 +1456,12 @@ class QGRETrainer:
                             # (critic still learns the baseline for future use).
                             # When spans are NOT active, replace SPO advantages with VPRM.
                             if not use_spans:
-                                adv_len = min(vprm_advs.shape[0], mb_advs.shape[1])
-                                mb_advs[mb_i, :adv_len] = vprm_advs[:adv_len]
+                                # VPRM returns raw-space advantages: vprm_advs[t] = advantage for token t.
+                                # mb_advs is in logprob space: mb_advs[t] = advantage for token t+1.
+                                # Offset by 1: vprm_advs[1:] maps raw token t+1 to logprob position t.
+                                if vprm_advs.shape[0] > 1:
+                                    adv_len = min(vprm_advs.shape[0] - 1, mb_advs.shape[1])
+                                    mb_advs[mb_i, :adv_len] = vprm_advs[1 : adv_len + 1]
                             mb_critic_loss = mb_critic_loss + vprm_loss
                             mb_critic_count += 1
                 finally:
@@ -1691,13 +1695,12 @@ class QGRETrainer:
                 and mb_entropy_adjustments is not None
                 and mb_token_entropy is not None
             ):
-                # Align with shifted positions (L2 shift for logprob coordinate)
-                adj_shifted = mb_entropy_adjustments[:, 1:]
-                ent_shifted = mb_token_entropy[:, 1:]
-                egrs_len = min(adj_shifted.shape[1], ent_shifted.shape[1], loss_len)
+                # Both tensors are already in logprob space (computed from L1-shifted mb_advs
+                # and logits[:, :-1] respectively). No additional shift needed.
+                egrs_len = min(mb_entropy_adjustments.shape[1], mb_token_entropy.shape[1], loss_len)
                 egrs_mask = mb_frame.mask[:, :egrs_len].float()
-                egrs_adj = adj_shifted[:, :egrs_len]
-                egrs_ent = ent_shifted[:, :egrs_len]
+                egrs_adj = mb_entropy_adjustments[:, :egrs_len]
+                egrs_ent = mb_token_entropy[:, :egrs_len]
                 # Sum over tokens with positive adjustment (Q3 only), normalized by token count
                 egrs_token_count = egrs_mask.sum().clamp(min=1.0)
                 egrs_loss = -(egrs_adj * egrs_ent * egrs_mask).sum() / egrs_token_count
