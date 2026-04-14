@@ -514,6 +514,21 @@ def _velocity_form_gold(meta: dict) -> dict[str, list | None]:
 # ─── Main reward function ──────────────────────────────────────────────────────
 
 
+# Quality → section label mapping for section-level scored_spans.
+# The StructuredOutputParser finds WHERE each section is in the text;
+# the math-verify scoring determines WHETHER the answer is correct.
+# Spans always cover the section — even when the answer is wrong —
+# so the gradient targets the tokens where the model attempted the quality.
+_QUALITY_TO_SECTION: dict[str, str] = {
+    "q_kinetic": "KINETIC",
+    "q_potential": "POTENTIAL",
+    "q_hamiltonian": "HAMILTONIAN",
+    "q_dqdt": "EQUATIONS",
+    "q_dpdt": "EQUATIONS",
+    "q_consistency": "EQUATIONS",
+}
+
+
 def hamiltonian_reward(
     prompt: str,
     completion: str,
@@ -523,11 +538,28 @@ def hamiltonian_reward(
 
     No format scoring. Uses math-verify for parsing and verification.
     Extracts ALL expressions and checks each against ground truth.
+
+    scored_spans use StructuredOutputParser section-level spans (from v1)
+    so gradient targets the section where the model attempted each quality,
+    regardless of whether the answer was correct.
     """
+    from examples.hamiltonian.reward_fn import StructuredOutputParser
+
     meta = metadata or {}
     text = completion
     scores: dict[str, float] = {}
+
+    # Section-level spans: StructuredOutputParser finds WHERE each labeled
+    # section is in the text. This gives gradient targeting even when the
+    # math-verify scoring says the answer is wrong (score=0.0).
+    parser = StructuredOutputParser(text)
+    section_spans = parser.get_section_spans()
+
     scored_spans: dict[str, list[tuple[int, int]]] = {}
+    for quality, section in _QUALITY_TO_SECTION.items():
+        spans = section_spans.get(section, [])
+        if spans:
+            scored_spans[quality] = spans
 
     # Extract all expressions from the completion
     expressions = _extract_rhs_expressions(text)
@@ -537,7 +569,7 @@ def hamiltonian_reward(
     subs = _build_substitutions(meta)
     velocity_gold = _velocity_form_gold(meta)
 
-    # Score each quality
+    # Score each quality (math-verify for accuracy)
     for quality, meta_key, lhs_patterns in [
         ("q_kinetic", "T_expr", ["T", "t", "kinetic"]),
         ("q_potential", "V_expr", ["V", "v", "potential"]),
@@ -546,7 +578,7 @@ def hamiltonian_reward(
         if meta.get(meta_key):
             gold = _gold_parse(meta[meta_key])
             if gold:
-                score, spans = _find_correct(
+                score, _expr_spans = _find_correct(
                     expressions,
                     gold,
                     lhs_patterns,
@@ -556,15 +588,13 @@ def hamiltonian_reward(
                 if score == 0.0 and meta_key in velocity_gold:
                     vel_gold = velocity_gold[meta_key]
                     if vel_gold:
-                        score, spans = _find_correct(
+                        score, _expr_spans = _find_correct(
                             expressions,
                             vel_gold,
                             lhs_patterns,
                             substitutions=subs,
                         )
                 scores[quality] = score
-                if spans:
-                    scored_spans[quality] = spans
             else:
                 scores[quality] = 0.0
         else:
@@ -575,22 +605,33 @@ def hamiltonian_reward(
         gold = _gold_parse(meta["dqdt"])
         if gold:
             coord = meta.get("coordinates", "x")
-            score, spans = _find_derivative(expressions, gold, var=coord, substitutions=subs)
+            score, _expr_spans = _find_derivative(
+                expressions,
+                gold,
+                var=coord,
+                substitutions=subs,
+            )
             if score == 0.0 and coord != "q":
-                score, spans = _find_derivative(expressions, gold, var="q", substitutions=subs)
+                score, _expr_spans = _find_derivative(
+                    expressions,
+                    gold,
+                    var="q",
+                    substitutions=subs,
+                )
             scores["q_dqdt"] = score
-            if spans:
-                scored_spans["q_dqdt"] = spans
         else:
             scores["q_dqdt"] = 0.0
 
     if meta.get("dpdt"):
         gold = _gold_parse(meta["dpdt"])
         if gold:
-            score, spans = _find_derivative(expressions, gold, var="p", substitutions=subs)
+            score, _expr_spans = _find_derivative(
+                expressions,
+                gold,
+                var="p",
+                substitutions=subs,
+            )
             scores["q_dpdt"] = score
-            if spans:
-                scored_spans["q_dpdt"] = spans
         else:
             scores["q_dpdt"] = 0.0
 
