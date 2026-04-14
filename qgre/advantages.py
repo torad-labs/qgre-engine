@@ -1166,19 +1166,21 @@ class QGREStepAdvantageEstimator:
             # RL3-008: Track skipped qualities and raise if all skipped due to SHAPE MISMATCH
             skipped_count = 0
             shape_mismatch_count = 0
+            # Uniform fallback mask: when a quality has a non-zero advantage
+            # but no scored_span (model got it wrong → no matching expression
+            # to span), assign advantage uniformly across all tokens. Without
+            # this, the gradient signal for failed qualities is lost entirely.
+            uniform_mask = torch.ones(seq_len, device=device, dtype=dtype)
+
             for quality_name in batch_active_qualities[i]:
                 if quality_name not in masks:
-                    # A-5: Log warning when quality missing from masks
-                    if not hasattr(self, "_quality_mask_mismatch_count"):
-                        self._quality_mask_mismatch_count = 0
-                    self._quality_mask_mismatch_count += 1
-                    if self._quality_mask_mismatch_count <= 5:
-                        _logger.warning(
-                            f"A-5: Quality '{quality_name}' in active_qualities but not in token_masks "
-                            f"for sample {i}. Skipping. Total occurrences: {self._quality_mask_mismatch_count}",
-                        )
-                    skipped_count += 1
-                    continue
+                    q_adv = all_quality_advs[i].get(quality_name, 0.0)
+                    if abs(q_adv) > 1e-10:
+                        # Non-zero advantage but no span — use uniform fallback
+                        masks[quality_name] = uniform_mask
+                    else:
+                        skipped_count += 1
+                        continue
                 q_adv = all_quality_advs[i].get(quality_name, 0.0)
                 skip_quality = abs(q_adv) < 1e-10
                 q_mask = masks[quality_name]
