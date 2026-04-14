@@ -101,7 +101,7 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
     for name, grad in current_grads.items():
         if name not in _prev_grads:
             continue
-        prev = _prev_grads[name]
+        prev = _prev_grads[name].to(grad.device)
         if prev.shape != grad.shape:
             continue  # Shape changed (e.g., model restructured) — skip
         n1 = grad.norm().item()
@@ -137,7 +137,7 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
 
     # Cache current gradients for next step's temporal comparison.
     # Clone to avoid holding references to the autograd graph.
-    _prev_grads = {name: grad.detach().clone() for name, grad in current_grads.items()}
+    _prev_grads = {name: grad.detach().cpu().clone() for name, grad in current_grads.items()}
 
     return {
         # Primary signal (temporal — what the detector uses)

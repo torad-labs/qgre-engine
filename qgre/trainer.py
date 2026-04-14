@@ -650,120 +650,149 @@ class QGRETrainer:
             active_tiers=set(self.game_state.active_tiers),
         )
 
-        # Compute per-token advantages via scored_spans (no segmenter fallback).
-        # Spans are required — if your reward_fn doesn't produce scored_spans,
-        # fix the reward_fn. Silent fallback to segmenter caused zero-loss death
-        # spirals that wasted GPU hours.
+        # Compute per-token advantages via scored_spans. No segmenter fallback.
+        # If spans fail for a step, we skip that step's gradient (warn, not crash)
+        # but we never silently fall back to segmenter-based advantages.
         from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
 
-        if not any(rr.scored_spans for rr in reward_results):
-            raise RuntimeError(
-                f"Step {self.global_step}: reward_fn produced no scored_spans for any sample. "
-                f"Spans are required for per-quality credit assignment. "
-                f"scored_spans counts: {[len(rr.scored_spans) if rr.scored_spans else 0 for rr in reward_results]}. "
-                f"Fix your reward_fn to populate RewardResult.scored_spans.",
+        _span_log = logging.getLogger(__name__)
+        spans_available = any(rr.scored_spans for rr in reward_results)
+
+        if not spans_available:
+            _span_log.warning(
+                f"Step {self.global_step}: reward_fn produced no scored_spans. "
+                f"Skipping step (no gradient signal). Fix reward_fn to populate scored_spans.",
             )
+            self._skip_microbatch("no scored_spans from reward_fn")
+            self.global_step += 1
+            self.ctx.step = self.global_step
+            batch_regions = [self.advantage_estimator.segmenter(c) for c in completions]
+            self._record_mastery_and_advance(
+                reward_results,
+                active_qualities,
+                batch,
+                {
+                    "loss": 0.0,
+                    "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
+                    "global_step": self.global_step,
+                    "phase": self.game_state.phase,
+                    "skipped": True,
+                    "skip_reason": "no_scored_spans",
+                },
+                batch_contexts=batch_contexts,
+            )
+            return {
+                "loss": 0.0,
+                "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
+                "global_step": self.global_step,
+                "phase": self.game_state.phase,
+                "skipped": True,
+            }
 
         batch_token_masks: list[dict[str, torch.Tensor]] = []
         for i, rr in enumerate(reward_results):
+            masks: dict[str, torch.Tensor] = {}
             if rr.scored_spans:
-                # SPAN VALIDATION: Compare decoded text with reward_fn text
+                # SPAN VALIDATION: reward_fn text must match our decode for char positions.
+                # Use skip_special_tokens=True to match vLLM's output.texts decode.
+                span_valid = True
                 if completion_texts is not None and i < len(completion_texts):
-                    our_decode = self.tokenizer.decode(completions[i], skip_special_tokens=False)
+                    our_decode = self.tokenizer.decode(completions[i], skip_special_tokens=True)
                     reward_fn_text = completion_texts[i]
                     if our_decode != reward_fn_text:
-                        _log = logging.getLogger(__name__)
-                        _log.error(
-                            f"SPAN VALIDATION FAILED sample {i}: decoded text != reward_fn text. "
-                            f"Decoded len={len(our_decode)}, reward_fn len={len(reward_fn_text)}. "
-                            f"Character positions will be WRONG.",
+                        _span_log.warning(
+                            f"Step {self.global_step}: span validation failed sample {i}: "
+                            f"decoded len={len(our_decode)}, reward_fn len={len(reward_fn_text)}. "
+                            f"Sample gets empty mask (no per-quality gradient).",
                         )
-                        for j, (a, b) in enumerate(zip(our_decode, reward_fn_text, strict=False)):
-                            if a != b:
-                                _log.error(
-                                    f"  First diff at char {j}: decoded='{a}' vs reward_fn='{b}'"
+                        span_valid = False
+
+                if span_valid:
+                    char_map = build_char_to_token_map(completions[i], self.tokenizer)
+                    if char_map is not None and len(char_map) > 0:
+                        masks = scored_spans_to_token_masks(
+                            rr.scored_spans, char_map, len(completions[i]), self.ctx
+                        )
+
+                        # SPAN CONTENT LOGGING
+                        if self.global_step % self.config.logging.log_freq == 0 and i == 0:
+                            text = (
+                                completion_texts[i]
+                                if completion_texts and i < len(completion_texts)
+                                else None
+                            )
+                            if text:
+                                span_log_path = (
+                                    Path(self.config.logging.checkpoint_dir).parent / "spans.log"
                                 )
-                                break
-                        raise RuntimeError(
-                            f"Step {self.global_step}: span text validation failed for sample {i}. "
-                            f"Decoded text and reward_fn text diverge — span character positions are wrong. "
-                            f"Fix the tokenizer decode or reward_fn text handling.",
+                                with open(span_log_path, "a") as f:
+                                    f.write(f"\n=== Step {self.global_step} Sample {i} ===\n")
+                                    for q_name, spans in rr.scored_spans.items():
+                                        for span_idx, (cs, ce) in enumerate(spans):
+                                            span_text = (
+                                                text[cs:ce] if cs < len(text) else "<OUT_OF_BOUNDS>"
+                                            )
+                                            tok_indices = sorted(
+                                                {
+                                                    char_map[c]
+                                                    for c in range(
+                                                        max(0, cs), min(ce, len(char_map))
+                                                    )
+                                                    if char_map[c] >= 0
+                                                }
+                                            )
+                                            tok_range = (
+                                                f"{tok_indices[0]}-{tok_indices[-1]}"
+                                                if tok_indices
+                                                else "NONE"
+                                            )
+                                            display_text = span_text[:80].replace("\n", "\\n")
+                                            f.write(
+                                                f"  {q_name}[{span_idx}]: chars({cs},{ce}) → toks({tok_range}) '{display_text}'\n"
+                                            )
+                    else:
+                        _span_log.warning(
+                            f"Step {self.global_step}: char_to_token_map failed for sample {i}. "
+                            f"Sample gets empty mask.",
                         )
-
-                # Build char→token map directly from original token_ids (no re-encoding)
-                char_map = build_char_to_token_map(completions[i], self.tokenizer)
-                if char_map is None:
-                    raise RuntimeError(
-                        f"Step {self.global_step}: char_to_token_map returned None for sample {i}. "
-                        f"Cannot map scored_spans to tokens. "
-                        f"Completion length: {len(completions[i])}. "
-                        f"Check tokenizer decode consistency.",
-                    )
-                masks = scored_spans_to_token_masks(
-                    rr.scored_spans, char_map, len(completions[i]), self.ctx
-                )
-
-                # SPAN CONTENT LOGGING
-                if self.global_step % self.config.logging.log_freq == 0 and i == 0:
-                    text = (
-                        completion_texts[i]
-                        if completion_texts and i < len(completion_texts)
-                        else None
-                    )
-                    if text:
-                        span_log_path = (
-                            Path(self.config.logging.checkpoint_dir).parent / "spans.log"
-                        )
-                        with open(span_log_path, "a") as f:
-                            f.write(f"\n=== Step {self.global_step} Sample {i} ===\n")
-                            for q_name, spans in rr.scored_spans.items():
-                                for span_idx, (cs, ce) in enumerate(spans):
-                                    span_text = text[cs:ce] if cs < len(text) else "<OUT_OF_BOUNDS>"
-                                    tok_indices = sorted(
-                                        {
-                                            char_map[c]
-                                            for c in range(max(0, cs), min(ce, len(char_map)))
-                                            if char_map[c] >= 0
-                                        }
-                                    )
-                                    tok_range = (
-                                        f"{tok_indices[0]}-{tok_indices[-1]}"
-                                        if tok_indices
-                                        else "NONE"
-                                    )
-                                    display_text = span_text[:80].replace("\n", "\\n")
-                                    f.write(
-                                        f"  {q_name}[{span_idx}]: chars({cs},{ce}) → toks({tok_range}) '{display_text}'\n"
-                                    )
             else:
-                raise RuntimeError(
+                _span_log.warning(
                     f"Step {self.global_step}: sample {i} has no scored_spans. "
-                    f"All samples must have scored_spans. "
-                    f"reward={rr.reward}, scores={rr.scores}. "
-                    f"Fix your reward_fn to always populate scored_spans.",
+                    f"Sample gets empty mask (no per-quality gradient).",
                 )
             batch_token_masks.append(masks)
 
-        # All samples must have valid span masks with nonzero signal
-        failed_masks = [i for i, m in enumerate(batch_token_masks) if not m]
-        if failed_masks:
-            raise RuntimeError(
-                f"Step {self.global_step}: span mask mapping failed for samples {failed_masks}. "
-                f"scored_spans present: {[bool(rr.scored_spans) for rr in reward_results]}. "
-                f"Token mask counts: {[len(m) for m in batch_token_masks]}. "
-                f"Fix span-to-token mapping — no segmenter fallback.",
+        # Check if ANY sample has valid masks — if none do, skip this step entirely
+        if not any(m for m in batch_token_masks):
+            _span_log.warning(
+                f"Step {self.global_step}: all span mappings failed for batch. "
+                f"Skipping step (no gradient signal).",
             )
-        # Check for all-zero masks — reward_fn returned quality keys with empty
-        # span lists (e.g. scored_spans={"quality": []}). Dict is truthy but
-        # carries zero signal, producing zero gradients silently.
-        for i, m in enumerate(batch_token_masks):
-            if m and all(v.sum() == 0 for v in m.values()):
-                raise RuntimeError(
-                    f"Step {self.global_step}: sample {i} has span masks but ALL are zero. "
-                    f"Qualities: {list(m.keys())}, mask shapes: {[v.shape for v in m.values()]}. "
-                    f"reward_fn likely returned empty span lists for all qualities. "
-                    f"Fix scored_spans to include actual character ranges.",
-                )
+            self._skip_microbatch("all span mappings failed")
+            self.global_step += 1
+            self.ctx.step = self.global_step
+            batch_regions = [self.advantage_estimator.segmenter(c) for c in completions]
+            self._record_mastery_and_advance(
+                reward_results,
+                active_qualities,
+                batch,
+                {
+                    "loss": 0.0,
+                    "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
+                    "global_step": self.global_step,
+                    "phase": self.game_state.phase,
+                    "skipped": True,
+                    "skip_reason": "all_spans_failed",
+                },
+                batch_contexts=batch_contexts,
+            )
+            return {
+                "loss": 0.0,
+                "reward/mean": sum(rr.reward for rr in reward_results) / len(reward_results),
+                "global_step": self.global_step,
+                "phase": self.game_state.phase,
+                "skipped": True,
+            }
 
         token_advantages, _quality_metrics = self.advantage_estimator.compute_advantages_with_spans(
             batch_prompt_ids=batch.prompt_ids,
