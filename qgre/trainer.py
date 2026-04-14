@@ -3338,32 +3338,20 @@ class QGRETrainer:
                         best_rr = max(reward_results, key=lambda r: r.reward)
                         last_scores = best_rr.scores
                         groups = [
-                            ("Format", [("format", "q_format"), ("has_math", "q_has_math")]),
                             (
-                                "Physics",
+                                "Energy",
                                 [
-                                    ("V_correct", "q_V_correct"),
-                                    ("correct_H", "q_correct_H"),
-                                    ("T_uses_p", "q_T_uses_p"),
-                                    ("momentum_def", "q_momentum_defined"),
+                                    ("kinetic T", "q_kinetic"),
+                                    ("potential V", "q_potential"),
+                                    ("hamiltonian H", "q_hamiltonian"),
                                 ],
                             ),
                             (
                                 "Equations",
                                 [
-                                    ("dq/dt", "q_correct_dqdt"),
-                                    ("dp/dt", "q_correct_dpdt"),
+                                    ("dq/dt", "q_dqdt"),
+                                    ("dp/dt", "q_dpdt"),
                                     ("consistency", "q_consistency"),
-                                    ("coefficient", "q_correct_coefficient"),
-                                    ("derivative", "q_derivative_correct"),
-                                ],
-                            ),
-                            (
-                                "Momentum",
-                                [
-                                    ("defines_p", "q_defines_momentum"),
-                                    ("T_in_p", "q_T_in_momentum"),
-                                    ("H_in_p", "q_H_in_momentum"),
                                 ],
                             ),
                         ]
