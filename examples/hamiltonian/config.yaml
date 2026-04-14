@@ -7,7 +7,7 @@ model:
   lora_alpha: 64
   load_in_4bit: true
   fast_inference: true
-  gpu_memory_utilization: 0.25        # Lower cap — MERGE strategy shares base weights with vLLM
+  gpu_memory_utilization: 0.17        # Minimal viable KV cache for 4 sequences
   weight_sync_strategy: merge         # Merge LoRA → base pre-generate, unmerge post-generate
                                       # Eliminates ~1.4 GB vLLM weight duplication + LoRA buffer
   pad_token: "<|fim_pad|>"      # Must NOT be EOS, stop token, or vision-reserved
@@ -46,7 +46,7 @@ generation:
   top_p: 0.8
   top_k: 20
   min_p: 0.1
-  lora_dropout_rate: 0.15
+  lora_dropout_rate: 0.0              # Disabled — was masking real capability for 3000 steps
   lora_dropout_anneal_steps: 3000
   max_tokens: 4096
   repetition_penalty: 1.2
@@ -62,6 +62,7 @@ algorithm:
   clip_ratio_high: 0.28
   llds_coef: 0.05
   loss_type: dr_grpo
+  use_triton_logprobs: true   # Triton fused forward, PyTorch backward
   segmenter: hamiltonian
   length_penalty_coef: 0.005
   length_penalty_threshold: 0.6

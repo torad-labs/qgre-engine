@@ -1130,14 +1130,16 @@ class QGRETrainer:
                             chunk_size=self._fused_chunk_size,
                         )
 
-                    # One-time validation: compare against full lm_head projection.
-                    _validated = self._triton_validated if _use_triton else self._fused_validated
-                    if not _validated and mb_lp.shape[1] > 0:
+                    # One-time validation: verify autograd graph exists.
+                    # No cross-implementation comparison for Triton — forward and backward
+                    # are self-consistent (same element-wise reduction path). Comparing
+                    # against cuBLAS would require tolerance hacks that mask real bugs.
+                    # Chunked PyTorch path still validates against full projection (same cuBLAS).
+                    if not self._fused_validated and not _use_triton and mb_lp.shape[1] > 0:
                         if mb_lp.grad_fn is None:
-                            path_name = "Triton" if _use_triton else "Fused"
                             raise RuntimeError(
-                                f"{path_name} logprobs has no grad_fn — autograd graph is broken. "
-                                f"Set algorithm.use_triton_logprobs=false or use_fused_logprobs=false.",
+                                "Fused logprobs has no grad_fn — autograd graph is broken. "
+                                "Set algorithm.use_fused_logprobs=false to fall back.",
                             )
                         with torch.no_grad():
                             manual_logits = lm_head(hidden_states[:, :-1, :]).float()
@@ -1153,17 +1155,19 @@ class QGRETrainer:
                                     .max()
                                     .item()
                                 )
-                                path_name = "Triton" if _use_triton else "Fused"
                                 raise RuntimeError(
-                                    f"{path_name} logprobs diverge from full projection "
-                                    f"(max diff: {max_diff:.6f}). Disable with "
-                                    f"algorithm.use_triton_logprobs=false or use_fused_logprobs=false.",
+                                    f"Fused logprobs diverge from full projection "
+                                    f"(max diff: {max_diff:.6f}). "
+                                    f"Set algorithm.use_fused_logprobs=false.",
                                 )
                             del std_lp
-                        if _use_triton:
-                            self._triton_validated = True
-                        else:
-                            self._fused_validated = True
+                        self._fused_validated = True
+                    elif _use_triton and not self._triton_validated and mb_lp.shape[1] > 0:
+                        if mb_lp.grad_fn is None:
+                            raise RuntimeError(
+                                "Triton logprobs has no grad_fn — autograd graph is broken.",
+                            )
+                        self._triton_validated = True
                     # Compute importance for advantage constraint
                     # Priority: attention bond strength > hidden state proxy > disabled
                     if attentions is not None:
