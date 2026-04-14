@@ -23,9 +23,40 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+# Reward ceiling for QGRE qualities (clipped to [0, 1]). At or above this
+# value, the advantage is zeroed — nothing left to learn. Conceptually
+# distinct from aspiration_target (where the gradient pushes toward).
+_REWARD_CEILING = 1.0
+
 # Penalty multiplier for repeated spans (applied to abs(q_adv))
 # 1.5 means repeating gives -1.5 * |q_adv| regardless of sign
 REPETITION_PENALTY_MULTIPLIER = 1.5
+
+
+def _aspiration_warmup(ctx: PromptContext | TrainingContext | None) -> float:
+    """Extract and clamp aspiration warmup from a context object."""
+    w = getattr(ctx, "aspiration_warmup", 1.0) if ctx else 1.0
+    return max(0.0, min(1.0, w))
+
+
+def _aspiration_advantage(
+    r: float,
+    v: float,
+    beta: float,
+    warmup: float,
+    target: float,
+) -> float:
+    """Compute advantage with aspiration gap, or zero if reward is saturated.
+
+    Returns 0.0 when r >= _REWARD_CEILING (nothing to learn).
+    Otherwise returns (r - v) + beta * warmup * (r - target).
+    """
+    if r >= _REWARD_CEILING:
+        return 0.0
+    adv = r - v
+    if beta > 0:
+        adv += beta * warmup * (r - target)
+    return adv
 
 
 # =============================================================================
@@ -461,9 +492,12 @@ class QGREStepAdvantageEstimator:
         self._quality_seen: dict[int, set[str]] = defaultdict(set)
         # Legacy step-seen for backward compat (deprecated)
         self._step_seen: dict[int, set[int]] = defaultdict(set)
-        # Target-aware aspiration gap
+        # Target-aware aspiration gap. Default target is 1.0 (perfect score)
+        # so that the `r >= target → zero advantage` short-circuit only fires
+        # on already-perfect samples, matching pre-configurable behavior.
+        # Trainer overrides both from spo_cfg at construction.
         self._aspiration_beta = 0.0  # Set from config via trainer
-        self._aspiration_target = 0.0
+        self._aspiration_target = 1.0
         self._advantage_scale = 1.0  # Set from config via trainer
         # AE-R3-01: Initialize clip_advantage for token-level clipping
         self._clip_advantage = 10.0  # Default, overridden by config
@@ -780,27 +814,18 @@ class QGREStepAdvantageEstimator:
                     v = batch_means[step_num]
                     self._step_seen[pid].add(step_num)
 
-                # Perfect score (1.0) = zero advantage. Nothing to learn — don't waste
-                # gradient reinforcing specific tokens. Imperfect = push toward 1.0.
-                if r >= 1.0:
-                    step_advs[step_num][i] = 0.0
-                else:
-                    step_advs[step_num][i] = r - v
-                    # Aspiration gap: push toward perfection (1.0).
-                    # ADV-R2-1: Safe attribute access with getattr
-                    if self._aspiration_beta > 0:
-                        ctx = (
-                            batch_contexts[i]
-                            if batch_contexts
-                            and i < len(batch_contexts)
-                            and batch_contexts[i] is not None
-                            else None
-                        )
-                        warmup = getattr(ctx, "aspiration_warmup", 1.0) if ctx else 1.0
-                        warmup = max(
-                            0.0, min(1.0, warmup)
-                        )  # Clamp to [0, 1] to prevent double application
-                        step_advs[step_num][i] += self._aspiration_beta * warmup * (r - 1.0)
+                ctx = (
+                    batch_contexts[i]
+                    if batch_contexts and i < len(batch_contexts) and batch_contexts[i] is not None
+                    else None
+                )
+                step_advs[step_num][i] = _aspiration_advantage(
+                    r,
+                    v,
+                    self._aspiration_beta,
+                    _aspiration_warmup(ctx),
+                    self._aspiration_target,
+                )
 
                 # Auto-reset on distribution shift: detect sustained divergence
                 # Skip on first observation (baseline not calibrated yet)
@@ -1040,8 +1065,7 @@ class QGREStepAdvantageEstimator:
         for i in range(batch_size):
             prompt_ctx = batch_contexts[i] if batch_contexts and i < len(batch_contexts) else None
             pid = prompt_ctx.prompt_id if prompt_ctx is not None else batch_prompt_ids[i]
-            warmup = getattr(prompt_ctx, "aspiration_warmup", 1.0) if prompt_ctx else 1.0
-            warmup = max(0.0, min(1.0, warmup))  # Clamp to [0, 1] to prevent double application
+            warmup = _aspiration_warmup(prompt_ctx)
 
             quality_advs: dict[str, float] = {}
 
@@ -1054,15 +1078,13 @@ class QGREStepAdvantageEstimator:
                     v = self._baseline_prior
                     self._quality_seen[pid].add(quality_name)
 
-                # Perfect score (1.0) = zero advantage — nothing to learn
-                if r >= 1.0:
-                    quality_advs[quality_name] = 0.0
-                else:
-                    adv = r - v
-                    # Aspiration gap: push toward perfection (1.0, not mastery_threshold)
-                    if self._aspiration_beta > 0:
-                        adv += self._aspiration_beta * warmup * (r - 1.0)
-                    quality_advs[quality_name] = adv
+                quality_advs[quality_name] = _aspiration_advantage(
+                    r,
+                    v,
+                    self._aspiration_beta,
+                    warmup,
+                    self._aspiration_target,
+                )
 
                 # Variance-aware baseline learning rate
                 effective_lr = self.lr
@@ -1315,7 +1337,7 @@ def compute_advantages_vprm(
     frontier_amplification: float = 2.0,
     min_regions: int = 2,
     aspiration_beta: float = 0.0,
-    aspiration_target: float = 0.0,
+    aspiration_target: float = 1.0,  # Perfect score; match hardcoded pre-config default
     clip_advantage: float | None = None,
     ctx: TrainingContext | None = None,
     token_masks: dict[str, torch.Tensor] | None = None,  # Span-based masks (if available)
@@ -1439,8 +1461,13 @@ def compute_advantages_vprm(
             )
             compute_advantages_vprm._virtual_logged = True  # type: ignore[attr-defined]
 
-    # Perfect score = zero advantage. Imperfect = push toward 1.0.
-    # Include virtual steps (generated by frontier amplification) in aspiration bonus loop
+    # Apply aspiration gap per step. Inlined rather than calling
+    # _aspiration_advantage() because step_advs already contains a
+    # critic-derived advantage (not a raw r-v baseline), so the helper's
+    # (r - v) computation doesn't apply here.
+    # NOTE: warmup is NOT applied here — the caller (trainer.py) pre-multiplies
+    # aspiration_beta by the per-sample warmup from batch_contexts before
+    # passing it in. Applying warmup again would double-count it.
     all_step_keys = list(step_advs.keys())
     for step_num in all_step_keys:
         if step_num not in step_qualities:
@@ -1450,10 +1477,10 @@ def compute_advantages_vprm(
             step_reward = sum(reward_result.scores.get(q, 0.0) for q in qualities) / max(
                 len(qualities), 1
             )
-            if step_reward >= 1.0:
+            if step_reward >= _REWARD_CEILING:
                 step_advs[step_num] = 0.0
             elif aspiration_beta > 0:
-                step_advs[step_num] += aspiration_beta * (step_reward - 1.0)
+                step_advs[step_num] += aspiration_beta * (step_reward - aspiration_target)
 
     apply_frontier_amplification(step_advs, step_nums, frontier_steps, frontier_amplification)
 

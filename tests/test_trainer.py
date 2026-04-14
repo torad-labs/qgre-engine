@@ -33,6 +33,7 @@ def _cfg() -> QGREConfig:
     cfg = QGREConfig()
     cfg.algorithm.step_qualities = _MOCK_SQ
     cfg.algorithm.use_fused_logprobs = False  # Mock models have no lm_head
+    cfg.algorithm.use_triton_logprobs = False  # Triton requires CUDA; tests run on CPU
     cfg.model.path = "test-model"
     cfg.model.pad_token = "<|fim_pad|>"
     cfg.model.pad_token_id = 151662

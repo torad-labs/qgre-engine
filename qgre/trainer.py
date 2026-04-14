@@ -296,10 +296,46 @@ class QGRETrainer:
         self._fused_validated = False  # One-time validation on first use
 
         # Triton fused logprobs: single GPU launch replaces chunked path.
-        # Forward via Triton kernel (zero vocab-tensor allocation), backward via PyTorch.
+        # Full Triton forward + backward — zero [seq, vocab] allocation, self-
+        # consistent gradients.
+        #
+        # Triton requires CUDA. Disable on CPU-only environments (used for
+        # tests and offline smoke checks) without raising, since there's no
+        # GPU for the kernels to run on. On CUDA-capable machines, missing
+        # triton install is a hard error: don't silently fall back to cuBLAS,
+        # because that changes numerics mid-run and hides configuration bugs.
         self._use_triton_logprobs = config.algorithm.use_triton_logprobs
-        self._triton_available: bool | None = None  # Lazy detection on first use
+        if self._use_triton_logprobs:
+            from qgre.triton_logprobs import HAS_TRITON as _HAS_TRITON
+
+            if not torch.cuda.is_available():
+                logging.getLogger(__name__).info(
+                    "CUDA unavailable — disabling Triton logprobs and using "
+                    "the chunked cuBLAS path (CPU-only environment).",
+                )
+                self._use_triton_logprobs = False
+            elif not _HAS_TRITON:
+                raise RuntimeError(
+                    "algorithm.use_triton_logprobs=true but triton is not "
+                    "installed. Install triton (pip install triton) or set "
+                    "algorithm.use_triton_logprobs=false to use the chunked "
+                    "cuBLAS path. No silent fallback — the numerics differ.",
+                )
         self._triton_validated = False
+
+        # Advantage observability — populated each batch at the SPO filter
+        # point, then merged into the metrics dict on both the normal and
+        # filtered-early-return branches. Zero-valued defaults so the metrics
+        # schema is consistent on every step (dashboards/CSV exports expect
+        # the same columns every row).
+        self._last_advantage_stats: dict[str, float] = {
+            "adv/abs_max": 0.0,
+            "adv/abs_mean": 0.0,
+            "adv/min": 0.0,
+            "adv/max": 0.0,
+            "adv/nonzero_count": 0.0,
+            "adv/nonzero_fraction": 0.0,
+        }
 
         # Completion logger (lazily initialized on first log to handle checkpoint resume)
         self._completion_logger_path = config.logging.completion_dir
@@ -868,11 +904,28 @@ class QGRETrainer:
             comp_attention_mask=comp_attention_mask,
         )
 
+        # Advantage observability — diagnoses "training stuck" by distinguishing
+        # "reward is flat" from "filter too aggressive" from "aspiration zeroing".
+        adv_abs = step.padded_advs.abs()
+        adv_nonzero_mask = adv_abs > self.config.algorithm.spo_filter_threshold
+        has_elements = adv_abs.numel() > 0
+        nonzero_count = int(adv_nonzero_mask.sum().item())
+        if has_elements:
+            advantage_stats: dict[str, float] = {
+                "adv/abs_max": float(adv_abs.max().item()),
+                "adv/abs_mean": float(adv_abs.mean().item()),
+                "adv/min": float(step.padded_advs.min().item()),
+                "adv/max": float(step.padded_advs.max().item()),
+                "adv/nonzero_count": float(nonzero_count),
+                "adv/nonzero_fraction": nonzero_count / adv_abs.numel(),
+            }
+        else:
+            advantage_stats = dict(self._last_advantage_stats)  # keep schema consistent
+        self._last_advantage_stats = advantage_stats
+
         # SPO low-advantage filter: skip sequences with near-zero signal (PLAN.md lines 658-671)
         if self.config.algorithm.mode == "spo":
-            useful = (step.padded_advs.abs() > self.config.algorithm.spo_filter_threshold).any(
-                dim=-1
-            )
+            useful = adv_nonzero_mask.any(dim=-1)
             # Track filter stats for data starvation detection
             batch_total = len(step)
             batch_passed = useful.sum().item()
@@ -901,6 +954,7 @@ class QGRETrainer:
                     "global_step": self.global_step,
                     "phase": self.game_state.phase,
                     "skipped": True,
+                    **advantage_stats,  # Preserve advantage observability on filtered steps
                 }
                 self._record_mastery_and_advance(
                     step.reward_results,
@@ -1088,41 +1142,26 @@ class QGRETrainer:
                     attentions = None
                 if hidden_states is not None and lm_head is not None:
                     # Fused path: compute logprobs without materializing full [seq, vocab] tensor.
-                    # Priority: Triton kernel > chunked lm_head + checkpoint
-                    _use_triton = self._use_triton_logprobs and self._triton_available is not False
-                    mb_lp: torch.Tensor | None = None
+                    # Triton kernel availability is decided at init (fail-fast)
+                    # — no runtime try/except. A kernel exception here means a
+                    # real bug (bad indexing, CUDA error, label out of vocab),
+                    # not a degraded-mode condition. Silent fallback would
+                    # change numerics mid-run and hide the bug.
+                    _use_triton = self._use_triton_logprobs
                     if _use_triton:
-                        try:
-                            from qgre.triton_logprobs import (
-                                HAS_TRITON,
-                                triton_logprobs_with_grad,
+                        from qgre.triton_logprobs import triton_logprobs_with_grad
+
+                        if not self._triton_validated:
+                            logging.getLogger(__name__).info(
+                                "Triton fused logprobs enabled — single GPU launch, "
+                                "zero vocab-tensor allocation in forward and backward",
                             )
-
-                            if not HAS_TRITON:
-                                self._triton_available = False
-                                _use_triton = False
-                            else:
-                                if self._triton_available is None:
-                                    logging.getLogger(__name__).info(
-                                        "Triton fused logprobs enabled — single GPU launch, "
-                                        "zero vocab-tensor allocation in forward",
-                                    )
-                                    self._triton_available = True
-                                mb_lp = triton_logprobs_with_grad(
-                                    hidden_states[:, :-1, :],
-                                    lm_head,
-                                    mb_ids[:, 1:],
-                                )
-                        except (ImportError, ValueError, RuntimeError) as e:
-                            if self._triton_available is None:
-                                logging.getLogger(__name__).warning(
-                                    f"Triton logprobs unavailable ({e}), falling back to chunked path",
-                                )
-                            self._triton_available = False
-                            _use_triton = False
-
-                    if mb_lp is None:
-                        _use_triton = False
+                        mb_lp = triton_logprobs_with_grad(
+                            hidden_states[:, :-1, :],
+                            lm_head,
+                            mb_ids[:, 1:],
+                        )
+                    else:
                         mb_lp = chunked_logprobs_from_hidden(
                             hidden_states[:, :-1, :],
                             lm_head,
@@ -1130,43 +1169,28 @@ class QGRETrainer:
                             chunk_size=self._fused_chunk_size,
                         )
 
-                    # One-time validation: verify autograd graph exists.
-                    # No cross-implementation comparison for Triton — forward and backward
-                    # are self-consistent (same element-wise reduction path). Comparing
-                    # against cuBLAS would require tolerance hacks that mask real bugs.
-                    # Chunked PyTorch path still validates against full projection (same cuBLAS).
+                    # One-time validation: verify autograd graph + cross-check
+                    # against reference. Tolerances: chunked=1e-3 (same cuBLAS),
+                    # Triton=5e-3 (fp32 element-wise vs cuBLAS bf16 accumulator).
                     if not self._fused_validated and not _use_triton and mb_lp.shape[1] > 0:
-                        if mb_lp.grad_fn is None:
-                            raise RuntimeError(
-                                "Fused logprobs has no grad_fn — autograd graph is broken. "
-                                "Set algorithm.use_fused_logprobs=false to fall back.",
-                            )
-                        with torch.no_grad():
-                            manual_logits = lm_head(hidden_states[:, :-1, :]).float()
-                            std_lp = logprobs_from_logits(manual_logits, mb_ids[:, 1:])
-                            del manual_logits
-                            min_len_v = min(mb_lp.shape[1], std_lp.shape[1])
-                            if not torch.allclose(
-                                mb_lp[:, :min_len_v].detach(), std_lp[:, :min_len_v], atol=1e-3
-                            ):
-                                max_diff = (
-                                    (mb_lp[:, :min_len_v].detach() - std_lp[:, :min_len_v])
-                                    .abs()
-                                    .max()
-                                    .item()
-                                )
-                                raise RuntimeError(
-                                    f"Fused logprobs diverge from full projection "
-                                    f"(max diff: {max_diff:.6f}). "
-                                    f"Set algorithm.use_fused_logprobs=false.",
-                                )
-                            del std_lp
+                        self._validate_logprob_path(
+                            mb_lp,
+                            hidden_states,
+                            lm_head,
+                            mb_ids,
+                            atol=1e-3,
+                            path_name="fused",
+                        )
                         self._fused_validated = True
                     elif _use_triton and not self._triton_validated and mb_lp.shape[1] > 0:
-                        if mb_lp.grad_fn is None:
-                            raise RuntimeError(
-                                "Triton logprobs has no grad_fn — autograd graph is broken.",
-                            )
+                        self._validate_logprob_path(
+                            mb_lp,
+                            hidden_states,
+                            lm_head,
+                            mb_ids,
+                            atol=5e-3,
+                            path_name="triton",
+                        )
                         self._triton_validated = True
                     # Compute importance for advantage constraint
                     # Priority: attention bond strength > hidden state proxy > disabled
@@ -2032,6 +2056,8 @@ class QGRETrainer:
         reward_mean = sum(rr.reward for rr in step.reward_results) / len(step)
         metrics["reward/mean"] = reward_mean
         metrics["global_step"] = self.global_step
+        # Advantage observability — computed at filter time, see SPO filter above.
+        metrics.update(self._last_advantage_stats)
 
         # Track completion lengths for verbosity drift detection (uses filtered step data)
         comp_lengths = [len(c) for c in step.completions]
@@ -2088,6 +2114,7 @@ class QGRETrainer:
             accumulated_samples=self._accumulated_samples,
             resumed_mid_accumulation=getattr(self, "_resumed_mid_accumulation", False),
             fused_validated=getattr(self, "_fused_validated", False),
+            triton_validated=getattr(self, "_triton_validated", False),
             needs_weight_sync=getattr(self, "_needs_weight_sync", False),
             rng_state=torch.get_rng_state(),
             cuda_rng_state=torch.cuda.get_rng_state() if torch.cuda.is_available() else None,
@@ -2459,8 +2486,10 @@ class QGRETrainer:
         n_accum = self.config.training.gradient_accumulation_steps
         self._resumed_mid_accumulation = self.global_step % n_accum != 0
 
-        # Restore fused_validated from checkpoint — same weights, same validation status
+        # Restore validation flags from checkpoint — same weights, same validation status.
+        # Prevents wasted 1.2 GB cross-validation allocation on first step after resume.
         self._fused_validated = checkpoint.trainer.fused_validated
+        self._triton_validated = getattr(checkpoint.trainer, "triton_validated", False)
 
         # R3-T1: Restore MLflow run_id for cross-resume continuity
         self._mlflow_run_id = checkpoint.trainer.mlflow_run_id
@@ -2776,6 +2805,39 @@ class QGRETrainer:
         self._accumulation_count += 1
         self._accumulated_samples += sample_count
         self._accumulated_loss += loss_value
+
+    def _validate_logprob_path(
+        self,
+        mb_lp: torch.Tensor,
+        hidden_states: torch.Tensor,
+        lm_head: torch.nn.Module,
+        mb_ids: torch.Tensor,
+        *,
+        atol: float,
+        path_name: str,
+    ) -> None:
+        """One-time validation: verify grad_fn exists and output matches cuBLAS reference."""
+        if mb_lp.grad_fn is None:
+            raise RuntimeError(
+                f"{path_name} logprobs has no grad_fn — autograd graph is broken.",
+            )
+        with torch.no_grad():
+            manual_logits = lm_head(hidden_states[:, :-1, :]).float()
+            std_lp = logprobs_from_logits(manual_logits, mb_ids[:, 1:])
+            del manual_logits
+            min_len = min(mb_lp.shape[1], std_lp.shape[1])
+            max_diff = (mb_lp[:, :min_len].detach() - std_lp[:, :min_len]).abs().max().item()
+            del std_lp
+        if max_diff > atol:
+            raise RuntimeError(
+                f"{path_name} logprobs diverge from cuBLAS reference "
+                f"(max diff: {max_diff:.6f} > {atol}). "
+                f"Set algorithm.use_{path_name}_logprobs=false to fall back.",
+            )
+        logging.getLogger(__name__).info(
+            f"{path_name} logprobs validated (max diff vs cuBLAS: "
+            f"{max_diff:.2e}, within {atol} tolerance)",
+        )
 
     def _skip_microbatch(self, reason: str) -> None:
         """Mark a micro-batch as skipped (e.g., SPO filtered all samples).

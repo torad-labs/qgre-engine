@@ -55,8 +55,13 @@ if HAS_TRITON:
         label = tl.load(label_ptr + pid)
 
         if label >= vocab_size or label < 0:
+            # Invalid label: write -inf logprob, and lse=+inf so that
+            # softmax=exp(logit-inf)=0 in the backward pass — safely zeros
+            # out all contributions from this position. Using lse=0.0 would
+            # cause exp(logit-0) on real logits to produce astronomical
+            # wrong gradients in the backward kernel.
             tl.store(output_ptr + pid, float("-inf"))
-            tl.store(lse_ptr + pid, 0.0)
+            tl.store(lse_ptr + pid, float("inf"))
             return
 
         h_offs = tl.arange(0, hidden_dim)
@@ -267,6 +272,100 @@ if HAS_TRITON:
             mask=v_mask[:, None] & d_mask[None, :],
         )
 
+    @triton.jit
+    def _fused_logprob_grad_bias_kernel(
+        hidden_ptr,  # [total_positions, hidden_dim]
+        weight_ptr,  # [vocab, hidden_dim]
+        label_ptr,  # [total_positions]
+        lse_ptr,  # [total_positions] saved from forward
+        grad_output_ptr,  # [total_positions]
+        grad_bias_ptr,  # [vocab] output
+        bias_ptr,  # [vocab]
+        total_positions,
+        hidden_dim,
+        vocab_size,
+        BLOCK_V: tl.constexpr,
+        BLOCK_D: tl.constexpr,  # Tile hidden dim for logit recomputation
+    ):
+        """One program per vocab tile. Iterates over positions.
+
+        grad_bias[v] = sum_t (g[t] * (one_hot(label[t], v) - softmax[t, v]))
+
+        Recomputes softmax from saved lse using the same element-wise path as
+        forward/grad_hidden — self-consistent. No outer product with h, just
+        a reduction over positions, so the accumulator is [BLOCK_V] only.
+        1D grid: (n_vocab_tiles,).
+        """
+        vid = tl.program_id(0)
+        v_start = vid * BLOCK_V
+        v_offs = v_start + tl.arange(0, BLOCK_V)
+        v_mask = v_offs < vocab_size
+
+        # Accumulator: [BLOCK_V] fp32, tiny.
+        grad_b = tl.zeros([BLOCK_V], dtype=tl.float32)
+
+        # Bias values for this tile — loaded once, reused across positions
+        # inside the logit recomputation.
+        b_tile = tl.load(bias_ptr + v_offs, mask=v_mask, other=0.0).to(tl.float32)
+
+        for t in range(total_positions):
+            g = tl.load(grad_output_ptr + t).to(tl.float32)
+            label = tl.load(label_ptr + t)
+            lse = tl.load(lse_ptr + t).to(tl.float32)
+
+            # Recompute logits for this vocab tile — tile over hidden dim.
+            logit_accum = tl.zeros([BLOCK_V], dtype=tl.float32)
+            for k_start in range(0, hidden_dim, BLOCK_D):
+                k_offs = k_start + tl.arange(0, BLOCK_D)
+                k_mask = k_offs < hidden_dim
+                w_chunk = tl.load(
+                    weight_ptr + v_offs[:, None] * hidden_dim + k_offs[None, :],
+                    mask=v_mask[:, None] & k_mask[None, :],
+                    other=0.0,
+                ).to(tl.float32)  # [BLOCK_V, BLOCK_D]
+                h_k = tl.load(
+                    hidden_ptr + t * hidden_dim + k_offs,
+                    mask=k_mask,
+                    other=0.0,
+                ).to(tl.float32)  # [BLOCK_D]
+                logit_accum += tl.sum(w_chunk * h_k[None, :], axis=1)
+
+            logit_accum = logit_accum + b_tile
+
+            # Softmax from saved lse
+            softmax_v = tl.exp(tl.where(v_mask, logit_accum - lse, float("-inf")))
+
+            # diff = one_hot(label) - softmax
+            diff = -softmax_v
+            diff = tl.where(v_offs == label, diff + 1.0, diff)
+
+            grad_b += g * diff
+
+        tl.store(grad_bias_ptr + v_offs, grad_b, mask=v_mask)
+
+
+# Cached zero tensors used as the bias pointer argument when HAS_BIAS=False.
+# Triton dead-code eliminates the bias loads (HAS_BIAS is tl.constexpr), but
+# the kernel still needs a valid pointer argument. Cache is keyed by
+# (vocab_size, device_str). Sized to vocab_size so speculative prefetch on
+# any Triton build stays in-bounds.
+_DUMMY_BIAS_CACHE: dict[tuple[int, str], torch.Tensor] = {}
+
+
+def _dummy_bias_ptr(vocab_size: int, device: torch.device) -> torch.Tensor:
+    """Return a cached zero tensor of shape [vocab_size] on the given device.
+
+    Used as the bias pointer argument when HAS_BIAS=False, instead of
+    aliasing hidden states (which can be smaller than vocab_size for short
+    sequences and would read out-of-bounds under speculative prefetch).
+    """
+    key = (vocab_size, str(device))
+    cached = _DUMMY_BIAS_CACHE.get(key)
+    if cached is None:
+        cached = torch.zeros(vocab_size, dtype=torch.float32, device=device)
+        _DUMMY_BIAS_CACHE[key] = cached
+    return cached
+
 
 def _validate_triton_inputs(
     hidden_states: torch.Tensor,
@@ -322,6 +421,8 @@ def _run_triton_forward(
     result = torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
     lse_out = torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
     BLOCK_V = 128
+    # Shared sentinel when HAS_BIAS=False — sized to vocab_size and cached.
+    bias_arg = bias if has_bias else _dummy_bias_ptr(vocab_size, hidden_states.device)
 
     for b in range(batch):
         h = hidden_states[b].contiguous()
@@ -333,7 +434,7 @@ def _run_triton_forward(
             lab,
             result[b],
             lse_out[b],
-            bias if has_bias else h,  # dummy ptr when no bias
+            bias_arg,
             seq_len,
             hidden_dim,
             vocab_size,
@@ -369,9 +470,11 @@ def triton_logprobs_from_hidden(
         [batch, seq] log probabilities (float32), no grad_fn
     """
     if not HAS_TRITON:
-        from qgre.fused_logprobs import chunked_logprobs_from_hidden
-
-        return chunked_logprobs_from_hidden(hidden_states, lm_head, labels)
+        raise RuntimeError(
+            "triton_logprobs_from_hidden called but triton is not installed. "
+            "Use chunked_logprobs_from_hidden for the cuBLAS path — the "
+            "numerics differ, so the caller must choose explicitly.",
+        )
 
     batch, seq_len, hidden_dim, vocab_size, has_bias = _validate_triton_inputs(
         hidden_states,
@@ -447,28 +550,43 @@ class _TritonLogprobAutograd(torch.autograd.Function):
         vocab_size = weight.shape[0]
         BLOCK_V = 128
 
-        grad_hidden = torch.empty_like(hidden)  # Same dtype as hidden (bf16)
-        # bf16 accumulation: saves 594 MB vs fp32 (1.18 GB → 594 MB).
-        # SGD noise >> bf16 rounding. Optimizer upscales internally.
-        grad_weight = torch.zeros(weight.shape, dtype=weight.dtype, device=weight.device)
-        compute_grad_bias = has_bias and bias is not None and bias.requires_grad
-        grad_bias = (
-            torch.zeros(bias.shape, dtype=torch.float32, device=bias.device)
-            if compute_grad_bias
-            else None
-        )
+        # Bias gradient path: computed by a dedicated kernel below when the
+        # bias both exists and was asked for. If bias is absent or the
+        # autograd engine didn't mark it as needing grad, we return None.
+        compute_grad_bias = has_bias and bias is not None and ctx.needs_input_grad[2]
+        grad_bias: torch.Tensor | None = None
 
-        # Flatten batch × seq so grad_weight kernel processes all positions
-        # in one launch. No per-batch allocation — saves 1.2 GB.
+        # Empty sequence: no kernels to launch, return zero gradients.
+        # Must respect needs_input_grad for all three learnable inputs —
+        # returning None when the engine expects a tensor breaks accumulation.
+        if batch == 0 or seq_len == 0:
+            return (
+                torch.zeros_like(hidden) if ctx.needs_input_grad[0] else None,
+                torch.zeros_like(weight) if ctx.needs_input_grad[1] else None,
+                torch.zeros_like(bias) if compute_grad_bias else None,
+                None,
+            )
+
+        # Flatten batch × seq so kernels process all positions in one launch.
+        # No per-batch allocation — saves 1.2 GB vs looping per batch element.
         total_positions = batch * seq_len
         h_flat = hidden.reshape(total_positions, hidden_dim).contiguous()
         lab_flat = labels.reshape(total_positions).contiguous()
         lse_flat = lse.reshape(total_positions).contiguous()
         g_flat = grad_output.reshape(total_positions).contiguous()
-        grad_hidden_flat = grad_hidden.reshape(total_positions, hidden_dim)
 
-        # Kernel 1: grad_hidden — Triton, one program per position
+        # Dummy pointer for the bias ptr arg when HAS_BIAS=False. Use a
+        # cached vocab_size-sized sentinel instead of aliasing h_flat —
+        # prevents speculative prefetch from reading past the hidden states
+        # buffer for short sequences.
+        bias_ptr = bias if has_bias else _dummy_bias_ptr(vocab_size, hidden.device)
+
+        # Kernel 1: grad_hidden — Triton, one program per position.
+        # Only allocate the output tensor if the gradient is actually needed.
+        grad_hidden: torch.Tensor | None = None
         if ctx.needs_input_grad[0]:
+            grad_hidden = torch.empty_like(hidden)
+            grad_hidden_flat = grad_hidden.reshape(total_positions, hidden_dim)
             _fused_logprob_grad_hidden_kernel[(total_positions,)](
                 h_flat,
                 weight,
@@ -476,23 +594,30 @@ class _TritonLogprobAutograd(torch.autograd.Function):
                 lse_flat,
                 g_flat,
                 grad_hidden_flat,
-                bias if has_bias else h_flat,  # dummy ptr
+                bias_ptr,
                 total_positions,
                 hidden_dim,
                 vocab_size,
                 HAS_BIAS=has_bias,
                 BLOCK_V=BLOCK_V,
             )
-        else:
-            grad_hidden = None
+            grad_hidden = grad_hidden.reshape(batch, seq_len, hidden_dim)
 
-        # grad_weight: pure Triton kernel. 2D grid (vocab_tiles × hidden_tiles).
-        # Accumulator per program: [BLOCK_V, BLOCK_D] = [128, 128] × 4 = 64 KB.
-        # Fits in registers. No cuBLAS. No weight.float(). No temporary tensors.
-        # Total programs: (1187 × 16) = 18,992 — GPU handles this fine.
+        # Kernel 2: grad_weight — 2D grid (vocab_tiles × hidden_tiles).
+        # Accumulator per program: [BLOCK_V, BLOCK_D] = 64 KB fp32, fits in registers.
+        grad_weight: torch.Tensor | None = None
+        BLOCK_D = 128
+        n_vocab_tiles = (vocab_size + BLOCK_V - 1) // BLOCK_V
         if ctx.needs_input_grad[1]:
-            BLOCK_D = 128
-            n_vocab_tiles = (vocab_size + BLOCK_V - 1) // BLOCK_V
+            # weight.dtype (bf16 for Qwen3): kernel accumulates fp32 in
+            # registers, tl.store truncates to output dtype. Saves 594 MB
+            # vs fp32 allocation. SGD noise >> bf16 rounding; optimizer
+            # upscales internally.
+            grad_weight = torch.zeros(
+                weight.shape,
+                dtype=weight.dtype,
+                device=weight.device,
+            )
             n_hidden_tiles = (hidden_dim + BLOCK_D - 1) // BLOCK_D
             _fused_logprob_grad_weight_kernel[(n_vocab_tiles, n_hidden_tiles)](
                 h_flat,
@@ -501,7 +626,7 @@ class _TritonLogprobAutograd(torch.autograd.Function):
                 lse_flat,
                 g_flat,
                 grad_weight,
-                bias if has_bias else h_flat,  # dummy ptr
+                bias_ptr,
                 total_positions,
                 hidden_dim,
                 vocab_size,
@@ -510,18 +635,35 @@ class _TritonLogprobAutograd(torch.autograd.Function):
                 BLOCK_D=BLOCK_D,
             )
 
-            # Bias gradient: simple reduction, separate pass (tiny cost)
-            if compute_grad_bias and grad_bias is not None:
-                for t in range(total_positions):
-                    # TODO: write a small Triton kernel for this too
-                    # For now, bias grad is negligible cost
-                    pass
-        else:
-            grad_weight = None
-
-        # Reshape grad_hidden back to [batch, seq, hidden_dim]
-        if grad_hidden is not None:
-            grad_hidden = grad_hidden.reshape(batch, seq_len, hidden_dim)
+        # Kernel 3: grad_bias — 1D grid (vocab_tiles,). Only launched when a
+        # real trainable bias exists and is needed. Accumulator per program
+        # is [BLOCK_V] fp32 — tiny. Separate kernel instead of folding into
+        # grad_weight because grad_weight has n_hidden_tiles programs per
+        # vocab tile and bias is one-per-vocab; folding would compute it
+        # n_hidden_tiles times per vocab element.
+        if compute_grad_bias:
+            # fp32 unconditionally — the kernel accumulates in fp32, and the
+            # tensor is tiny ([vocab] = ~600 KB for 151K vocab). bf16 would
+            # truncate for zero VRAM savings. Optimizer upscasts internally.
+            grad_bias = torch.zeros(
+                bias.shape,
+                dtype=torch.float32,
+                device=bias.device,
+            )
+            _fused_logprob_grad_bias_kernel[(n_vocab_tiles,)](
+                h_flat,
+                weight,
+                lab_flat,
+                lse_flat,
+                g_flat,
+                grad_bias,
+                bias,  # Real bias — required; this path is only hit when has_bias=True
+                total_positions,
+                hidden_dim,
+                vocab_size,
+                BLOCK_V=BLOCK_V,
+                BLOCK_D=BLOCK_D,
+            )
 
         return grad_hidden, grad_weight, grad_bias, None
 
@@ -531,11 +673,12 @@ def triton_logprobs_with_grad(
     lm_head: nn.Linear,
     labels: torch.Tensor,
 ) -> torch.Tensor:
-    """Differentiable logprobs via Triton forward + PyTorch backward.
+    """Differentiable logprobs via full Triton forward + backward.
 
-    Drop-in replacement for chunked_logprobs_from_hidden. Uses the Triton kernel
-    for the forward pass (zero vocab-tensor allocation, single GPU launch), and
-    chunked PyTorch matmul for backward (same memory profile as checkpoint path).
+    Drop-in replacement for chunked_logprobs_from_hidden. Three Triton
+    kernels (grad_hidden, grad_weight, grad_bias) — no cuBLAS, no
+    [seq, vocab] intermediate, self-consistent softmax recomputation
+    from saved lse in both directions.
 
     Args:
         hidden_states: [batch, seq, hidden_dim] from model body
@@ -546,9 +689,11 @@ def triton_logprobs_with_grad(
         [batch, seq] log probabilities (float32) WITH grad_fn
     """
     if not HAS_TRITON:
-        from qgre.fused_logprobs import chunked_logprobs_from_hidden
-
-        return chunked_logprobs_from_hidden(hidden_states, lm_head, labels)
+        raise RuntimeError(
+            "triton_logprobs_with_grad called but triton is not installed. "
+            "Use chunked_logprobs_from_hidden for the cuBLAS path — the "
+            "numerics differ, so the caller must choose explicitly.",
+        )
 
     _validate_triton_inputs(hidden_states, lm_head.weight, lm_head.bias, labels)
 
@@ -556,14 +701,8 @@ def triton_logprobs_with_grad(
     if seq_len == 0 or batch == 0:
         return torch.empty(batch, seq_len, dtype=torch.float32, device=hidden_states.device)
 
-    # Pass bias as empty tensor if None — autograd.Function needs consistent arg count
-    bias = (
-        lm_head.bias
-        if lm_head.bias is not None
-        else torch.empty(
-            0,
-            device=hidden_states.device,
-        )
-    )
+    # Pass bias as empty tensor if None — autograd.Function needs consistent arg count.
+    # Cached to avoid per-microbatch allocator traffic (common path for Qwen3).
+    bias = lm_head.bias if lm_head.bias is not None else _dummy_bias_ptr(0, hidden_states.device)
 
     return _TritonLogprobAutograd.apply(hidden_states, lm_head.weight, bias, labels)

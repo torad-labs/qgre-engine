@@ -122,6 +122,7 @@ class TrainerState:
     accumulated_samples: int = 0
     resumed_mid_accumulation: bool = False
     fused_validated: bool = False
+    triton_validated: bool = False
     needs_weight_sync: bool = False
     # RNG state for reproducibility across resume
     rng_state: object | None = None  # torch.get_rng_state() output
