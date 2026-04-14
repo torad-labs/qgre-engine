@@ -101,13 +101,15 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
     for name, grad in current_grads.items():
         if name not in _prev_grads:
             continue
-        prev = _prev_grads[name].to(grad.device)
+        prev = _prev_grads[name]
         if prev.shape != grad.shape:
             continue  # Shape changed (e.g., model restructured) — skip
-        n1 = grad.norm().item()
+        # Compute on CPU to avoid moving 1.16 GB of prev grads to GPU
+        grad_cpu = grad.cpu()
+        n1 = grad_cpu.norm().item()
         n2 = prev.norm().item()
         if n1 > 1e-10 and n2 > 1e-10:
-            cos = torch.dot(grad, prev).item() / (n1 * n2)
+            cos = torch.dot(grad_cpu, prev).item() / (n1 * n2)
             temporal_cosines.append(cos)
 
     temporal_mean = float(np.mean(temporal_cosines)) if temporal_cosines else 0.0

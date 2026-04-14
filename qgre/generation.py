@@ -266,6 +266,24 @@ class UnslothBackend:
         if peft_cfg and getattr(peft_cfg, "modules_to_save", None):
             peft_cfg.modules_to_save = None
 
+        # Offload PEFT original_module copies to CPU.
+        # PEFT's ModulesToSaveWrapper keeps a frozen original_module on GPU
+        # that wastes ~594 MiB per wrapped module. We never disable adapters
+        # during training, so original_module can live on CPU.
+        offloaded_total = 0.0
+        for name, module in model.named_modules():
+            if hasattr(module, "original_module") and hasattr(module, "modules_to_save"):
+                orig = module.original_module
+                if orig is not None and any(p.device.type != "cpu" for p in orig.parameters()):
+                    orig_mb = sum(p.numel() * p.element_size() for p in orig.parameters()) / 1024**2
+                    orig.to("cpu", non_blocking=True)
+                    offloaded_total += orig_mb
+                    print(f"QGRE: Offloaded {name}.original_module to CPU ({orig_mb:.0f} MiB)")
+        if offloaded_total > 0:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            print(f"QGRE: Total offloaded: {offloaded_total:.0f} MiB")
+
         # Configure tokenizer from YAML config — single source of truth for all models.
         # fix_tokenizer=False above prevents Unsloth from overriding with <|PAD_TOKEN|>.
         pad_token = self.model_config.pad_token

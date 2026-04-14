@@ -13,7 +13,7 @@ model:
   pad_token: "<|fim_pad|>"      # Must NOT be EOS, stop token, or vision-reserved
   pad_token_id: 151662          # Qwen3 fim_pad — vision_pad blocked by Unsloth for text models
   lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]  # Qwen3/LLaMA
-  modules_to_save: [lm_head]  # embed_tokens removed — fim_pad is pre-trained, saves ~1.2 GB
+  modules_to_save: [lm_head, embed_tokens]
 
 data:
   train_files:

@@ -3048,6 +3048,74 @@ class QGRETrainer:
                 if self.global_step >= cfg.total_steps:
                     break
 
+                # GPU memory audit — enumerate every tensor on GPU
+                if (
+                    torch.cuda.is_available()
+                    and self.global_step % 50 == 0
+                    and not getattr(self, "_gpu_audited", False)
+                ):
+                    _log = logging.getLogger(__name__)
+                    _log.warning("[GPU-AUDIT] === Detailed GPU Memory Breakdown ===")
+                    # 1. Model parameters
+                    param_gpu = 0
+                    param_cpu = 0
+                    for name, p in self.model.named_parameters():
+                        sz = p.numel() * p.element_size() / 1024**2
+                        if p.device.type == "cuda":
+                            param_gpu += sz
+                        else:
+                            param_cpu += sz
+                        if sz > 10:  # Only log params > 10 MiB
+                            _log.warning(
+                                f"  PARAM {name}: {sz:.0f}MiB {p.shape} {p.dtype} {p.device}"
+                            )
+                    _log.warning(f"  TOTAL params GPU: {param_gpu:.0f}MiB, CPU: {param_cpu:.0f}MiB")
+
+                    # 2. Gradients
+                    grad_gpu = 0
+                    for name, p in self.model.named_parameters():
+                        if p.grad is not None and p.grad.device.type == "cuda":
+                            sz = p.grad.numel() * p.grad.element_size() / 1024**2
+                            grad_gpu += sz
+                            if sz > 10:
+                                _log.warning(
+                                    f"  GRAD {name}: {sz:.0f}MiB {p.grad.shape} {p.grad.dtype}"
+                                )
+                    _log.warning(f"  TOTAL gradients GPU: {grad_gpu:.0f}MiB")
+
+                    # 3. Optimizer states
+                    opt_gpu = 0
+                    if self.optimizer is not None:
+                        for pg in self.optimizer.param_groups:
+                            for p in pg["params"]:
+                                if p in self.optimizer.state:
+                                    for k, v in self.optimizer.state[p].items():
+                                        if isinstance(v, torch.Tensor) and v.device.type == "cuda":
+                                            sz = v.numel() * v.element_size() / 1024**2
+                                            opt_gpu += sz
+                                            if sz > 10:
+                                                _log.warning(
+                                                    f"  OPT {k}: {sz:.0f}MiB {v.shape} {v.dtype}"
+                                                )
+                    _log.warning(f"  TOTAL optimizer GPU: {opt_gpu:.0f}MiB")
+
+                    # 4. VPRM critic
+                    critic_gpu = 0
+                    if hasattr(self, "vprm_critic") and self.vprm_critic is not None:
+                        for name, p in self.vprm_critic.named_parameters():
+                            if p.device.type == "cuda":
+                                critic_gpu += p.numel() * p.element_size() / 1024**2
+                    _log.warning(f"  TOTAL VPRM critic GPU: {critic_gpu:.0f}MiB")
+
+                    # 5. Summary
+                    accounted = param_gpu + grad_gpu + opt_gpu + critic_gpu
+                    total_alloc = torch.cuda.memory_allocated() / 1024**2
+                    _log.warning(
+                        f"  ACCOUNTED: {accounted:.0f}MiB | PyTorch allocated: {total_alloc:.0f}MiB | "
+                        f"GAP: {total_alloc - accounted:.0f}MiB"
+                    )
+                    self._gpu_audited = True
+
                 # Batch validation — guard against empty batches from dynamic sizing or data issues
                 if batch.input_ids.shape[0] == 0:
                     raise RuntimeError(
