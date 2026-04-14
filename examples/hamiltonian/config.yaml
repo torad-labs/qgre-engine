@@ -58,6 +58,9 @@ algorithm:
     lr: 0.01
     n: 1
     kl_adaptive: false
+    aspiration_beta: 0.5             # Aspiration gap weight
+    aspiration_target: 1.0           # Perfect score — keeps gradient alive until all qualities hit 1.0
+  spo_filter_threshold: 0.0001       # Lower threshold so marginal advantages don't get filtered
   clip_ratio_low: 0.2
   clip_ratio_high: 0.28
   llds_coef: 0.05
