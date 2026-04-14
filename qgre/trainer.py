@@ -1527,18 +1527,10 @@ class QGRETrainer:
                         self.step_qualities,
                         egrs_cfg.reward_threshold,
                     )
-                    # R3-MTO-002: Use sample_regions length to slice mb_token_entropy, not the other way around
-                    comp_len = len(sample_regions)  # type: ignore[arg-type]
-                    # Clamp to available entropy if sample longer than entropy tensor
-                    if mb_token_entropy.shape[1] < comp_len:
-                        import warnings
-
-                        warnings.warn(
-                            f"R3-MTO-002: sample_regions length ({comp_len}) exceeds mb_token_entropy.shape[1] "
-                            f"({mb_token_entropy.shape[1]}). Clamping to entropy length.",
-                            stacklevel=2,
-                        )
-                        comp_len = mb_token_entropy.shape[1]
+                    # Entropy is computed on shifted logprobs (tokens [1:]), so
+                    # mb_token_entropy.shape[1] = seq_len - 1. Use the minimum
+                    # of regions length and entropy length.
+                    comp_len = min(len(sample_regions), mb_token_entropy.shape[1])  # type: ignore[arg-type]
                     sample_entropy = mb_token_entropy[mb_i, :comp_len]
                     sample_advs = mb_advs[mb_i, :comp_len]
                     # Get importance for ERIC dampening (if available)
