@@ -745,19 +745,10 @@ class QGRETrainer:
                 batch_token_masks.append(masks)
 
             # A4: Validate all samples have same mask status (all empty or all populated)
-            # If mixed, clear ALL masks to fall back to segmenter uniformly (no mixed mode)
-            mask_statuses = [bool(m) for m in batch_token_masks]
-            if mask_statuses and not (all(mask_statuses) or not any(mask_statuses)):
-                n_with = sum(mask_statuses)
-                n_without = len(mask_statuses) - n_with
-                logging.getLogger(__name__).warning(
-                    f"A4: Heterogeneous batch — {n_with} samples have span masks, {n_without} don't. "
-                    f"Clearing all masks to use uniform segmenter mode (no mixed mode).",
-                )
-                batch_token_masks = [{} for _ in batch_token_masks]  # Clear all masks
-
-            # Check if span mapping succeeded for any sample
-            # Debug: log span mapping status
+            # Mixed batches: some samples have span masks, some don't. Keep
+            # the working ones — destroying 3 good span mappings because 1
+            # sample failed is worse than having heterogeneous advantage modes.
+            # Samples without spans get zero advantage for this step (empty mask).
             non_empty_masks = sum(1 for m in batch_token_masks if m)
             if non_empty_masks == 0:
                 logging.getLogger(__name__).warning(
