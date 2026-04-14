@@ -7,7 +7,7 @@ model:
   lora_alpha: 64
   load_in_4bit: true
   fast_inference: true
-  gpu_memory_utilization: 0.17        # Minimal viable KV cache for 4 sequences
+  gpu_memory_utilization: 0.25        # More KV cache headroom for faster generation
   weight_sync_strategy: merge         # Merge LoRA → base pre-generate, unmerge post-generate
                                       # Eliminates ~1.4 GB vLLM weight duplication + LoRA buffer
   pad_token: "<|fim_pad|>"      # Must NOT be EOS, stop token, or vision-reserved
@@ -19,7 +19,7 @@ data:
   train_files:
     - examples/hamiltonian/data/train.parquet
   max_prompt_length: 1024
-  train_batch_size: 4
+  train_batch_size: 1
   prompt_column: prompt
   system_prompt_column: system_prompt  # Separate system message in chat template
   metadata_columns:

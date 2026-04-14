@@ -567,7 +567,7 @@ class QGRETrainer:
 
         Phase is engine-managed via GameState. The engine:
         1. Uses game_state.phase to determine active qualities
-        2. Computes per-step advantages via segmenter + step_qualities
+        2. Computes per-step advantages via scored_spans + step_qualities
         3. Records per-step mastery scores to GameState
         4. Checks for phase advancement after each step
 
@@ -650,146 +650,137 @@ class QGRETrainer:
             active_tiers=set(self.game_state.active_tiers),
         )
 
-        # Compute per-token advantages — span-based (if scored_spans populated) or region-based (legacy)
-        use_spans = any(rr.scored_spans for rr in reward_results)
-        batch_token_masks: list[dict[str, torch.Tensor]] = []  # Available for per-quality loss
+        # Compute per-token advantages via scored_spans (no segmenter fallback).
+        # Spans are required — if your reward_fn doesn't produce scored_spans,
+        # fix the reward_fn. Silent fallback to segmenter caused zero-loss death
+        # spirals that wasted GPU hours.
+        from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
 
-        # Debug: log when scored_spans are missing entirely
-        if not use_spans:
-            logging.getLogger(__name__).warning(
-                f"Step {self.global_step}: No scored_spans in batch. "
-                f"scored_spans counts: {[len(rr.scored_spans) if rr.scored_spans else 0 for rr in reward_results]}",
+        if not any(rr.scored_spans for rr in reward_results):
+            raise RuntimeError(
+                f"Step {self.global_step}: reward_fn produced no scored_spans for any sample. "
+                f"Spans are required for per-quality credit assignment. "
+                f"scored_spans counts: {[len(rr.scored_spans) if rr.scored_spans else 0 for rr in reward_results]}. "
+                f"Fix your reward_fn to populate RewardResult.scored_spans.",
             )
-        if use_spans:
-            from qgre.spans import build_char_to_token_map, scored_spans_to_token_masks
 
-            # Build per-sample token masks from scored_spans
-            batch_token_masks: list[dict[str, torch.Tensor]] = []
-            for i, rr in enumerate(reward_results):
-                if rr.scored_spans:
-                    # SPAN VALIDATION: Compare decoded text with reward_fn text
-                    if completion_texts is not None and i < len(completion_texts):
-                        our_decode = self.tokenizer.decode(completions[i], skip_special_tokens=True)
-                        reward_fn_text = completion_texts[i]
-                        if our_decode != reward_fn_text:
-                            _log = logging.getLogger(__name__)
-                            _log.error(
-                                f"SPAN VALIDATION FAILED sample {i}: decoded text != reward_fn text. "
-                                f"Decoded len={len(our_decode)}, reward_fn len={len(reward_fn_text)}. "
-                                f"Character positions will be WRONG. Falling back to segmenter.",
-                            )
-                            # Find first difference for debugging
-                            for j, (a, b) in enumerate(
-                                zip(our_decode, reward_fn_text, strict=False)
-                            ):
-                                if a != b:
-                                    _log.error(
-                                        f"  First diff at char {j}: decoded='{a}' vs reward_fn='{b}'"
-                                    )
-                                    break
-                            batch_token_masks.append({})  # Skip spans for this sample
-                            continue
-
-                    # Build char→token map directly from original token_ids (no re-encoding)
-                    char_map = build_char_to_token_map(completions[i], self.tokenizer)
-                    if char_map is not None:
-                        masks = scored_spans_to_token_masks(
-                            rr.scored_spans, char_map, len(completions[i]), self.ctx
+        batch_token_masks: list[dict[str, torch.Tensor]] = []
+        for i, rr in enumerate(reward_results):
+            if rr.scored_spans:
+                # SPAN VALIDATION: Compare decoded text with reward_fn text
+                if completion_texts is not None and i < len(completion_texts):
+                    our_decode = self.tokenizer.decode(completions[i], skip_special_tokens=False)
+                    reward_fn_text = completion_texts[i]
+                    if our_decode != reward_fn_text:
+                        _log = logging.getLogger(__name__)
+                        _log.error(
+                            f"SPAN VALIDATION FAILED sample {i}: decoded text != reward_fn text. "
+                            f"Decoded len={len(our_decode)}, reward_fn len={len(reward_fn_text)}. "
+                            f"Character positions will be WRONG.",
                         )
-
-                        # SPAN CONTENT LOGGING: Write to separate file for verification
-                        # Check output/hamiltonian/spans.log to verify spans are correct
-                        if self.global_step % self.config.logging.log_freq == 0 and i == 0:
-                            text = (
-                                completion_texts[i]
-                                if completion_texts and i < len(completion_texts)
-                                else None
-                            )
-                            if text:
-                                span_log_path = (
-                                    Path(self.config.logging.checkpoint_dir).parent / "spans.log"
+                        for j, (a, b) in enumerate(zip(our_decode, reward_fn_text, strict=False)):
+                            if a != b:
+                                _log.error(
+                                    f"  First diff at char {j}: decoded='{a}' vs reward_fn='{b}'"
                                 )
-                                with open(span_log_path, "a") as f:
-                                    f.write(f"\n=== Step {self.global_step} Sample {i} ===\n")
-                                    for q_name, spans in rr.scored_spans.items():
-                                        for span_idx, (cs, ce) in enumerate(spans):
-                                            span_text = (
-                                                text[cs:ce] if cs < len(text) else "<OUT_OF_BOUNDS>"
-                                            )
-                                            tok_indices = sorted(
-                                                {
-                                                    char_map[c]
-                                                    for c in range(
-                                                        max(0, cs), min(ce, len(char_map))
-                                                    )
-                                                    if char_map[c] >= 0
-                                                }
-                                            )
-                                            tok_range = (
-                                                f"{tok_indices[0]}-{tok_indices[-1]}"
-                                                if tok_indices
-                                                else "NONE"
-                                            )
-                                            display_text = span_text[:80].replace("\n", "\\n")
-                                            f.write(
-                                                f"  {q_name}[{span_idx}]: chars({cs},{ce}) → toks({tok_range}) '{display_text}'\n"
-                                            )
-                    else:
-                        logging.getLogger(__name__).error(
-                            f"char_to_token_map returned None for sample {i} — cannot map scored_spans to tokens. "
-                            "Falling back to uniform advantage (no span signal). Check tokenizer decode consistency.",
+                                break
+                        raise RuntimeError(
+                            f"Step {self.global_step}: span text validation failed for sample {i}. "
+                            f"Decoded text and reward_fn text diverge — span character positions are wrong. "
+                            f"Fix the tokenizer decode or reward_fn text handling.",
                         )
-                        masks = {}  # Mapping failed — fall back to segmenter
-                else:
-                    masks = {}
-                batch_token_masks.append(masks)
 
-            # A4: Validate all samples have same mask status (all empty or all populated)
-            # Mixed batches: some samples have span masks, some don't. Keep
-            # the working ones — destroying 3 good span mappings because 1
-            # sample failed is worse than having heterogeneous advantage modes.
-            # Samples without spans get zero advantage for this step (empty mask).
-            non_empty_masks = sum(1 for m in batch_token_masks if m)
-            if non_empty_masks == 0:
-                logging.getLogger(__name__).warning(
-                    f"All span mappings failed: {len(batch_token_masks)} samples, "
-                    f"scored_spans present: {[bool(rr.scored_spans) for rr in reward_results]}",
-                )
-            if any(m for m in batch_token_masks):
-                token_advantages, _quality_metrics = (
-                    self.advantage_estimator.compute_advantages_with_spans(
-                        batch_prompt_ids=batch.prompt_ids,
-                        batch_token_ids=completions,
-                        batch_reward_results=reward_results,
-                        batch_active_qualities=active_qualities,
-                        batch_token_masks=batch_token_masks,
-                        group_size=self.config.algorithm.grpo.n
-                        if self.config.algorithm.mode == "grpo"
-                        else None,
-                        frontier_steps=frontier_steps,
-                        batch_contexts=batch_contexts,
-                        ctx=self.ctx,
+                # Build char→token map directly from original token_ids (no re-encoding)
+                char_map = build_char_to_token_map(completions[i], self.tokenizer)
+                if char_map is None:
+                    raise RuntimeError(
+                        f"Step {self.global_step}: char_to_token_map returned None for sample {i}. "
+                        f"Cannot map scored_spans to tokens. "
+                        f"Completion length: {len(completions[i])}. "
+                        f"Check tokenizer decode consistency.",
                     )
+                masks = scored_spans_to_token_masks(
+                    rr.scored_spans, char_map, len(completions[i]), self.ctx
                 )
-                # Still run segmenter for KL region weights (THINK/FORMAT multipliers).
-                # VPRM critic now uses spans directly via compute_advantages_from_spans.
-                batch_regions = [self.advantage_estimator.segmenter(c) for c in completions]
-            else:
-                use_spans = False  # All mappings failed, fall back to segmenter
 
-        if not use_spans:
-            token_advantages, batch_regions = self.advantage_estimator.compute_advantages(
-                batch_prompt_ids=batch.prompt_ids,
-                batch_token_ids=completions,
-                batch_reward_results=reward_results,
-                batch_active_qualities=active_qualities,
-                group_size=self.config.algorithm.grpo.n
-                if self.config.algorithm.mode == "grpo"
-                else None,
-                frontier_steps=frontier_steps,
-                batch_contexts=batch_contexts,
-                ctx=self.ctx,
+                # SPAN CONTENT LOGGING
+                if self.global_step % self.config.logging.log_freq == 0 and i == 0:
+                    text = (
+                        completion_texts[i]
+                        if completion_texts and i < len(completion_texts)
+                        else None
+                    )
+                    if text:
+                        span_log_path = (
+                            Path(self.config.logging.checkpoint_dir).parent / "spans.log"
+                        )
+                        with open(span_log_path, "a") as f:
+                            f.write(f"\n=== Step {self.global_step} Sample {i} ===\n")
+                            for q_name, spans in rr.scored_spans.items():
+                                for span_idx, (cs, ce) in enumerate(spans):
+                                    span_text = text[cs:ce] if cs < len(text) else "<OUT_OF_BOUNDS>"
+                                    tok_indices = sorted(
+                                        {
+                                            char_map[c]
+                                            for c in range(max(0, cs), min(ce, len(char_map)))
+                                            if char_map[c] >= 0
+                                        }
+                                    )
+                                    tok_range = (
+                                        f"{tok_indices[0]}-{tok_indices[-1]}"
+                                        if tok_indices
+                                        else "NONE"
+                                    )
+                                    display_text = span_text[:80].replace("\n", "\\n")
+                                    f.write(
+                                        f"  {q_name}[{span_idx}]: chars({cs},{ce}) → toks({tok_range}) '{display_text}'\n"
+                                    )
+            else:
+                raise RuntimeError(
+                    f"Step {self.global_step}: sample {i} has no scored_spans. "
+                    f"All samples must have scored_spans. "
+                    f"reward={rr.reward}, scores={rr.scores}. "
+                    f"Fix your reward_fn to always populate scored_spans.",
+                )
+            batch_token_masks.append(masks)
+
+        # All samples must have valid span masks with nonzero signal
+        failed_masks = [i for i, m in enumerate(batch_token_masks) if not m]
+        if failed_masks:
+            raise RuntimeError(
+                f"Step {self.global_step}: span mask mapping failed for samples {failed_masks}. "
+                f"scored_spans present: {[bool(rr.scored_spans) for rr in reward_results]}. "
+                f"Token mask counts: {[len(m) for m in batch_token_masks]}. "
+                f"Fix span-to-token mapping — no segmenter fallback.",
             )
+        # Check for all-zero masks — reward_fn returned quality keys with empty
+        # span lists (e.g. scored_spans={"quality": []}). Dict is truthy but
+        # carries zero signal, producing zero gradients silently.
+        for i, m in enumerate(batch_token_masks):
+            if m and all(v.sum() == 0 for v in m.values()):
+                raise RuntimeError(
+                    f"Step {self.global_step}: sample {i} has span masks but ALL are zero. "
+                    f"Qualities: {list(m.keys())}, mask shapes: {[v.shape for v in m.values()]}. "
+                    f"reward_fn likely returned empty span lists for all qualities. "
+                    f"Fix scored_spans to include actual character ranges.",
+                )
+
+        token_advantages, _quality_metrics = self.advantage_estimator.compute_advantages_with_spans(
+            batch_prompt_ids=batch.prompt_ids,
+            batch_token_ids=completions,
+            batch_reward_results=reward_results,
+            batch_active_qualities=active_qualities,
+            batch_token_masks=batch_token_masks,
+            group_size=self.config.algorithm.grpo.n
+            if self.config.algorithm.mode == "grpo"
+            else None,
+            frontier_steps=frontier_steps,
+            batch_contexts=batch_contexts,
+            ctx=self.ctx,
+        )
+        # Segmenter still runs for KL region weights (THINK/FORMAT multipliers) —
+        # it labels token positions, not advantages. Different concern.
+        batch_regions = [self.advantage_estimator.segmenter(c) for c in completions]
 
         # Build full sequences on model device.
         # modules_to_save offloads original_module to CPU — skip CPU params for device detection.
@@ -797,10 +788,10 @@ class QGRETrainer:
             (p.device for p in self.model.parameters() if p.device.type != "cpu"),
             next(self.model.parameters()).device,
         )
-        max_comp_len = max(len(adv) for adv in token_advantages)  # type: ignore[possibly-undefined]
+        max_comp_len = max(len(adv) for adv in token_advantages)
 
         padded_advs = torch.zeros(len(completions), max_comp_len, device=device)
-        for i, adv in enumerate(token_advantages):  # type: ignore[possibly-undefined]
+        for i, adv in enumerate(token_advantages):
             padded_advs[i, : len(adv)] = adv.to(device)
 
         # Build per-sample KL region weights from segmenter regions (THR-style, PLAN.md lines 798-802)
@@ -810,7 +801,7 @@ class QGRETrainer:
         per_sample_kl_weights: list[torch.Tensor | None] = []
         if alg.kl_cov_ratio > 0 and alg.loss_mode == "kl_cov":
             region_map = {"THINK": alg.kl_think_multiplier, "FORMAT": alg.kl_format_multiplier}
-            for i, regions in enumerate(batch_regions):  # type: ignore[possibly-undefined]
+            for i, regions in enumerate(batch_regions):
                 kl_weights = torch.ones(len(regions), device=device)
                 for t, region in enumerate(regions):
                     if region in region_map:
@@ -858,7 +849,7 @@ class QGRETrainer:
                 reward_result=reward_results[i],
                 context=batch_contexts[i],
                 active_qualities=active_qualities[i],
-                regions=batch_regions[i] if batch_regions else None,  # type: ignore[reportPossiblyUnboundVariable]
+                regions=batch_regions[i],
                 token_masks=batch_token_masks[i]
                 if batch_token_masks and i < len(batch_token_masks)
                 else None,
@@ -887,7 +878,7 @@ class QGRETrainer:
             samples=samples,
             reward_results=reward_results,
             active_qualities=active_qualities,
-            batch_regions=batch_regions,  # type: ignore[reportPossiblyUnboundVariable, arg-type]
+            batch_regions=batch_regions,
             batch_contexts=batch_contexts,
             completions=completions,
             padded_advs=padded_advs,
@@ -1461,7 +1452,7 @@ class QGRETrainer:
                                     f"mean={bs.mean().item():.4f}, nonzero={(bs > 0).sum().item()}/{len(bs)}",
                                 )
 
-                        vprm_advs, vprm_loss, used_critic = compute_advantages_vprm(
+                        _, vprm_loss, used_critic = compute_advantages_vprm(
                             critic=self.vprm_critic,
                             hidden_states=sample_hs_trimmed,
                             regions=sample_regions[:comp_len],  # type: ignore[index]
@@ -1483,17 +1474,9 @@ class QGRETrainer:
                         )
 
                         if used_critic:
-                            # When spans are active, DON'T overwrite span advantages —
-                            # spans provide better token targeting. Only collect critic loss
-                            # (critic still learns the baseline for future use).
-                            # When spans are NOT active, replace SPO advantages with VPRM.
-                            if not use_spans:
-                                # VPRM returns raw-space advantages: vprm_advs[t] = advantage for token t.
-                                # mb_advs is in logprob space: mb_advs[t] = advantage for token t+1.
-                                # Offset by 1: vprm_advs[1:] maps raw token t+1 to logprob position t.
-                                if vprm_advs.shape[0] > 1:
-                                    adv_len = min(vprm_advs.shape[0] - 1, mb_advs.shape[1])
-                                    mb_advs[mb_i, :adv_len] = vprm_advs[1 : adv_len + 1]
+                            # Spans are always active — don't overwrite span advantages
+                            # with VPRM. Spans provide better token targeting. Critic
+                            # still learns the baseline via critic loss (for future use).
                             mb_critic_loss = mb_critic_loss + vprm_loss
                             mb_critic_count += 1
                 finally:
@@ -1588,11 +1571,8 @@ class QGRETrainer:
             mb_frame = aligned_frame.slice_for_microbatch(mb_start, mb_end)
             loss_len = mb_frame.loss_len
 
-            # Request per-token loss when computing per-quality metrics.
-            # Coerce to bool — `use_spans and batch_token_masks` returns
-            # the list itself on the truthy path, which is a latent type bug
-            # the loss_fn signature doesn't accept.
-            need_per_token = bool(use_spans and batch_token_masks)
+            # Per-token loss for per-quality metrics (spans always active).
+            need_per_token = bool(batch_token_masks)
             loss_result = self.loss_fn(
                 curr_logprobs=mb_lp[:, :loss_len],
                 prev_logprobs=mb_old_lp[:, :loss_len],
@@ -2625,39 +2605,56 @@ class QGRETrainer:
                     self.game_state.record_tier_step_score(tier, step_num, mean_score)
                     metrics[f"mastery/{tier}/step_{step_num}"] = mean_score
 
-            if self.game_state.check_tier_phase_advance(tier, max_phase):
-                new_phase = self.game_state.tier_phases[tier]
-                metrics[f"tier_phase_advanced/{tier}"] = new_phase
-                # Reset SPO baselines for ALL prompts in this tier (not just current batch)
-                col = self._difficulty_column
-                if self._dataloader and col:
-                    tier_pids = [
-                        item["prompt_id"]
-                        for item in self._dataloader.items
-                        if item.get("metadata", {}).get(col, "default") == tier
-                    ]
-                    import warnings
+            # Gate quality phase advancement on tutorial skill mastery.
+            # Without this, the quality phase races ahead of tutorial skills —
+            # the model scores high on all qualities, SPO baseline catches up,
+            # advantages zero out, loss=0 permanently.
+            if self.game_state.tutorial_enabled:
+                skills_in_tier = self.game_state._tier_to_skills.get(tier, [])
+                unmastered = [
+                    sk
+                    for sk in skills_in_tier
+                    if sk in self.game_state.skill_tree
+                    and not self.game_state.skill_tree[sk].mastered
+                ]
+                if unmastered:
+                    continue  # Don't advance phase until tutorial skills are mastered
 
-                    warnings.warn(
-                        f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, dataloader path, found {len(tier_pids)} prompts",
-                        stacklevel=2,
-                    )
-                else:
-                    tier_pids = [
-                        batch_contexts[i].prompt_id
-                        for i in range(len(reward_results))
-                        if batch_contexts[i].tier == tier
-                    ]
-                    import warnings
+            if not self.game_state.check_tier_phase_advance(tier, max_phase):
+                continue
 
-                    warnings.warn(
-                        f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, batch path, found {len(tier_pids)} prompts",
-                        stacklevel=2,
-                    )
-                self.advantage_estimator.on_tier_advance(
-                    new_tier=new_phase,
-                    prompt_tier_map=dict.fromkeys(tier_pids, new_phase),  # type: ignore[arg-type]
+            new_phase = self.game_state.tier_phases[tier]
+            metrics[f"tier_phase_advanced/{tier}"] = new_phase
+            # Reset SPO baselines for ALL prompts in this tier (not just current batch)
+            col = self._difficulty_column
+            if self._dataloader and col:
+                tier_pids = [
+                    item["prompt_id"]
+                    for item in self._dataloader.items
+                    if item.get("metadata", {}).get(col, "default") == tier
+                ]
+                import warnings
+
+                warnings.warn(
+                    f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, dataloader path, found {len(tier_pids)} prompts",
+                    stacklevel=2,
                 )
+            else:
+                tier_pids = [
+                    batch_contexts[i].prompt_id
+                    for i in range(len(reward_results))
+                    if batch_contexts[i].tier == tier
+                ]
+                import warnings
+
+                warnings.warn(
+                    f"[RESET TRIGGER] tier={tier}, phase→{new_phase}, batch path, found {len(tier_pids)} prompts",
+                    stacklevel=2,
+                )
+            self.advantage_estimator.on_tier_advance(
+                new_tier=new_phase,
+                prompt_tier_map=dict.fromkeys(tier_pids, new_phase),  # type: ignore[arg-type]
+            )
 
         # Check tier unlock — tutorial gates tier advancement
         if self._tier_order:
@@ -3490,9 +3487,7 @@ class QGRETrainer:
                     natural_w = label_w + val_w + 3  # 3 for " │ "
 
                     # Header row (show spans status based on per-quality loss presence)
-                    spans_active = any(k.startswith("loss/") for k in metrics)
-                    spans_str = "spans" if spans_active else "segmenter"
-                    header = f" Step {self.global_step}/{cfg.total_steps} │ Phase {self.game_state.phase} │ Tiers: {tiers_str} │ [{spans_str}] │ Reward: {reward_mean:.3f} │ Loss: {loss_val:.6f}"
+                    header = f" Step {self.global_step}/{cfg.total_steps} │ Phase {self.game_state.phase} │ Tiers: {tiers_str} │ [spans] │ Reward: {reward_mean:.3f} │ Loss: {loss_val:.6f}"
                     header_w = min(max_w, max(natural_w, len(header) + 2))
                     val_col_w = header_w - label_w - 3
 

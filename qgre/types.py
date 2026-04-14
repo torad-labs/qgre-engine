@@ -702,20 +702,21 @@ class RewardResult:
     # Reward functions that don't populate this field get the legacy segmenter path.
 
     def with_floor(self, reward: float) -> RewardResult:
-        """Return a new RewardResult with floored reward, zeroed scores, and empty spans.
+        """Return a new RewardResult with floored reward and zeroed scores.
 
         Used by the trainer's min_completion_tokens guard to penalize empty/short
         completions without mutating the original reward function output.
         The original instance is preserved for display and JSONL logging.
 
-        scored_spans are cleared (not preserved) so the advantage engine doesn't
-        apply positive per-token advantages to tokens from a penalized completion.
+        scored_spans are PRESERVED — they mark token regions (WHERE), not quality
+        values (HOW MUCH). The zeroed scores handle the penalty. Clearing spans
+        would crash the span-required training loop.
         """
         return RewardResult(
             reward=reward,
             scores=dict.fromkeys(self.scores, 0.0),
             phase=self.phase,
-            scored_spans={},
+            scored_spans=self.scored_spans,
         )
 
 
@@ -767,7 +768,7 @@ class TrainingStep:
     samples: list[SampleData]
     reward_results: list  # list[RewardResult] - avoiding circular import
     active_qualities: list[list[str]]
-    batch_regions: list[list[str] | None]
+    batch_regions: list[list[str]]
     batch_contexts: list  # list[PromptContext] - avoiding circular import
     completions: list[list[int]]
 
