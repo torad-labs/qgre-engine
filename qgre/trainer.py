@@ -103,6 +103,12 @@ class QGRETrainer:
         self.reward_fn = reward_fn
         self.config = config
         self.generation_backend = generation_backend
+
+        # Patch Linear4bit autograd: re-dequantize in backward instead of
+        # saving bf16 copies. 28 layers x ~58 MiB = ~1.6 GB savings.
+        from qgre.autograd_4bit import patch_model_autograd_4bit
+
+        patch_model_autograd_4bit(model)
         # Single source of truth for all sync-related state. Injected into WeightBus,
         # WeightLoader, and apply_lora_dropout so they share lifecycle, dropout, and
         # initialization tracking.
@@ -1775,6 +1781,11 @@ class QGRETrainer:
                 self.optimizer.zero_grad()
                 # Clear accumulated loss from successful micro-batches to prevent corrupt update
                 self._reset_accumulators()
+                # H1-TRN-R2-002: Clear gradient coherence cache to prevent phantom temporal signal.
+                # The next successful step shouldn't compare against pre-failure gradients.
+                from qgre.gradient_coherence import reset_gradient_cache
+
+                reset_gradient_cache()
                 # Clear CUDA cache to free memory before re-raising
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -1945,6 +1956,15 @@ class QGRETrainer:
             if self._lora_pro_adjuster is not None:
                 lora_pro_metrics = self._lora_pro_adjuster.adjust_gradients(self.global_step)
                 metrics.update(lora_pro_metrics)
+                # H1-TRN-R2-001: Re-clip after LoRA-Pro adjustment to maintain grad norm contract.
+                # LoRA-Pro replaces clipped gradients with adjusted values that may exceed max_norm.
+                post_lora_norm = torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=self.config.training.max_grad_norm
+                )
+                if post_lora_norm > self.config.training.max_grad_norm * 1.01:  # 1% tolerance
+                    metrics["lora_pro/post_clip_ratio"] = (
+                        post_lora_norm / self.config.training.max_grad_norm
+                    ).item()
 
             self.optimizer.step()
 

@@ -31,6 +31,9 @@ import torch
 # Cache for previous step's gradients, keyed by parameter name.
 # Module-level so it persists across calls within the same training run.
 _prev_grads: dict[str, torch.Tensor] = {}
+# Separate norm cache for modules_to_save — their grads are too large to store
+# as flattened CPU tensors (~1.24 GB each), so we cache only the scalar norm.
+_prev_mts_norms: dict[str, float] = {}
 
 
 def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
@@ -57,7 +60,7 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
         - per_layer_cosines: list of temporal cosines per parameter.
         - n_layers, n_comparisons, nonzero_norms, n_weights, n_biases: diagnostics.
     """
-    global _prev_grads  # noqa: PLW0603
+    global _prev_grads, _prev_mts_norms  # noqa: PLW0603
 
     # Collect current gradients
     current_grads: dict[str, torch.Tensor] = {}
@@ -65,6 +68,12 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
     all_grads: list[torch.Tensor] = []
     layer_names: list[str] = []
     lora_weight_norm_sq = 0.0
+
+    # modules_to_save params (lm_head, embed_tokens) are [vocab, hidden] —
+    # 1.24 GB each in float32. Can't flatten to GPU. Compute their norm/cosine
+    # in chunks on GPU then store only the scalar results for temporal tracking.
+    _mts_norm_cache: dict[str, float] = {}
+    _mts_dot_cache: dict[str, float] = {}
 
     for name, param in model.named_parameters():
         if not param.requires_grad:
@@ -74,7 +83,21 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
             lora_weight_norm_sq += param.data.float().norm().item() ** 2
         if param.grad is None:
             continue
-        grad_flat = param.grad.flatten().float()
+        # modules_to_save: compute norm + temporal cosine without materializing
+        # the full float32 flattened tensor (saves 1.24 GB per module on GPU)
+        if "modules_to_save" in name or "original_module" in name:
+            with torch.no_grad():
+                g = param.grad
+                # Norm in native dtype (bf16) — NO .float() on GPU (saves 1.24 GB per param)
+                _mts_norm_cache[name] = g.norm().item()
+                # CPU in native dtype first, then float32 on CPU — never float32 on GPU
+                g_cpu = g.flatten().cpu().float()
+                if name in _prev_grads:
+                    prev = _prev_grads[name]
+                    _mts_dot_cache[name] = torch.dot(g_cpu, prev).item()
+                _prev_grads[name] = g_cpu
+            continue
+        grad_flat = param.grad.flatten().cpu().float()
         current_grads[name] = grad_flat
         all_grads.append(grad_flat)
         layer_names.append(name)
@@ -88,8 +111,9 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
         # so the next call with gradients can compute meaningful temporal cosine.
         return _empty_stats()
 
-    # ── Gradient norms ──
+    # ── Gradient norms (includes modules_to_save via scalar cache) ──
     layer_norms = [g.norm().item() for g in all_grads]
+    layer_norms.extend(_mts_norm_cache.values())
     mean_norm = float(np.mean(layer_norms))
     max_norm = max(layer_norms)
     min_norm = min(layer_norms) if min(layer_norms) > 0 else 1e-10
@@ -104,13 +128,19 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
         prev = _prev_grads[name]
         if prev.shape != grad.shape:
             continue  # Shape changed (e.g., model restructured) — skip
-        # Compute on CPU to avoid moving 1.16 GB of prev grads to GPU
-        grad_cpu = grad.cpu()
-        n1 = grad_cpu.norm().item()
+        # Both grad and prev are already on CPU
+        n1 = grad.norm().item()
         n2 = prev.norm().item()
         if n1 > 1e-10 and n2 > 1e-10:
-            cos = torch.dot(grad_cpu, prev).item() / (n1 * n2)
+            cos = torch.dot(grad, prev).item() / (n1 * n2)
             temporal_cosines.append(cos)
+    # Include modules_to_save temporal cosines (computed without GPU allocation)
+    for name, dot_val in _mts_dot_cache.items():
+        n1 = _mts_norm_cache.get(name, 0.0)
+        # prev norm stored as scalar in _prev_mts_norms (set at cache time below)
+        n2 = _prev_mts_norms.get(name, 0.0)
+        if n1 > 1e-10 and n2 > 1e-10:
+            temporal_cosines.append(dot_val / (n1 * n2))
 
     temporal_mean = float(np.mean(temporal_cosines)) if temporal_cosines else 0.0
     temporal_min = float(min(temporal_cosines)) if temporal_cosines else 0.0
@@ -138,8 +168,15 @@ def compute_gradient_coherence(model: torch.nn.Module) -> dict[str, Any]:
     spatial_mean = float(np.mean(spatial_cosines)) if spatial_cosines else 0.0
 
     # Cache current gradients for next step's temporal comparison.
-    # Clone to avoid holding references to the autograd graph.
-    _prev_grads = {name: grad.detach().cpu().clone() for name, grad in current_grads.items()}
+    # LoRA grads: already CPU float32. Clone to detach from autograd.
+    # modules_to_save grads: already stored in _prev_grads during collection above.
+    new_prev = {name: grad.detach().clone() for name, grad in current_grads.items()}
+    # Merge in modules_to_save entries (set during collection, not in current_grads)
+    for name in _mts_norm_cache:
+        if name in _prev_grads:
+            new_prev[name] = _prev_grads[name]  # Already CPU from collection
+    _prev_grads = new_prev
+    _prev_mts_norms = dict(_mts_norm_cache)
 
     return {
         # Primary signal (temporal — what the detector uses)
@@ -192,8 +229,9 @@ def reset_gradient_cache() -> None:
     Call on checkpoint resume or engine recreation to avoid comparing
     against stale gradients from a different training state.
     """
-    global _prev_grads  # noqa: PLW0603
+    global _prev_grads, _prev_mts_norms  # noqa: PLW0603
     _prev_grads = {}
+    _prev_mts_norms = {}
 
 
 class TurbulenceDetector:

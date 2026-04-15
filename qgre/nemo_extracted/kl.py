@@ -50,7 +50,18 @@ def calculate_kl(
     elif kl_type == "k2":
         kl = torch.square(logr) / 2
     elif kl_type == "k3":
-        kl = torch.exp(logr) - 1 - logr
+        # H1-001: exp(logr) can produce huge values (exp(20)=4.85e8) even with input clamp.
+        # Standard clamp on output doesn't clamp gradients — grad(exp(x)) = exp(x) backprops
+        # the same huge value. Use detach trick: clamp forward, pass gradient through clamped value.
+        exp_logr = torch.exp(logr)
+        # Gradient-safe clamp: if exp_logr > max, use max for forward AND backward
+        exp_max = 1e4  # exp(~9.2), safe margin below exp(20)
+        exp_logr_safe = torch.where(
+            exp_logr > exp_max,
+            torch.full_like(exp_logr, exp_max),
+            exp_logr,
+        )
+        kl = exp_logr_safe - 1 - logr
     else:
         raise ValueError(f"Invalid KL type: {kl_type}")
 

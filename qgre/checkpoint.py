@@ -430,6 +430,16 @@ def save_checkpoint(
         schema_version=CHECKPOINT_SCHEMA_VERSION,
     )
 
+    # H1-DAT001: Validate accumulated_loss is finite before serializing
+    # NaN/Inf in checkpoint corrupts training on resume silently
+    import math
+
+    if not math.isfinite(trainer.accumulated_loss):
+        raise RuntimeError(
+            f"DAT001: Refusing to save checkpoint with non-finite accumulated_loss={trainer.accumulated_loss}. "
+            "This indicates gradient corruption. Training must be restarted from a clean checkpoint.",
+        )
+
     # Serialize CheckpointState
     checkpoint = asdict(checkpoint_state)
 

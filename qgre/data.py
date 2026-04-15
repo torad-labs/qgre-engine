@@ -113,6 +113,14 @@ class QGREDataLoader:
                     f"Available columns: {list(prompts[0].keys())}. "
                     "Set system_prompt_column to null or add the column to training data.",
                 )
+        # H1-001: Validate prompt_column exists before iteration
+        if prompts:
+            if self.prompt_column not in prompts[0]:
+                raise ValueError(
+                    f"prompt_column '{self.prompt_column}' not found in data. "
+                    f"Available columns: {list(prompts[0].keys())}. "
+                    "Set prompt_column in config to match your dataset column name.",
+                )
         items = []
         for row in prompts:
             text = row[self.prompt_column]
@@ -411,9 +419,12 @@ class QGREDataLoader:
         """Iterate batches for one epoch."""
         shuffled = self._shuffle(self.epoch)
         num_batches = math.ceil(len(shuffled) / self.train_batch_size)
-        self.step_in_epoch = 0
+        # DAT-R3-001: Resume from step_in_epoch if mid-epoch checkpoint restored.
+        # load_state_dict sets step_in_epoch > 0; on fresh epoch it's 0.
+        start_batch = self.step_in_epoch
+        self.step_in_epoch = start_batch  # Preserve for state_dict consistency
 
-        for b in range(num_batches):
+        for b in range(start_batch, num_batches):
             start = b * self.train_batch_size
             end = min(start + self.train_batch_size, len(shuffled))
             batch_items = shuffled[start:end]
@@ -452,6 +463,8 @@ class QGREDataLoader:
             self.total_steps += 1
 
         self.epoch += 1
+        # DAT-R3-001: Reset for next epoch (otherwise mid-epoch resume offset persists)
+        self.step_in_epoch = 0
 
     def __len__(self) -> int:
         """Number of batches per epoch."""

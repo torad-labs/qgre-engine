@@ -173,3 +173,74 @@ def test_backward_compat_mean_cosine_alias():
     _backward_step(model, x)
     stats = compute_gradient_coherence(model)
     assert stats["mean_cosine"] == stats["temporal_cosine"]
+
+
+class ModelWithModulesToSave(nn.Module):
+    """Mimics PEFT ModulesToSaveWrapper naming: 'modules_to_save' in param path."""
+
+    def __init__(self, vocab_size: int = 64, hidden: int = 8):
+        super().__init__()
+        self.lora_layer = nn.Linear(hidden, hidden, bias=False)
+        # Simulate PEFT's ModulesToSaveWrapper — the key is that
+        # "modules_to_save" appears in the parameter name path.
+        self.modules_to_save = nn.ModuleDict({"default": nn.Linear(hidden, vocab_size, bias=False)})
+
+    def forward(self, x):
+        return self.modules_to_save["default"](self.lora_layer(x))
+
+
+def test_modules_to_save_included_in_norms():
+    """modules_to_save grads should appear in layer_norms (via scalar cache)."""
+    reset_gradient_cache()
+    model = ModelWithModulesToSave()
+    model.zero_grad()
+    model(torch.randn(2, 8)).sum().backward()
+    stats = compute_gradient_coherence(model)
+
+    # Model has 2 params with grads: lora_layer.weight + modules_to_save.default.weight
+    # Both should contribute to layer_norms
+    assert len(stats["per_layer_norms"]) >= 2, (
+        f"Expected >=2 norms (lora + mts), got {len(stats['per_layer_norms'])}"
+    )
+
+
+def test_modules_to_save_temporal_cosine():
+    """modules_to_save grads should contribute to temporal cosine across steps."""
+    reset_gradient_cache()
+    model = ModelWithModulesToSave()
+    x = torch.randn(2, 8)
+
+    # Step 1: populate cache
+    model.zero_grad()
+    model(x).sum().backward()
+    compute_gradient_coherence(model)
+
+    # Step 2: identical input → identical grads → high cosine
+    model.zero_grad()
+    model(x).sum().backward()
+    stats = compute_gradient_coherence(model)
+
+    assert stats["n_comparisons"] >= 2, (
+        f"Expected >=2 temporal comparisons (lora + mts), got {stats['n_comparisons']}"
+    )
+    assert stats["temporal_cosine"] > 0.9, (
+        f"Identical inputs should give high temporal cosine, got {stats['temporal_cosine']}"
+    )
+
+
+def test_modules_to_save_no_gpu_allocation():
+    """modules_to_save path must not store float32 flattened grads on GPU."""
+    reset_gradient_cache()
+    model = ModelWithModulesToSave()
+    model.zero_grad()
+    model(torch.randn(2, 8)).sum().backward()
+    stats = compute_gradient_coherence(model)
+
+    # Verify the function returned valid stats (didn't crash)
+    assert stats["n_layers"] >= 1
+
+    # Check that _prev_grads values are all on CPU
+    from qgre.gradient_coherence import _prev_grads
+
+    for name, tensor in _prev_grads.items():
+        assert tensor.device.type == "cpu", f"_prev_grads[{name}] on {tensor.device}, expected cpu"

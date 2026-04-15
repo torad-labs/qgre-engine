@@ -72,7 +72,8 @@ def solve_sylvester(
     # Solve in eigenspace
     F = torch.linalg.solve(U, (C + 0j) @ V)
     W = R[..., :, None] - S[..., None, :]
-    Y = F / W
+    # H1-003: Add epsilon to prevent division by zero when eigenvalues collide
+    Y = F / (W + 1e-10)
 
     # Transform back
     X = U[..., :n, :n] @ Y[..., :n, :m] @ torch.linalg.inv(V)[..., :m, :m]

@@ -162,6 +162,8 @@ def apply_egrs_matrix(
     modified_advs = token_advantages.clone()
     entropy_adjustments = torch.zeros(seq_len, device=device, dtype=dtype)
     hint_flags: set[tuple[int, int]] = set()
+    # H1-POL001: Track EGRS-processed tokens to detect unused step_correctness
+    egrs_processed_count = 0
 
     # A-1: Clamp iteration to min of all tensor lengths to prevent IndexError
     max_iter = min(len(regions), len(token_entropy), len(token_advantages))
@@ -204,6 +206,7 @@ def apply_egrs_matrix(
                 "Check step_qualities config or disable EGRS.",
             )
         correct = step_correctness[step_num]
+        egrs_processed_count += 1  # H1-POL001: Track EGRS-processed tokens
         # Confidence from gate: low gate = confident, high gate = uncertain
         gate_val = confidence_gate[t].item()
         # Dead-zone at confidence boundary (0.5 ± 1e-3) prevents noise-driven oscillation
@@ -235,6 +238,17 @@ def apply_egrs_matrix(
             else:
                 # Q4: Uncertain + Wrong → Flag for hint injection
                 hint_flags.add((step_num, t))
+
+    # H1-POL001: Warn if step_correctness was provided but no tokens were EGRS-processed
+    # This indicates a segmenter/config mismatch — span advantages bypass EGRS entirely
+    if step_correctness and egrs_processed_count == 0:
+        warnings.warn(
+            f"POL001: EGRS received step_correctness {list(step_correctness.keys())} but "
+            f"processed 0 tokens. All {max_iter} tokens have non-STEP regions. "
+            "Span advantages will bypass EGRS classification. Check segmenter output or use "
+            "a segmenter that produces STEP_N labels.",
+            stacklevel=2,
+        )
 
     return modified_advs, entropy_adjustments, hint_flags
 

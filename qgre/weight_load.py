@@ -43,6 +43,8 @@ class WeightLoader:
         self._lora_request = None  # Set during LOADING -> READY transition
         # CR-001: Thread lock for state machine transitions and _lora_request access
         self._lock = threading.Lock()
+        # H1-002: Initialize cached vLLM model reference to prevent AttributeError
+        self._cached_vllm_model = None
 
     # --- Lifecycle state machine ---
 

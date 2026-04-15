@@ -665,6 +665,20 @@ class _TritonLogprobAutograd(torch.autograd.Function):
                 BLOCK_D=BLOCK_D,
             )
 
+        # H1-NUM003: Detect inf/nan in grad_weight before returning.
+        # bf16 accumulation can overflow on extreme logits; inf gradients cause dead zones.
+        if grad_weight is not None and not torch.isfinite(grad_weight).all():
+            import warnings
+
+            inf_count = (~torch.isfinite(grad_weight)).sum().item()
+            warnings.warn(
+                f"NUM003: grad_weight has {inf_count} non-finite values "
+                f"(of {grad_weight.numel()} total). This may indicate logit explosion. "
+                "Clamping to ±65504 (bf16 max) to prevent optimizer corruption.",
+                stacklevel=3,
+            )
+            grad_weight = grad_weight.clamp(min=-65504, max=65504)
+
         return grad_hidden, grad_weight, grad_bias, None
 
 

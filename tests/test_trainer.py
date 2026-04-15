@@ -280,13 +280,20 @@ def test_gradient_accumulation_equivalence():
         cfg.logging.checkpoint_dir = str(Path(tmpdir) / "checkpoints")
         cfg.training.gradient_accumulation_steps = 2
 
+        # Mock tokenizer with decode method for span mapping
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode = lambda ids, **kw: "".join(f"t{i}" for i in ids)
+
         torch.manual_seed(42)
         model = MockModel()
         trainer = QGRETrainer(
             model=model,
-            tokenizer=None,
+            tokenizer=mock_tokenizer,
             reward_fn=lambda *a, **k: RewardResult(
-                reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1
+                reward=0.5,
+                scores={"q_format_tags": 1.0, "q_tag_content": 1.0},
+                phase=1,
+                scored_spans={"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]},
             ),
             config=cfg,
         )
@@ -295,8 +302,18 @@ def test_gradient_accumulation_equivalence():
         batch = _make_batch(n_completions=2)
         tokens = _make_tokens()
         rrs = [
-            RewardResult(reward=0.8, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}, phase=1),
-            RewardResult(reward=0.3, scores={"q_format_tags": 0.5, "q_tag_content": 0.2}, phase=1),
+            RewardResult(
+                reward=0.8,
+                scores={"q_format_tags": 1.0, "q_tag_content": 0.9},
+                phase=1,
+                scored_spans={"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]},
+            ),
+            RewardResult(
+                reward=0.3,
+                scores={"q_format_tags": 0.5, "q_tag_content": 0.2},
+                phase=1,
+                scored_spans={"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]},
+            ),
         ]
 
         # Get initial params
@@ -425,6 +442,15 @@ def test_step_records_mastery_and_advances_phase():
         1: ["q_format_tags", "q_tag_content", "q_node_in_prompt", "q_node_format", "q_node_length"],
         2: ["q_chain_s2_refs_s1"],
     }
+    # scored_spans for all qualities (simple span covering first 10 chars)
+    _spans = {
+        "q_format_tags": [(0, 10)],
+        "q_tag_content": [(0, 10)],
+        "q_node_in_prompt": [(0, 10)],
+        "q_node_format": [(0, 10)],
+        "q_node_length": [(0, 10)],
+        "q_chain_s2_refs_s1": [(0, 10)],
+    }
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = _cfg()
         cfg.algorithm.step_qualities = _phase_sq
@@ -435,9 +461,17 @@ def test_step_records_mastery_and_advances_phase():
 
         gs = GameState(mastery_threshold=0.7)
 
+        # Mock tokenizer for span mapping
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode = lambda ids, **kw: "".join(f"t{i}" for i in ids)
+
         model = MockModel()
         trainer = QGRETrainer(
-            model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg, game_state=gs
+            model=model,
+            tokenizer=mock_tokenizer,
+            reward_fn=lambda *a: None,
+            config=cfg,
+            game_state=gs,
         )
         trainer.setup_optimizer()
 
@@ -458,6 +492,7 @@ def test_step_records_mastery_and_advances_phase():
                         "q_node_length": 0.88,
                         "q_chain_s2_refs_s1": 0.0,
                     },
+                    scored_spans=_spans,
                 ),
                 RewardResult(
                     reward=0.8,
@@ -469,6 +504,7 @@ def test_step_records_mastery_and_advances_phase():
                         "q_node_length": 0.82,
                         "q_chain_s2_refs_s1": 0.0,
                     },
+                    scored_spans=_spans,
                 ),
             ]
             metrics = trainer.step(batch, [tokens, tokens], rrs)
@@ -516,6 +552,7 @@ def test_step_uses_engine_phase_not_reward_phase():
 
 def test_length_penalty_applied_when_high_correctness():
     """Length penalty added when group correctness exceeds threshold."""
+    _spans = {"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]}
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = _cfg()
         cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
@@ -523,16 +560,25 @@ def test_length_penalty_applied_when_high_correctness():
         cfg.algorithm.length_penalty_coef = 0.1
         cfg.algorithm.length_penalty_threshold = 0.3
 
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode = lambda ids, **kw: "".join(f"t{i}" for i in ids)
+
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(
+            model=model, tokenizer=mock_tokenizer, reward_fn=lambda *a: None, config=cfg
+        )
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
         tokens = _make_tokens()
         # High rewards → correctness > threshold → length penalty applied
         rrs = [
-            RewardResult(reward=0.9, scores={"q_format_tags": 0.9, "q_tag_content": 0.9}),
-            RewardResult(reward=0.8, scores={"q_format_tags": 0.8, "q_tag_content": 0.8}),
+            RewardResult(
+                reward=0.9, scores={"q_format_tags": 0.9, "q_tag_content": 0.9}, scored_spans=_spans
+            ),
+            RewardResult(
+                reward=0.8, scores={"q_format_tags": 0.8, "q_tag_content": 0.8}, scored_spans=_spans
+            ),
         ]
         metrics = trainer.step(batch, [tokens, tokens], rrs)
         assert "length_penalty" in metrics, (
@@ -542,6 +588,7 @@ def test_length_penalty_applied_when_high_correctness():
 
 def test_length_penalty_skipped_when_low_correctness():
     """No length penalty when group correctness is below threshold."""
+    _spans = {"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]}
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = _cfg()
         cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
@@ -549,16 +596,25 @@ def test_length_penalty_skipped_when_low_correctness():
         cfg.algorithm.length_penalty_coef = 0.1
         cfg.algorithm.length_penalty_threshold = 0.9
 
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode = lambda ids, **kw: "".join(f"t{i}" for i in ids)
+
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(
+            model=model, tokenizer=mock_tokenizer, reward_fn=lambda *a: None, config=cfg
+        )
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
         tokens = _make_tokens()
         # Low rewards → correctness < threshold → no length penalty
         rrs = [
-            RewardResult(reward=0.2, scores={"q_format_tags": 0.2, "q_tag_content": 0.1}),
-            RewardResult(reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}),
+            RewardResult(
+                reward=0.2, scores={"q_format_tags": 0.2, "q_tag_content": 0.1}, scored_spans=_spans
+            ),
+            RewardResult(
+                reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}, scored_spans=_spans
+            ),
         ]
         metrics = trainer.step(batch, [tokens, tokens], rrs)
         assert "length_penalty" not in metrics, (
@@ -604,20 +660,30 @@ def test_kl_penalty_zero_when_disabled():
 
 def test_neg_logprob_mean_is_metric_only():
     """neg_logprob_mean is in metrics but NOT part of loss gradient."""
+    _spans = {"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]}
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = _cfg()
         cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
         cfg.logging.checkpoint_dir = str(Path(tmpdir) / "ckpt")
 
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode = lambda ids, **kw: "".join(f"t{i}" for i in ids)
+
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(
+            model=model, tokenizer=mock_tokenizer, reward_fn=lambda *a: None, config=cfg
+        )
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
         tokens = _make_tokens()
         rrs = [
-            RewardResult(reward=0.8, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}),
-            RewardResult(reward=0.3, scores={"q_format_tags": 0.5, "q_tag_content": 0.2}),
+            RewardResult(
+                reward=0.8, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}, scored_spans=_spans
+            ),
+            RewardResult(
+                reward=0.3, scores={"q_format_tags": 0.5, "q_tag_content": 0.2}, scored_spans=_spans
+            ),
         ]
         metrics = trainer.step(batch, [tokens, tokens], rrs)
         assert "neg_logprob_mean" in metrics, "neg_logprob_mean should be in metrics"
@@ -630,6 +696,7 @@ def test_neg_logprob_mean_is_metric_only():
 
 def test_completion_log_is_decoded_text():
     """Logged completion contains readable text, not int list."""
+    _spans = {"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]}
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = _cfg()
         cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
@@ -651,8 +718,12 @@ def test_completion_log_is_decoded_text():
         batch = _make_batch(n_completions=2)
         tokens = _make_tokens()
         rrs = [
-            RewardResult(reward=0.9, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}),
-            RewardResult(reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}),
+            RewardResult(
+                reward=0.9, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}, scored_spans=_spans
+            ),
+            RewardResult(
+                reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}, scored_spans=_spans
+            ),
         ]
 
         # Capture what the completion logger receives
@@ -678,6 +749,7 @@ def test_completion_log_is_decoded_text():
 
 def test_gradient_accumulation_loss_accumulated():
     """Loss metric reflects accumulated total across gradient_accumulation_steps."""
+    _spans = {"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]}
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = _cfg()
         cfg.logging.completion_dir = str(Path(tmpdir) / "comp")
@@ -687,15 +759,24 @@ def test_gradient_accumulation_loss_accumulated():
         cfg.algorithm.mode = "grpo"
         cfg.algorithm.grpo.n = 2  # Match n_completions
 
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode = lambda ids, **kw: "".join(f"t{i}" for i in ids)
+
         model = MockModel()
-        trainer = QGRETrainer(model=model, tokenizer=None, reward_fn=lambda *a: None, config=cfg)
+        trainer = QGRETrainer(
+            model=model, tokenizer=mock_tokenizer, reward_fn=lambda *a: None, config=cfg
+        )
         trainer.setup_optimizer()
 
         batch = _make_batch(n_completions=2)
         tokens = _make_tokens()
         rrs = [
-            RewardResult(reward=0.9, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}),
-            RewardResult(reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}),
+            RewardResult(
+                reward=0.9, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}, scored_spans=_spans
+            ),
+            RewardResult(
+                reward=0.1, scores={"q_format_tags": 0.1, "q_tag_content": 0.1}, scored_spans=_spans
+            ),
         ]
 
         # Step 0: accumulates, no optimizer step
@@ -716,18 +797,25 @@ def test_gradient_accumulation_loss_accumulated():
 
 def test_fused_logprobs_path():
     """Fused logprobs path (use_fused_logprobs=True) produces finite loss."""
+    _spans = {"q_format_tags": [(0, 10)], "q_tag_content": [(0, 10)]}
     with tempfile.TemporaryDirectory() as tmpdir:
         cfg = _cfg()
         cfg.algorithm.use_fused_logprobs = True
         cfg.logging.completion_dir = str(Path(tmpdir) / "completions")
         cfg.logging.checkpoint_dir = str(Path(tmpdir) / "checkpoints")
 
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.decode = lambda ids, **kw: "".join(f"t{i}" for i in ids)
+
         model = MockModel()
         trainer = QGRETrainer(
             model=model,
-            tokenizer=None,
+            tokenizer=mock_tokenizer,
             reward_fn=lambda *a, **k: RewardResult(
-                reward=0.5, scores={"q_format_tags": 1.0, "q_tag_content": 1.0}, phase=1
+                reward=0.5,
+                scores={"q_format_tags": 1.0, "q_tag_content": 1.0},
+                phase=1,
+                scored_spans=_spans,
             ),
             config=cfg,
         )
@@ -736,8 +824,18 @@ def test_fused_logprobs_path():
         batch = _make_batch(n_completions=2)
         tokens = _make_tokens()
         rrs = [
-            RewardResult(reward=0.8, scores={"q_format_tags": 1.0, "q_tag_content": 0.9}, phase=1),
-            RewardResult(reward=0.3, scores={"q_format_tags": 0.5, "q_tag_content": 0.2}, phase=1),
+            RewardResult(
+                reward=0.8,
+                scores={"q_format_tags": 1.0, "q_tag_content": 0.9},
+                phase=1,
+                scored_spans=_spans,
+            ),
+            RewardResult(
+                reward=0.3,
+                scores={"q_format_tags": 0.5, "q_tag_content": 0.2},
+                phase=1,
+                scored_spans=_spans,
+            ),
         ]
 
         metrics = trainer.step(batch, [tokens, tokens], rrs)

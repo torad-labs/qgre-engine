@@ -7,13 +7,13 @@ model:
   lora_alpha: 64
   load_in_4bit: true
   fast_inference: true
-  gpu_memory_utilization: 0.25        # More KV cache headroom for faster generation
+  gpu_memory_utilization: 0.18        # Minimal viable KV cache for 4 sequences
   weight_sync_strategy: merge         # Merge LoRA → base pre-generate, unmerge post-generate
                                       # Eliminates ~1.4 GB vLLM weight duplication + LoRA buffer
   pad_token: "<|fim_pad|>"      # Must NOT be EOS, stop token, or vision-reserved
   pad_token_id: 151662          # Qwen3 fim_pad — vision_pad blocked by Unsloth for text models
   lora_target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]  # Qwen3/LLaMA
-  modules_to_save: [lm_head, embed_tokens]
+  modules_to_save: [lm_head]  # embed_tokens removed — fim_pad is pre-trained, saves ~1.2 GB
 
 data:
   train_files:
