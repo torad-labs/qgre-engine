@@ -654,7 +654,7 @@ class TestLatex2SympyParsing:
         """latex2sympy handles \\frac{}{} natively."""
         import sympy as sp
 
-        from examples.hamiltonian.reward_fn import _parse_math
+        from qgre.expression import parse_math as _parse_math
 
         result = _parse_math(r"\frac{p^2}{6}")
         assert result is not None
@@ -665,7 +665,7 @@ class TestLatex2SympyParsing:
         """Nested fractions: \\frac{p^2}{2m} where m is a symbol."""
         import sympy as sp
 
-        from examples.hamiltonian.reward_fn import _parse_math
+        from qgre.expression import parse_math as _parse_math
 
         result = _parse_math(r"\frac{p^2}{2m}")
         assert result is not None
@@ -675,7 +675,7 @@ class TestLatex2SympyParsing:
     def test_parse_math_frac_variables(self):
         """\\frac{dx}{dt} parses to something involving x and t."""
 
-        from examples.hamiltonian.reward_fn import _parse_math
+        from qgre.expression import parse_math as _parse_math
 
         result = _parse_math(r"\frac{dx}{dt}")
         assert result is not None
@@ -689,7 +689,7 @@ class TestLatex2SympyParsing:
         """Plain algebra without LaTeX parses via sympify fallback."""
         import sympy as sp
 
-        from examples.hamiltonian.reward_fn import _parse_math
+        from qgre.expression import parse_math as _parse_math
 
         result = _parse_math("p**2/6 + 3*x**2")
         assert result is not None
@@ -700,7 +700,7 @@ class TestLatex2SympyParsing:
         """Degree notation \\sin(60^\\circ) → sin(π/3)."""
         import sympy as sp
 
-        from examples.hamiltonian.reward_fn import _parse_math
+        from qgre.expression import parse_math as _parse_math
 
         result = _parse_math(r"\sin(60^\circ)")
         assert result is not None
@@ -746,7 +746,7 @@ class TestLatex2SympyParsing:
 
     def test_parse_math_rejects_chained_equality(self):
         """Chained equality 'T = p²/2m = p²/6' must not crash — returns None."""
-        from examples.hamiltonian.reward_fn import _parse_math
+        from qgre.expression import parse_math as _parse_math
 
         # latex2sympy returns And(Eq(...), Eq(...)) for these — not sp.Expr
         assert _parse_math(r"T = \frac{p^2}{2m} = \frac{p^2}{6}") is None

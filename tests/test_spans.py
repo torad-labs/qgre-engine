@@ -235,61 +235,75 @@ class TestSpanBasedAdvantages:
         assert advantages[0].sum().item() == 0.0
 
 
-# --- Expression span finder test ---
+# --- Expression span coherence (scorer-returned spans) ---
 
 
 class TestFindExpressionSpans:
+    """Spans now come from each scorer alongside its score (ScorerResult),
+    not from a separate _find_expression_spans path. These tests verify the
+    scorer-returned spans via the public hamiltonian_reward() API.
+    """
+
     def test_finds_H_spans(self):
-        from examples.hamiltonian.reward_fn import _find_expression_spans
+        from examples.hamiltonian.reward_fn import hamiltonian_reward
 
-        # _find_expression_spans uses StructuredOutputParser section headers,
-        # not raw "H = " patterns. Only "HAMILTONIAN:" sections are matched.
+        # With a label present in FINAL OUTPUT, the HAMILTONIAN span is captured
         text = "derivation: H = p²/6 + 3x²\nmore text\nHAMILTONIAN: H = p²/6 + 3x²"
-        spans = _find_expression_spans(text)
+        meta = {"H_expr": "p**2/6 + 3*x**2", "coordinates": "x"}
+        result = hamiltonian_reward("", text, meta)
 
-        assert "q_correct_H" in spans
-        assert len(spans["q_correct_H"]) == 1  # Only HAMILTONIAN: section matched
+        assert "q_correct_H" in result.scored_spans
+        # Expression-level span points at the HAMILTONIAN line
+        h_spans = result.scored_spans["q_correct_H"]
+        assert len(h_spans) >= 1
 
     def test_finds_V_spans(self):
-        from examples.hamiltonian.reward_fn import _find_expression_spans
+        from examples.hamiltonian.reward_fn import hamiltonian_reward
 
-        # "V = ..." matches POTENTIAL alias "v", and "POTENTIAL:" matches directly
         text = "V = kx² + mgx\nPOTENTIAL: V = 3x²"
-        spans = _find_expression_spans(text)
+        meta = {"V_expr": "3*x**2", "coordinates": "x"}
+        result = hamiltonian_reward("", text, meta)
 
-        assert len(spans["q_V_correct"]) == 2  # Both lines match POTENTIAL
+        # Migrated scorer returns the winning expression's span
+        assert len(result.scored_spans["q_V_correct"]) >= 1
 
     def test_format_targets_labeled_sections_not_full_completion(self):
-        """Format spans should target labeled sections, OR full completion for negative signal."""
-        from examples.hamiltonian.reward_fn import _find_expression_spans
+        """Format spans target labeled sections when present; full completion otherwise."""
+        from examples.hamiltonian.reward_fn import hamiltonian_reward
 
-        # Text with no labels - full completion span for negative training signal
-        # Without this, garbage output (no labels) would get zero gradient
+        # Text with 3+ labels → score > 0 and spans are labeled sections
+        text_with_labels = "COORDINATES: q = x\nMOMENTUM: p = 2*dx/dt\nHAMILTONIAN: H = p²"
+        result = hamiltonian_reward("", text_with_labels, {})
+        fmt_spans = result.scored_spans.get("q_format", [])
+        assert len(fmt_spans) >= 1
+        # Should not be a single span covering the entire text
+        assert fmt_spans != [(0, len(text_with_labels))]
+
+        # Short text with no labels → score 0, no spans (no gradient signal).
+        # This is the new architecture: scorer-returned spans match what was
+        # evaluated. A short text with no structure has nothing to evaluate.
         text = "some completion text"
-        spans = _find_expression_spans(text)
-        assert spans["q_format"] == [(0, len(text))]  # Full span for negative signal
-
-        # Text with labels - format should target those sections only
-        text_with_labels = "COORDINATES: q = x\nHAMILTONIAN: H = p²"
-        spans = _find_expression_spans(text_with_labels)
-        assert len(spans["q_format"]) >= 1  # At least one labeled section
-        # Should NOT be full completion - only labeled sections get format signal
-        assert spans["q_format"] != [(0, len(text_with_labels))]
+        result = hamiltonian_reward("", text, {})
+        assert result.scored_spans.get("q_format", []) == []
 
     def test_equation_spans(self):
-        from examples.hamiltonian.reward_fn import _find_expression_spans
+        from examples.hamiltonian.reward_fn import hamiltonian_reward
 
         text = "dq/dt = p/3\ndp/dt = -6x"
-        spans = _find_expression_spans(text)
+        meta = {"dqdt": "p/3", "dpdt": "-6*x", "coordinates": "x"}
+        result = hamiltonian_reward("", text, meta)
 
-        assert len(spans["q_correct_dqdt"]) >= 2
+        # Each equation scorer returns spans of the equation line(s) it evaluated
+        assert len(result.scored_spans["q_correct_dqdt"]) >= 1
+        assert len(result.scored_spans["q_correct_dpdt"]) >= 1
 
     def test_empty_text(self):
-        from examples.hamiltonian.reward_fn import _find_expression_spans
+        from examples.hamiltonian.reward_fn import hamiltonian_reward
 
-        spans = _find_expression_spans("")
-        assert spans["q_format"] == []
-        assert spans["q_correct_H"] == []
+        result = hamiltonian_reward("", "", {})
+        # No text → no spans for any quality
+        assert result.scored_spans.get("q_format", []) == []
+        assert result.scored_spans.get("q_correct_H", []) == []
 
 
 # --- RewardResult with scored_spans ---

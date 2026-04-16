@@ -288,6 +288,21 @@ ignore = [
     "F823",    # False positive - warnings is imported at module level
     "ANN001",  # critic param is VPRMCritic (complex typing)
 ]
+"qgre/expression.py" = [
+    "N806",    # Physics variable names (T_sym, H_sym, V_sym — Hamiltonian convention)
+    "BLE001",  # Broad exception catch intentional for sympy (raises many unrelated types)
+    "ANN001",  # signal.signal handler params (signum, frame) typed by Python stdlib
+    "ANN202",  # Private closures (get_terms) don't need return annotations
+    "RET504",  # Assignment-before-return ok for readability in scoring fallbacks
+    "PERF403", # Manual dict comprehension ok for sympy conversions
+    "RUF001",  # Ambiguous Unicode ok (×, ·, Greek letters) in physics normalization
+]
+"qgre/reward_parsing.py" = [
+    "ANN001",  # re.sub callback `match` param typed by Python stdlib
+]
+"qgre/curriculum.py" = [
+    "ANN001",  # advantage_estimator and dataloader are trainer internals (avoid circular import)
+]
 "qgre/lora_pro.py" = [
     "N806",    # Linear-algebra notation (A, B, C, X for matrices — Sylvester equation)
     "N803",    # Linear-algebra argument names (A, B for LoRA factors)
@@ -376,6 +391,11 @@ exclude = [
     # triton_logprobs.py uses optional triton import with conditional code
     # that pyright cannot analyze correctly (HAS_TRITON guard pattern)
     "qgre/triton_logprobs.py",
+    # expression.py uses sympy extensively; sympy's type stubs are incomplete
+    # (dict-form .subs(), sympify(locals=), float(Basic), Symbol.name) and
+    # wrapping every call in cast() or # type: ignore would be pervasive noise.
+    # Module has comprehensive test coverage (tests/test_expression.py).
+    "qgre/expression.py",
 ]
 
 # Auto-discover the project venv so bare `pyright` (e.g. from pre-commit) sees
